@@ -190,10 +190,9 @@ editor.addEventListener('input', () => {
   scheduleRender();
 });
 
-// 저장하지 않은 채 창을 닫으려 하면 경고 및 창 닫힐 때 백엔드 서버 자동 종료
+// 저장하지 않은 채 창을 닫으려 하면 경고
 window.addEventListener('beforeunload', (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ''; }
-  navigator.sendBeacon('/api/exit');
 });
 
 // 외부 .md 파일 드래그 앤 드롭 지원
