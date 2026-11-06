@@ -483,7 +483,7 @@ fn parse_table_aligns(line: &str) -> Vec<Align> {
         .collect()
 }
 
-// 한 행을 '|' 기준으로 분리 (앞뒤 테두리 파이프 제거, \| 이스케이프 지원)
+// 한 행을 '|' 기준으로 분리 (앞뒤 테두리 파이프 제거, \| 이스케이프 및 코드 스팬 안의 | 보호 지원)
 fn split_table_row(line: &str) -> Vec<String> {
     let t = line.trim();
     let t = t.strip_prefix('|').unwrap_or(t);
@@ -492,15 +492,19 @@ fn split_table_row(line: &str) -> Vec<String> {
     let mut cells = Vec::new();
     let mut cur = String::new();
     let mut chars = t.chars().peekable();
+    let mut in_code = false;
     while let Some(c) = chars.next() {
-        if c == '\\' {
+        if c == '`' {
+            in_code = !in_code;
+            cur.push(c);
+        } else if c == '\\' {
             if chars.peek() == Some(&'|') {
                 cur.push('|');
                 chars.next();
                 continue;
             }
             cur.push('\\');
-        } else if c == '|' {
+        } else if c == '|' && !in_code {
             cells.push(std::mem::take(&mut cur));
         } else {
             cur.push(c);
@@ -539,6 +543,15 @@ mod tests {
         assert!(html.contains("<td style=\"text-align:left\">홍길동</td>"), "td 없음: {html}");
         // 표가 hr 로 오인되지 않아야 함
         assert!(!html.contains("<hr/>"), "구분행이 hr 로 잘못 처리됨");
+    }
+
+    #[test]
+    fn table_with_code_span_pipe() {
+        let md = "| 명령어 | 설명 |\n| --- | --- |\n| `a | b` | 파이프 테스트 |\n";
+        let html = to_html(md);
+        assert!(html.contains("<table>"), "table 태그 없음: {html}");
+        assert!(html.contains("<code>a | b</code>"), "코드 내 파이프 보존 실패: {html}");
+        assert!(html.contains("<td>파이프 테스트</td>"), "열 분리 실패: {html}");
     }
 
     #[test]

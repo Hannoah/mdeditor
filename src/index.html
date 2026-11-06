@@ -114,6 +114,7 @@ let currentFile = '';
 let renderTimer = null;
 let renderSeq = 0;      // 응답 순서가 뒤바뀌어도 최신 요청 결과만 반영
 let dirty = false;      // 저장하지 않은 변경 여부
+let isExternalDrop = false; // 외부 폴더에서 드롭된 파일 여부
 let isSyncingLeft = false;
 let isSyncingRight = false;
 
@@ -189,9 +190,36 @@ editor.addEventListener('input', () => {
   scheduleRender();
 });
 
-// 저장하지 않은 채 창을 닫으려 하면 경고
+// 저장하지 않은 채 창을 닫으려 하면 경고 및 창 닫힐 때 백엔드 서버 자동 종료
 window.addEventListener('beforeunload', (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ''; }
+  navigator.sendBeacon('/api/exit');
+});
+
+// 외부 .md 파일 드래그 앤 드롭 지원
+window.addEventListener('dragover', (e) => { e.preventDefault(); });
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer && e.dataTransfer.files[0];
+  if (file && (file.name.toLowerCase().endsWith('.md') || file.name.toLowerCase().endsWith('.markdown'))) {
+    if (!confirmDiscard()) return;
+    if (hasFile(file.name)) {
+      if (!confirm(`작업 폴더에 '${file.name}' 파일이 이미 존재합니다.\n외부 파일 내용으로 가져오시겠습니까? (저장하기 전까지 기존 작업 폴더의 파일은 유지됩니다)`)) {
+        return;
+      }
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      editor.value = ev.target.result;
+      currentFile = file.name;
+      isExternalDrop = true;
+      dirty = true;
+      updateStats();
+      render();
+      setStatus('외부 파일 가져옴: ' + file.name + ' (Ctrl+S 로 작업 폴더에 저장)');
+    };
+    reader.readAsText(file);
+  }
 });
 
 // 파일 목록 불러오기
@@ -222,6 +250,7 @@ async function openFile(file) {
     const data = await res.json();
     editor.value = data.content;
     currentFile = file;
+    isExternalDrop = false;
     dirty = false;
     fileList.value = file;
     updateStats();
@@ -250,6 +279,7 @@ document.getElementById('btnNew').addEventListener('click', async () => {
   const file = normName(name);
   if (hasFile(file)) { setStatus('이미 있는 파일이라 새로 만들지 않고 엽니다'); await openFile(file); return; }
   currentFile = file;
+  isExternalDrop = false;
   editor.value = '';
   dirty = false;
   fileList.value = '';
@@ -266,6 +296,9 @@ async function save() {
     const file = normName(name);
     if (hasFile(file) && !confirm(file + ' 은(는) 이미 있습니다. 덮어쓸까요?')) return;
     currentFile = file;
+    isExternalDrop = false;
+  } else if (isExternalDrop) {
+    if (hasFile(currentFile) && !confirm(`'${currentFile}' 은(는) 작업 폴더에 이미 존재합니다. 덮어쓸까요?`)) return;
   }
   try {
     const res = await fetch('/api/save?file=' + encodeURIComponent(currentFile), {
@@ -273,6 +306,7 @@ async function save() {
     });
     if (res.ok) {
       dirty = false;
+      isExternalDrop = false;
       setStatus('저장됨: ' + currentFile);
       await loadFileList();
     } else {
@@ -282,31 +316,62 @@ async function save() {
 }
 document.getElementById('btnSave').addEventListener('click', save);
 
-// Ctrl+S 단축키 (CapsLock 이어도 동작)
+// 단축키 (Ctrl+S: 저장, Ctrl+N: 새 파일)
 document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
+  if (e.ctrlKey || e.metaKey) {
+    if (e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
+    if (e.key.toLowerCase() === 'n') { e.preventDefault(); document.getElementById('btnNew').click(); }
+  }
 });
 
-// Tab / Shift+Tab 키 들여쓰기/내어쓰기
+// Tab / Shift+Tab 키 들여쓰기/내어쓰기 (단일 커서 및 다중 라인 블록 지원)
 editor.addEventListener('keydown', (e) => {
   if (e.key === 'Tab') {
     e.preventDefault();
-    if (e.shiftKey) {
-      // Shift+Tab: 커서 앞 2칸 이내 공백 제거
-      const start = editor.selectionStart;
-      const end = editor.selectionEnd;
-      if (start === end && start > 0) {
-        const val = editor.value;
-        const removeCount = val.slice(Math.max(0, start - 2), start) === '  ' ? 2 : (val[start - 1] === ' ' ? 1 : 0);
-        if (removeCount > 0) {
-          editor.setRangeText('', start - removeCount, start, 'end');
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    const val = editor.value;
+
+    if (start === end) {
+      if (e.shiftKey) {
+        // Shift+Tab: 커서 앞 2칸 이내 공백 제거
+        if (start > 0) {
+          const removeCount = val.slice(Math.max(0, start - 2), start) === '  ' ? 2 : (val[start - 1] === ' ' ? 1 : 0);
+          if (removeCount > 0) {
+            editor.setRangeText('', start - removeCount, start, 'end');
+            editor.dispatchEvent(new Event('input'));
+          }
+        }
+      } else {
+        // Tab: 2칸 공백 들여쓰기
+        if (!document.execCommand('insertText', false, '  ')) {
+          editor.setRangeText('  ', start, end, 'end');
           editor.dispatchEvent(new Event('input'));
         }
       }
     } else {
-      // Tab: 2칸 공백 들여쓰기
-      if (!document.execCommand('insertText', false, '  ')) {
-        editor.setRangeText('  ', editor.selectionStart, editor.selectionEnd, 'end');
+      // 다중 라인 블록 들여쓰기 / 내어쓰기
+      const lineStart = val.lastIndexOf('\n', start - 1) + 1;
+      const lineEnd = val.indexOf('\n', end);
+      const selEnd = lineEnd === -1 ? val.length : lineEnd;
+      const selectedBlock = val.slice(lineStart, selEnd);
+      const lines = selectedBlock.split('\n');
+
+      if (e.shiftKey) {
+        // 내어쓰기: 각 줄 시작에서 최대 2칸 공백 제거
+        const newLines = lines.map(line => {
+          if (line.startsWith('  ')) return line.slice(2);
+          if (line.startsWith(' ')) return line.slice(1);
+          return line;
+        });
+        const replacement = newLines.join('\n');
+        editor.setRangeText(replacement, lineStart, selEnd, 'select');
+        editor.dispatchEvent(new Event('input'));
+      } else {
+        // 들여쓰기: 각 줄 시작에 2칸 공백 추가
+        const newLines = lines.map(line => '  ' + line);
+        const replacement = newLines.join('\n');
+        editor.setRangeText(replacement, lineStart, selEnd, 'select');
         editor.dispatchEvent(new Event('input'));
       }
     }

@@ -1,10 +1,12 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 // mdeditor - 제로 의존성 Markdown 편집기 & 미리보기 서비스
 // 표준 라이브러리(std)만 사용하여 최대한 가볍게 구성했습니다.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +23,7 @@ const MAX_CONN: usize = 64; // 동시 처리 연결 상한
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static EXIT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn main() {
     // 커맨드라인 인자 파싱: 연결 프로그램으로 실행 시 .md 파일 경로가 넘어옴
@@ -59,8 +62,8 @@ fn main() {
                 break;
             }
             Err(_) if fetch_info(&addr).as_deref() == Some(info.as_str()) => {
-                println!("[안내] 이 폴더를 서비스하는 mdeditor 가 이미 실행 중입니다. 브라우저를 엽니다.");
-                open_browser(&browser_url(&addr, &open_file));
+                println!("[안내] 이 폴더를 서비스하는 mdeditor 가 이미 실행 중입니다. 앱 창을 엽니다.");
+                open_app_window(&browser_url(&addr, &open_file));
                 return;
             }
             Err(_) => {}
@@ -74,20 +77,20 @@ fn main() {
 
     println!("================================================");
     println!(" mdeditor 가 실행되었습니다.");
-    println!(" 브라우저에서 http://{addr} 로 접속하세요.");
+    println!(" 앱 창: http://{addr}");
     println!(" 작업 폴더: {}", root.display());
     if let Some(name) = &open_file {
         println!(" 여는 파일: {name}");
     }
-    println!(" 종료: Ctrl + C");
+    println!(" 종료: 창을 닫거나 Ctrl + C");
     println!("================================================");
 
-    // 서버 기동 직후 브라우저 자동 열기 (별도 스레드에서 약간의 지연 후)
+    // 서버 기동 직후 앱 창 자동 열기 (별도 스레드에서 약간의 지연 후)
     {
         let url = browser_url(&addr, &open_file);
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(400));
-            open_browser(&url);
+            open_app_window(&url);
         });
     }
 
@@ -166,6 +169,11 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
         return send_json(&mut stream, 413, "Payload Too Large", r#"{"error":"본문이 너무 큽니다 (최대 10MB)"}"#);
     }
 
+    // exit 요청이 아닌 유효한 요청이 들어오면 대기 중인 자동 종료를 취소 (F5 새로고침 방어)
+    if !(req.method == "POST" && req.path == "/api/exit") {
+        EXIT_SEQ.fetch_add(1, Ordering::SeqCst);
+    }
+
     match (req.method.as_str(), req.path.as_str()) {
         // 메인 편집기 페이지
         ("GET", "/") => send_html(&mut stream, 200, "OK", INDEX_HTML),
@@ -218,6 +226,20 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
                 },
                 None => send_json(&mut stream, 400, "Bad Request", r#"{"error":"잘못된 파일명"}"#),
             }
+        }
+
+        // 창 닫을 때 백엔드 자동 종료 (F5 새로고침 시 즉시 종료되지 않도록 2초 유예 시간 부여)
+        ("POST", "/api/exit") => {
+            let _ = send_json(&mut stream, 200, "OK", r#"{"bye":true}"#);
+            let my_seq = EXIT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(2000));
+                // 2초 동안 새 요청(새로고침 등)이 발생하지 않았을 때만 실제로 프로세스 종료
+                if EXIT_SEQ.load(Ordering::SeqCst) == my_seq {
+                    std::process::exit(0);
+                }
+            });
+            return Ok(());
         }
 
         _ => send_html(&mut stream, 404, "Not Found", "<h1>404 Not Found</h1>"),
@@ -464,18 +486,55 @@ fn json_wrap(key: &str, value: &str) -> String {
     format!("{{\"{}\":\"{}\"}}", key, json_escape(value))
 }
 
-// ---------- 브라우저 열기 ----------
-fn open_browser(url: &str) {
+// ---------- 단독 앱 창 열기 (주소창/탭 없는 데스크톱 윈도우 모드) ----------
+fn open_app_window(url: &str) {
     if std::env::var_os("MDEDITOR_NO_BROWSER").is_some() {
         return; // 테스트/서버 전용 실행용
     }
     #[cfg(windows)]
-    let r = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    {
+        // 1순위: Microsoft Edge 단독 앱 모드 (Windows 10/11 기본 내장, 주소창/탭 없이 일반 데스크톱 창으로 실행)
+        let edge_candidates = [
+            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+        ];
+        for edge in edge_candidates {
+            if std::path::Path::new(edge).exists() {
+                if std::process::Command::new(edge)
+                    .args([&format!("--app={url}"), "--window-size=1200,760"])
+                    .spawn()
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+        }
+
+        // 2순위: Google Chrome 단독 앱 모드
+        let chrome_candidates = [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ];
+        for chrome in chrome_candidates {
+            if std::path::Path::new(chrome).exists() {
+                if std::process::Command::new(chrome)
+                    .args([&format!("--app={url}"), "--window-size=1200,760"])
+                    .spawn()
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+        }
+
+        // 3순위: 시스템 기본 브라우저 fallback
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    }
     #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open").arg(url).spawn();
+    let _ = std::process::Command::new("open").args(["-a", "Google Chrome", "--args", &format!("--app={url}")]).spawn()
+        .or_else(|_| std::process::Command::new("open").arg(url).spawn());
     #[cfg(all(unix, not(target_os = "macos")))]
-    let r = std::process::Command::new("xdg-open").arg(url).spawn();
-    let _ = r;
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 // URL 쿼리용 최소 퍼센트 인코딩 (안전 문자 외 인코딩)

@@ -1,9 +1,9 @@
 @echo off
 rem ============================================================
 rem  mdeditor launcher (shortcut substitute)
-rem  - double click : run server in this folder + open browser
+rem  - double click : run server in this folder + open app window
 rem  - drop a file  : open that .md file
-rem  stop: Ctrl + C in this window
+rem  stop: close the app window
 rem ============================================================
 set "EXE=%~dp0target\release\mdeditor.exe"
 if not exist "%EXE%" (
@@ -20,5 +20,5 @@ if not exist "%EXE%" (
 rem work folder = current folder when double-clicked from the project folder;
 rem when a file is passed, its parent folder is used.
 if "%~1"=="" cd /d "%~dp0"
-"%EXE%" %*
-pause
+start "" "%EXE%" %*
+exit /b 0
