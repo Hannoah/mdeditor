@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 // mdeditor - 제로 의존성 Markdown 편집기 & 미리보기 서비스
 // 표준 라이브러리(std)만 사용하여 최대한 가볍게 구성했습니다.
 
@@ -60,8 +62,8 @@ fn main() {
                 break;
             }
             Err(_) if fetch_info(&addr).as_deref() == Some(info.as_str()) => {
-                println!("[안내] 이 폴더를 서비스하는 mdeditor 가 이미 실행 중입니다. 브라우저를 엽니다.");
-                open_browser(&browser_url(&addr, &open_file));
+                println!("[안내] 이 폴더를 서비스하는 mdeditor 가 이미 실행 중입니다. 앱 창을 엽니다.");
+                open_app_window(&browser_url(&addr, &open_file));
                 return;
             }
             Err(_) => {}
@@ -75,20 +77,20 @@ fn main() {
 
     println!("================================================");
     println!(" mdeditor 가 실행되었습니다.");
-    println!(" 브라우저: http://{addr}");
+    println!(" 앱 창: http://{addr}");
     println!(" 작업 폴더: {}", root.display());
     if let Some(name) = &open_file {
         println!(" 여는 파일: {name}");
     }
-    println!(" 종료: 이 창을 닫거나 Ctrl + C");
+    println!(" 종료: 창을 닫거나 Ctrl + C");
     println!("================================================");
 
-    // 서버 기동 직후 브라우저 자동 열기 (별도 스레드에서 약간의 지연 후)
+    // 서버 기동 직후 독립 앱 창 자동 열기 (별도 스레드에서 약간의 지연 후)
     {
         let url = browser_url(&addr, &open_file);
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(400));
-            open_browser(&url);
+            thread::sleep(Duration::from_millis(300));
+            open_app_window(&url);
         });
     }
 
@@ -176,6 +178,9 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
         // 메인 편집기 페이지
         ("GET", "/") => send_html(&mut stream, 200, "OK", INDEX_HTML),
 
+        // 파비콘 / 앱 창 아이콘
+        ("GET", "/favicon.ico") => send_response(&mut stream, 200, "OK", "image/x-icon", APP_ICO),
+
         // 서버 식별 (두 번째 실행 시 중복 서버 판별용)
         ("GET", "/api/info") => send_json(&mut stream, 200, "OK", info),
 
@@ -226,6 +231,60 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
             }
         }
 
+        // 파일 삭제: /api/delete?file=foo.md
+        ("POST", "/api/delete") => {
+            let file = query_param(&req.query, "file").unwrap_or_default();
+            match safe_path(root, &file) {
+                Some(p) => {
+                    if p.exists() {
+                        match std::fs::remove_file(&p) {
+                            Ok(_) => send_json(&mut stream, 200, "OK", r#"{"ok":true}"#),
+                            Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
+                        }
+                    } else {
+                        send_json(&mut stream, 404, "Not Found", r#"{"error":"삭제할 파일이 존재하지 않습니다"}"#)
+                    }
+                }
+                None => send_json(&mut stream, 400, "Bad Request", r#"{"error":"잘못된 파일명"}"#),
+            }
+        }
+
+        // 파일 이름 변경: /api/rename?from=old.md&to=new.md
+        ("POST", "/api/rename") => {
+            let from = query_param(&req.query, "from").unwrap_or_default();
+            let to = query_param(&req.query, "to").unwrap_or_default();
+            match (safe_path(root, &from), safe_path(root, &to)) {
+                (Some(from_p), Some(to_p)) => {
+                    if !from_p.exists() {
+                        send_json(&mut stream, 404, "Not Found", r#"{"error":"원본 파일이 존재하지 않습니다"}"#)
+                    } else if to_p.exists() && from_p != to_p {
+                        send_json(&mut stream, 409, "Conflict", r#"{"error":"동일한 이름의 파일이 이미 존재합니다"}"#)
+                    } else {
+                        match std::fs::rename(&from_p, &to_p) {
+                            Ok(_) => send_json(&mut stream, 200, "OK", r#"{"ok":true}"#),
+                            Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
+                        }
+                    }
+                }
+                _ => send_json(&mut stream, 400, "Bad Request", r#"{"error":"잘못된 파일명"}"#),
+            }
+        }
+
+        // 로컬 애셋/미디어 안전 서빙: /api/raw?file=images/foo.png
+        ("GET", "/api/raw") => {
+            let file = query_param(&req.query, "file").unwrap_or_default();
+            match safe_asset_path(root, &file) {
+                Some(p) => match std::fs::read(&p) {
+                    Ok(bytes) => {
+                        let mime = content_type_for_path(&p);
+                        send_response(&mut stream, 200, "OK", mime, &bytes)
+                    }
+                    Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
+                },
+                None => send_json(&mut stream, 404, "Not Found", r#"{"error":"파일을 찾을 수 없거나 허용되지 않은 경로입니다"}"#),
+            }
+        }
+
         // 창 닫을 때 백엔드 자동 종료 (F5 새로고침 시 즉시 종료되지 않도록 2초 유예 시간 부여)
         ("POST", "/api/exit") => {
             let _ = send_json(&mut stream, 200, "OK", r#"{"bye":true}"#);
@@ -237,7 +296,7 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
                     std::process::exit(0);
                 }
             });
-            return Ok(());
+            Ok(())
         }
 
         _ => send_html(&mut stream, 404, "Not Found", "<h1>404 Not Found</h1>"),
@@ -371,6 +430,70 @@ fn safe_path(root: &Path, file: &str) -> Option<PathBuf> {
     }
 }
 
+// 로컬 이미지 및 문서 애셋 허용 확장자
+fn is_allowed_asset_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "ico" | "avif"
+            | "pdf" | "mp4" | "webm" | "mp3" | "wav" | "ogg" | "json" | "txt" | "csv"
+    )
+}
+
+// 로컬 애셋/미디어 안전 경로 확인 (root 내부의 상대 하위 경로 허용, 경로 탈출 및 상위 이동 차단)
+fn safe_asset_path(root: &Path, file: &str) -> Option<PathBuf> {
+    if file.is_empty() || file.contains(|c: char| c.is_control() || "<>:\"|?*".contains(c)) {
+        return None;
+    }
+    // Windows 드라이브 문자(C:), UNC(\\), ADS, 루트(/) 차단
+    if file.contains(':') || file.starts_with('\\') || file.starts_with('/') {
+        return None;
+    }
+    let p = Path::new(file);
+    for comp in p.components() {
+        match comp {
+            Component::Normal(_) => {}
+            _ => return None,
+        }
+    }
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !is_allowed_asset_ext(&ext) {
+        return None;
+    }
+    let full = root.join(p);
+    let canonical_full = full.canonicalize().ok()?;
+    let canonical_root = root.canonicalize().ok().unwrap_or_else(|| root.to_path_buf());
+    if !canonical_full.starts_with(&canonical_root) {
+        return None;
+    }
+    if !canonical_full.is_file() {
+        return None;
+    }
+    Some(canonical_full)
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "json" => "application/json",
+        "txt" | "log" | "csv" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 fn list_markdown_files(root: &Path) -> String {
     let mut names: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root) {
@@ -407,7 +530,7 @@ fn send_response(
     body: &[u8],
 ) -> std::io::Result<()> {
     let header = format!(
-        "HTTP/1.1 {code} {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {code} {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes())?;
@@ -484,11 +607,64 @@ fn json_wrap(key: &str, value: &str) -> String {
     format!("{{\"{}\":\"{}\"}}", key, json_escape(value))
 }
 
-// ---------- 브라우저 열기 ----------
-fn open_browser(url: &str) {
+// ---------- 단독 데스크톱 앱 창 열기 (주소창/탭 없는 데스크톱 윈도우 모드) ----------
+fn open_app_window(url: &str) {
     if std::env::var_os("MDEDITOR_NO_BROWSER").is_some() {
         return; // 테스트/서버 전용 실행용
     }
+
+    let force_browser = std::env::var_os("MDEDITOR_BROWSER").is_some();
+
+    #[cfg(windows)]
+    if !force_browser {
+        // 1순위: Microsoft Edge 단독 앱 창 모드 (Windows 10/11 기본 내장)
+        let edge_candidates = [
+            "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+        ];
+        for edge in edge_candidates {
+            if std::path::Path::new(edge).exists() {
+                if std::process::Command::new(edge)
+                    .args([&format!("--app={url}"), "--window-size=1280,820"])
+                    .spawn()
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+        }
+
+        // 2순위: Google Chrome / Brave 단독 앱 창 모드
+        let chrome_candidates = [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+        ];
+        for chrome in chrome_candidates {
+            if std::path::Path::new(chrome).exists() {
+                if std::process::Command::new(chrome)
+                    .args([&format!("--app={url}"), "--window-size=1280,820"])
+                    .spawn()
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if !force_browser {
+        if std::process::Command::new("open")
+            .args(["-a", "Google Chrome", "--args", &format!("--app={url}")])
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+
+    // fallback: 시스템 기본 브라우저
     #[cfg(windows)]
     let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
     #[cfg(target_os = "macos")]
@@ -512,6 +688,7 @@ fn url_encode(s: &str) -> String {
 }
 
 const INDEX_HTML: &str = include_str!("index.html");
+const APP_ICO: &[u8] = include_bytes!("../app.ico");
 
 #[cfg(test)]
 mod tests {
@@ -578,5 +755,42 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
         assert!(!dir.join("t.md.tmp").exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn safe_asset_path_security() {
+        let dir = std::env::temp_dir().join("mdeditor_test_assets");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let valid_img = sub.join("logo.png");
+        std::fs::write(&valid_img, b"fake png").unwrap();
+
+        let canonical_dir = dir.canonicalize().unwrap();
+        assert!(safe_asset_path(&canonical_dir, "sub/logo.png").is_some());
+
+        // 확장자 필터링 (허용되지 않은 파일 차단)
+        let exe_file = dir.join("evil.exe");
+        std::fs::write(&exe_file, b"executable").unwrap();
+        assert!(safe_asset_path(&canonical_dir, "evil.exe").is_none());
+
+        // 상위 이동(..) 탈출 차단
+        assert!(safe_asset_path(&canonical_dir, "../secret.png").is_none());
+        assert!(safe_asset_path(&canonical_dir, "sub/../../secret.png").is_none());
+
+        // Windows 드라이브/절대경로/ADS 차단
+        assert!(safe_asset_path(&canonical_dir, "C:\\logo.png").is_none());
+        assert!(safe_asset_path(&canonical_dir, "/logo.png").is_none());
+        assert!(safe_asset_path(&canonical_dir, "logo.png:stream").is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mime_type_detection() {
+        assert_eq!(content_type_for_path(Path::new("a.png")), "image/png");
+        assert_eq!(content_type_for_path(Path::new("a.jpg")), "image/jpeg");
+        assert_eq!(content_type_for_path(Path::new("a.svg")), "image/svg+xml");
+        assert_eq!(content_type_for_path(Path::new("a.pdf")), "application/pdf");
+        assert_eq!(content_type_for_path(Path::new("a.unknown")), "application/octet-stream");
     }
 }

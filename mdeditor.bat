@@ -20,5 +20,5 @@ if not exist "%EXE%" (
 rem work folder = current folder when double-clicked from the project folder;
 rem when a file is passed, its parent folder is used.
 if "%~1"=="" cd /d "%~dp0"
-"%EXE%" %*
-pause
+start "" "%EXE%" %*
+exit /b 0
