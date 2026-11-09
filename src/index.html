@@ -3,11 +3,11 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>mdeditor</title>
+<title>MDEditor</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico" />
 
-<!-- Pretendard Variable 웹폰트 -->
-<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" />
+<!-- KoPubWorld돋움 웹폰트 (인터페이스 기본) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/font-kopubworld@1.0.3/css/dotum.css" crossorigin="anonymous" />
 
 <!-- JetBrains Mono 코드 폰트 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -44,7 +44,7 @@
     --accent: #38bdf8;
     --accent-rgb: 56, 189, 248;
     --accent-hover: #0ea5e9;
-    --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #818cf8 100%);
+    --on-accent: #06283a;
     
     --code-bg: #0c1220;
     --code-header: #141c2e;
@@ -79,7 +79,7 @@
     --accent: #0284c7;
     --accent-rgb: 2, 132, 199;
     --accent-hover: #0369a1;
-    --accent-gradient: linear-gradient(135deg, #0284c7 0%, #6366f1 100%);
+    --on-accent: #ffffff;
     
     --code-bg: #f1f5f9;
     --code-header: #e2e8f0;
@@ -101,7 +101,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
-    font-family: "Pretendard Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: "KoPubWorld Dotum", -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", Roboto, sans-serif;
     background: var(--bg);
     color: var(--text);
     height: 100vh;
@@ -120,11 +120,15 @@
   ::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 999px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 
-  /* ---------- Modern Top App Bar ---------- */
+  /* ---------- Modern Top App Bar (항상 왼쪽 정렬, 단일행) ---------- */
   header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
     padding: 8px 16px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
@@ -132,22 +136,25 @@
     z-index: 30;
     backdrop-filter: blur(12px);
     gap: 12px;
+    white-space: nowrap;
   }
+  header::-webkit-scrollbar { display: none; }
 
   .header-left {
     display: flex;
     align-items: center;
     gap: 10px;
     min-width: 0;
+    flex-shrink: 0;
   }
 
   .brand {
     display: flex;
     align-items: center;
-    gap: 7px;
-    font-weight: 700;
-    font-size: 14.5px;
-    letter-spacing: -0.02em;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0;
     color: var(--text);
     text-decoration: none;
   }
@@ -155,57 +162,15 @@
     width: 22px;
     height: 22px;
     border-radius: 6px;
-    background: var(--accent-gradient);
+    background: var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
     color: #fff;
-    box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.35);
   }
 
-  /* File Selector Dropdown with Modern Chevron */
-  .file-select-wrapper {
-    position: relative;
-    display: flex;
-    align-items: center;
-  }
-  select#fileList {
-    appearance: none;
-    background: var(--surface-elevated);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    padding: 5px 28px 5px 10px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    outline: none;
-    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
-    max-width: 200px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    overflow: hidden;
-  }
-  select#fileList:hover {
-    border-color: var(--border-hover);
-    background: var(--surface-hover);
-  }
-  select#fileList:focus {
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.2);
-  }
-  .file-select-wrapper::after {
-    content: '';
-    position: absolute;
-    right: 10px;
-    pointer-events: none;
-    width: 6px;
-    height: 6px;
-    border-right: 1.5px solid var(--text-muted);
-    border-bottom: 1.5px solid var(--text-muted);
-    transform: rotate(45deg);
-    margin-top: -2px;
-  }
+  /* 숨김 파일 선택기 (OS 열기 대화상자용) */
+  #filePicker { display: none; }
 
   /* Action Buttons */
   button {
@@ -213,7 +178,7 @@
     background: var(--surface-elevated);
     color: var(--text);
     border: 1px solid var(--border);
-    border-radius: 7px;
+    border-radius: 8px;
     padding: 5px 11px;
     font-size: 12.5px;
     font-weight: 500;
@@ -221,7 +186,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: background-color 0.15s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.15s cubic-bezier(0.22, 1, 0.36, 1);
     white-space: nowrap;
     line-height: 1.3;
   }
@@ -232,14 +197,12 @@
   button:active { transform: scale(0.98); }
   button.primary {
     background: var(--accent);
-    color: #ffffff;
+    color: var(--on-accent);
     font-weight: 600;
     border: none;
-    box-shadow: 0 2px 6px rgba(var(--accent-rgb), 0.3);
   }
   button.primary:hover {
     background: var(--accent-hover);
-    box-shadow: 0 3px 8px rgba(var(--accent-rgb), 0.45);
   }
   button.ghost {
     background: transparent;
@@ -249,19 +212,56 @@
     background: var(--surface-elevated);
     border-color: var(--border);
   }
-  button.danger:hover {
-    color: #ef4444;
-    border-color: rgba(239, 68, 68, 0.3);
-    background: rgba(239, 68, 68, 0.08);
-  }
   .btn-icon {
     padding: 5px 8px;
-    border-radius: 7px;
+    border-radius: 8px;
+  }
+  button svg, .toc-header svg, .modal-header svg {
+    width: 16px;
+    height: 16px;
+    stroke-width: 1.5;
   }
   .btn-group {
     display: inline-flex;
     align-items: center;
     gap: 3px;
+  }
+
+  /* ---------- Settings Dropdown Menu ---------- */
+  .menu-dropdown {
+    display: none;
+    position: fixed;
+    min-width: 190px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 4px;
+    z-index: 200;
+  }
+  .menu-dropdown.open { display: block; }
+  .menu-dropdown button {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    cursor: pointer;
+    text-align: left;
+    white-space: nowrap;
+  }
+  .menu-dropdown button:hover {
+    background: var(--surface-hover);
+  }
+  .menu-dropdown button svg {
+    flex-shrink: 0;
+    color: var(--text-muted);
   }
   .header-divider {
     width: 1px;
@@ -272,6 +272,12 @@
   }
 
   /* Center Segmented View Switcher (Pill Slider) */
+  .view-cluster {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
   .view-segmented {
     display: flex;
     background: var(--surface-elevated);
@@ -301,6 +307,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-shrink: 0;
   }
   .status-pill {
     display: inline-flex;
@@ -330,11 +337,6 @@
     top: -2px; left: -2px; right: -2px; bottom: -2px;
     border-radius: 50%;
     border: 1.5px solid #f59e0b;
-    animation: pulse-ring 1.8s infinite;
-  }
-  @keyframes pulse-ring {
-    0% { transform: scale(0.9); opacity: 1; }
-    100% { transform: scale(2.2); opacity: 0; }
   }
 
   .stat-pill {
@@ -343,25 +345,59 @@
     color: var(--text-faint);
   }
 
-  /* ---------- Modern Floating Toolbar ---------- */
+  /* ---------- Bottom Status Bar ---------- */
+  #statusbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 5px 16px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+    user-select: none;
+    white-space: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    flex-shrink: 0;
+  }
+  #statusbar::-webkit-scrollbar { display: none; }
+  #statusbar .stat-pill { margin-left: auto; }
+
+  /* ---------- Modern Floating Toolbar (항상 왼쪽 정렬, 단일행) ---------- */
   .editor-header-bar {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 6px 14px;
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    padding: 6px 10px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    gap: 8px;
+    gap: 6px;
     overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    flex-shrink: 0;
+    min-height: 38px;
+    white-space: nowrap;
   }
+  .editor-header-bar::-webkit-scrollbar { display: none; }
   .toolbar-group {
     display: inline-flex;
     align-items: center;
     background: var(--surface-elevated);
     padding: 2px;
-    border-radius: 7px;
+    border-radius: 8px;
     border: 1px solid var(--border);
     gap: 1px;
+    flex-shrink: 0;
+  }
+  .mono-glyph {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    font-weight: 600;
+    font-style: normal;
   }
   .tbtn {
     background: transparent;
@@ -376,17 +412,21 @@
     justify-content: center;
     min-width: 24px;
     height: 24px;
-    transition: all 0.12s ease;
+    transition: background-color 0.12s ease, color 0.12s ease;
   }
   .tbtn:hover {
     background: var(--surface-hover);
     color: var(--text);
   }
+  .tbtn:focus-visible, .btn-icon:focus-visible, .view-segmented button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
   .tbtn svg {
-    width: 14px;
-    height: 14px;
+    width: 16px;
+    height: 16px;
     stroke: currentColor;
-    stroke-width: 2;
+    stroke-width: 1.5;
     fill: none;
     stroke-linecap: round;
     stroke-linejoin: round;
@@ -430,11 +470,10 @@
     width: 2px; height: 36px;
     background: var(--border-hover);
     border-radius: 999px;
-    transition: all 0.15s;
+    transition: background-color 0.15s ease;
   }
   .divider:hover::after, .divider.active::after {
     background: var(--accent);
-    height: 54px;
   }
 
   /* Editor Canvas */
@@ -467,19 +506,20 @@
   #preview {
     width: 100%;
     max-width: 820px;
-    line-height: 1.8;
-    font-size: 15.5px;
+    line-height: 1.9;
+    font-size: 16px;
     color: var(--text);
   }
 
   /* ---------- Notion-Level Premium Typography & Markdown Styling ---------- */
   #preview h1, #preview h2, #preview h3, #preview h4 {
-    font-weight: 700;
     color: var(--text);
     line-height: 1.35;
     scroll-margin-top: 24px;
-    letter-spacing: -0.02em;
+    letter-spacing: 0;
   }
+  #preview h1, #preview h2 { font-weight: 700; }
+  #preview h3, #preview h4 { font-weight: 500; }
   #preview h1 {
     font-size: 2.1em;
     margin: 32px 0 16px;
@@ -571,8 +611,9 @@
   }
   .code-lang {
     font-family: "JetBrains Mono", monospace;
-    font-weight: 600;
-    letter-spacing: 0.5px;
+    font-weight: 500;
+    font-size: 12px;
+    letter-spacing: 0.02em;
     color: var(--text-muted);
   }
   .copy-code-btn {
@@ -583,11 +624,11 @@
     background: var(--surface);
     color: var(--text-muted);
     cursor: pointer;
-    transition: all 0.15s;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   }
   .copy-code-btn:hover {
     background: var(--accent);
-    color: #fff;
+    color: var(--on-accent);
     border-color: var(--accent);
   }
   .copy-code-btn.copied {
@@ -718,7 +759,7 @@
     border-radius: 8px;
     border: 1px solid var(--border);
     background: var(--surface);
-    transition: all 0.15s;
+    transition: border-color 0.15s ease;
   }
   details.notion-toggle:hover { border-color: var(--border-hover); }
   details.notion-toggle summary {
@@ -830,13 +871,13 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    transition: all 0.15s;
+    transition: color 0.15s ease, background-color 0.15s ease;
     margin-bottom: 2px;
   }
   .toc-item:hover { color: var(--accent); background: var(--surface-hover); }
   .toc-item.h1 { font-weight: 600; color: var(--text); }
-  .toc-item.h2 { padding-left: 18px; }
-  .toc-item.h3 { padding-left: 30px; font-size: 12px; }
+  .toc-item.h2 { padding-left: 24px; }
+  .toc-item.h3 { padding-left: 36px; font-size: 12px; }
 
   /* ---------- Raycast/Command-Palette Style Help Modal ---------- */
   .modal-overlay {
@@ -883,8 +924,7 @@
     margin: 16px 0 8px;
     color: var(--text);
     font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0;
     color: var(--text-muted);
   }
   .modal-body table {
@@ -906,17 +946,29 @@
     justify-content: flex-end;
   }
 
-  /* Responsive Mobile */
+  /* Responsive Mobile (헤더/툴바/상태바는 줄바꿈 없이 가로 스크롤 유지) */
   @media (max-width: 768px) {
     main { flex-direction: column; }
     .divider { width: 100%; height: 6px; cursor: row-resize; }
-    header { flex-wrap: wrap; gap: 8px; }
+    header { flex-wrap: nowrap; gap: 8px; }
+    #statusbar { padding: 5px 12px; }
+  }
+
+  /* Reduced Motion */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition: none !important;
+      animation: none !important;
+    }
+    #preview-container {
+      scroll-behavior: auto;
+    }
   }
 
   /* Print Styles */
   @media print {
     body { background: #fff !important; color: #111 !important; height: auto !important; overflow: visible !important; }
-    header, .divider, .pane:first-child, #tocDrawer, .modal-overlay, .editor-header-bar { display: none !important; }
+    header, #statusbar, .divider, .pane:first-child, #tocDrawer, .modal-overlay, .editor-header-bar { display: none !important; }
     main { display: block !important; overflow: visible !important; }
     #preview-container { padding: 0 !important; overflow: visible !important; }
     #preview { max-width: 100% !important; }
@@ -928,7 +980,7 @@
 <!-- Header -->
 <header>
   <div class="header-left">
-    <a href="#" class="brand" title="mdeditor 데스크톱 스튜디오">
+    <a href="#" class="brand" title="MDEditor 데스크톱 스튜디오">
       <div class="brand-icon">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M4 4v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8.342a2 2 0 0 0-.602-1.43l-4.44-4.342A2 2 0 0 0 13.56 2H6a2 2 0 0 0-2 2z"></path>
@@ -936,87 +988,76 @@
           <path d="m9 13 2 2 4-4"></path>
         </svg>
       </div>
-      <span>mdeditor</span>
+      <span>MDEditor</span>
     </a>
 
     <div class="header-divider"></div>
 
-    <div class="file-select-wrapper">
-      <select id="fileList" title="작업 파일 선택"><option value="">— 파일 선택 —</option></select>
-    </div>
-
-    <div class="btn-group">
+    <div class="btn-group" title="파일">
+      <button id="btnOpen" class="ghost btn-icon" title="불러오기 (.md 파일 열기)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+      </button>
+      <input type="file" id="filePicker" accept=".md,.markdown" />
       <button id="btnNew" class="ghost btn-icon" title="새 파일 (Ctrl+N)">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-        <span>새 파일</span>
       </button>
-      <button id="btnSave" class="primary" title="문서 저장 (Ctrl+S)">
+      <button id="btnSave" class="ghost btn-icon" title="문서 저장 (Ctrl+S)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
-        <span>저장</span>
-      </button>
-      <button id="btnRename" class="ghost btn-icon" title="파일 이름 변경">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-      </button>
-      <button id="btnDelete" class="ghost btn-icon danger" title="파일 삭제">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
       </button>
     </div>
   </div>
 
-  <!-- Center Segmented View -->
-  <div class="view-segmented" title="보기 모드 전환 (Alt+1 / Alt+2 / Alt+3)">
-    <button id="viewEditor">에디터</button>
-    <button id="viewSplit" class="active">분할</button>
-    <button id="viewPreview">미리보기</button>
+  <!-- Center View Controls -->
+  <div class="view-cluster">
+    <div class="view-segmented" title="보기 모드 전환 (Alt+1 / Alt+2 / Alt+3)">
+      <button id="viewEditor">에디터</button>
+      <button id="viewSplit" class="active">분할</button>
+      <button id="viewPreview">미리보기</button>
+    </div>
+    <button id="btnToggleToc" class="btn-icon ghost" title="목차 열기/닫기 (TOC)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+    </button>
   </div>
 
-  <!-- Right Actions & Status -->
+  <!-- Right Actions -->
   <div class="header-right">
-    <div class="status-pill" id="statusPill" title="문서 상태">
-      <div class="pulse-dot" id="pulseDot"></div>
-      <span id="status">준비됨</span>
-    </div>
-    <span class="stat-pill" id="stats">0자 · 1줄</span>
-
-    <div class="header-divider"></div>
-
-    <div class="btn-group">
-      <button id="btnToggleToc" class="btn-icon ghost" title="목차 열기/닫기 (TOC)">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
-      </button>
+    <div class="btn-group" title="공유 및 내보내기">
       <button id="btnPrint" class="btn-icon ghost" title="PDF 인쇄 (Ctrl+P)">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
       </button>
       <button id="btnExportHtml" class="btn-icon ghost" title="HTML 파일 다운로드">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
       </button>
-      <button id="btnCopyHtml" class="btn-icon ghost" title="서식 있는 HTML 클립보드 복사">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-      </button>
     </div>
 
     <div class="header-divider"></div>
 
     <div class="btn-group">
-      <button id="btnTheme" class="btn-icon ghost" title="테마 전환 (다크/라이트)">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
-      </button>
-      <button id="btnHelp" class="btn-icon ghost" title="도움말 (F1)">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
-      </button>
-      <button id="btnExit" class="btn-icon ghost danger" title="앱 종료">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+      <button id="btnSettings" class="btn-icon ghost" title="설정">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
       </button>
     </div>
   </div>
 </header>
+
+<!-- Settings Dropdown (헤더 overflow에 잘리지 않도록 헤더 밖에 배치, 화면 기준 고정) -->
+<div class="menu-dropdown" id="settingsMenu">
+  <button id="menuTheme" type="button" title="다크/라이트 테마 전환">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+    <span id="menuThemeLabel">라이트 모드로 전환</span>
+  </button>
+  <button id="menuHelp" type="button" title="도움말 (F1)">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+    <span>도움말</span>
+  </button>
+</div>
 
 <main>
   <!-- Left Editor Pane -->
   <div class="pane" id="paneEditor">
     <!-- Slim Toolbar Island -->
     <div class="editor-header-bar">
-      <div class="toolbar-group">
+      <div class="toolbar-group" title="텍스트 서식">
         <button type="button" class="tbtn" data-tool="bold" title="굵게 (Ctrl+B)"><b>B</b></button>
         <button type="button" class="tbtn" data-tool="italic" title="기울임 (Ctrl+I)"><i>I</i></button>
         <button type="button" class="tbtn" data-tool="strike" title="취소선 (~~텍스트~~)"><s>S</s></button>
@@ -1028,37 +1069,18 @@
         </button>
       </div>
 
-      <div class="toolbar-group">
-        <button type="button" class="tbtn" data-tool="h1" title="제목 1 (# 제목)" style="font-weight:700;">H1</button>
-        <button type="button" class="tbtn" data-tool="h2" title="제목 2 (## 제목)" style="font-weight:700;">H2</button>
-        <button type="button" class="tbtn" data-tool="h3" title="제목 3 (### 제목)" style="font-weight:700;">H3</button>
+      <div class="toolbar-group" title="제목">
+        <button type="button" class="tbtn" data-tool="h1" title="제목 1 (# 제목)">H1</button>
+        <button type="button" class="tbtn" data-tool="h2" title="제목 2 (## 제목)">H2</button>
+        <button type="button" class="tbtn" data-tool="h3" title="제목 3 (### 제목)">H3</button>
       </div>
 
-      <div class="toolbar-group">
+      <div class="toolbar-group" title="블록">
         <button type="button" class="tbtn" data-tool="quote" title="인용구 (> 내용)">
           <svg viewBox="0 0 24 24"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"></path><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"></path></svg>
         </button>
         <button type="button" class="tbtn" data-tool="callout" title="콜아웃 블록 (> [!NOTE])">
           <svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"></path><path d="M9 21h6"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="math" title="LaTeX 수식 ($$ 수식 $$)"><i>fx</i></button>
-        <button type="button" class="tbtn" data-tool="codeblock" title="코드 블록 (```언어)">
-          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="m9 10-2 2 2 2"></path><path d="m15 10 2 2-2 2"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="mermaid" title="Mermaid 다이어그램">
-          <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><line x1="20" y1="4" x2="20" y2="20"></line><line x1="6" y1="9" x2="6" y2="15"></line></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="table" title="표 삽입 (| 헤더 |)">
-          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="12" y1="3" x2="12" y2="21"></line></svg>
-        </button>
-      </div>
-
-      <div class="toolbar-group">
-        <button type="button" class="tbtn" data-tool="link" title="링크 (Ctrl+K)">
-          <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="image" title="로컬 이미지 삽입">
-          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
         </button>
         <button type="button" class="tbtn" data-tool="toggle" title="토글 접기 블록 (:::toggle)">
           <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>
@@ -1069,8 +1091,30 @@
         <button type="button" class="tbtn" data-tool="hr" title="구분선 (---)">
           <svg viewBox="0 0 24 24"><line x1="3" y1="12" x2="21" y2="12"></line></svg>
         </button>
+      </div>
+
+      <div class="toolbar-group" title="코드 및 수식">
+        <button type="button" class="tbtn" data-tool="codeblock" title="코드 블록 (```언어)">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="m9 10-2 2 2 2"></path><path d="m15 10 2 2-2 2"></path></svg>
+        </button>
+        <button type="button" class="tbtn" data-tool="math" title="LaTeX 수식 ($$ 수식 $$)"><span class="mono-glyph">fx</span></button>
+        <button type="button" class="tbtn" data-tool="mermaid" title="Mermaid 다이어그램">
+          <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><line x1="20" y1="4" x2="20" y2="20"></line><line x1="6" y1="9" x2="6" y2="15"></line></svg>
+        </button>
+      </div>
+
+      <div class="toolbar-group" title="삽입">
+        <button type="button" class="tbtn" data-tool="table" title="표 삽입 (| 헤더 |)">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="12" y1="3" x2="12" y2="21"></line></svg>
+        </button>
+        <button type="button" class="tbtn" data-tool="link" title="링크 (Ctrl+K)">
+          <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+        </button>
+        <button type="button" class="tbtn" data-tool="image" title="로컬 이미지 삽입">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
+        </button>
         <button type="button" class="tbtn" data-tool="footnote" title="각주 ([^1])">
-          <span style="font-size:10.5px; font-weight:600; font-family:monospace;">^fn</span>
+          <span class="mono-glyph">^fn</span>
         </button>
       </div>
     </div>
@@ -1100,6 +1144,15 @@
     </div>
   </div>
 </main>
+
+<!-- Bottom Status Bar -->
+<footer id="statusbar">
+  <div class="status-pill" id="statusPill" title="문서 상태">
+    <div class="pulse-dot" id="pulseDot"></div>
+    <span id="status">준비됨</span>
+  </div>
+  <span class="stat-pill" id="stats">0자 · 1줄</span>
+</footer>
 
 <!-- Help Modal -->
 <div class="modal-overlay" id="helpModal">
@@ -1146,11 +1199,13 @@
 <script>
 const editor = document.getElementById('editor');
 const preview = document.getElementById('preview');
-const fileList = document.getElementById('fileList');
+const filePicker = document.getElementById('filePicker');
 const statusEl = document.getElementById('status');
 const statsEl = document.getElementById('stats');
 const pulseDot = document.getElementById('pulseDot');
-const btnTheme = document.getElementById('btnTheme');
+const btnSettings = document.getElementById('btnSettings');
+const settingsMenu = document.getElementById('settingsMenu');
+const menuThemeLabel = document.getElementById('menuThemeLabel');
 const hljsTheme = document.getElementById('hljs-theme');
 const dragDivider = document.getElementById('dragDivider');
 const paneEditor = document.getElementById('paneEditor');
@@ -1162,16 +1217,20 @@ const helpModal = document.getElementById('helpModal');
 let currentFile = '';
 let renderTimer = null;
 let renderSeq = 0;
+let renderAbort = null;
 let dirty = false;
 let isExternalDrop = false;
 let isSyncingLeft = false;
 let isSyncingRight = false;
-let currentViewMode = localStorage.getItem('mdeditor-view-mode') || 'split';
+let currentViewMode = localStorage.getItem('mdeditor-view-mode') || 'preview';
 
 // ---------- 테마 전환 ----------
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('mdeditor-theme', theme);
+  if (menuThemeLabel) {
+    menuThemeLabel.textContent = theme === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환';
+  }
   if (hljsTheme) {
     hljsTheme.href = theme === 'dark'
       ? 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css'
@@ -1182,15 +1241,37 @@ function applyTheme(theme) {
       mermaid.initialize({
         startOnLoad: false,
         theme: theme === 'dark' ? 'dark' : 'default',
-        securityLevel: 'loose'
+        securityLevel: 'strict'
       });
     } catch (_) {}
   }
 }
-btnTheme.addEventListener('click', () => {
+function toggleTheme() {
   const current = document.documentElement.getAttribute('data-theme') || 'dark';
   applyTheme(current === 'dark' ? 'light' : 'dark');
   render();
+}
+function placeSettingsMenu() {
+  const r = btnSettings.getBoundingClientRect();
+  settingsMenu.style.top = (r.bottom + 6) + 'px';
+  settingsMenu.style.left = Math.max(8, r.right - settingsMenu.offsetWidth) + 'px';
+}
+btnSettings.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const willOpen = !settingsMenu.classList.contains('open');
+  settingsMenu.classList.toggle('open');
+  if (willOpen) placeSettingsMenu();
+});
+document.addEventListener('click', (e) => {
+  if (!settingsMenu.contains(e.target)) settingsMenu.classList.remove('open');
+});
+document.querySelector('header').addEventListener('scroll', () => {
+  if (settingsMenu.classList.contains('open')) placeSettingsMenu();
+});
+window.addEventListener('resize', () => settingsMenu.classList.remove('open'));
+document.getElementById('menuTheme').addEventListener('click', () => {
+  settingsMenu.classList.remove('open');
+  toggleTheme();
 });
 const savedTheme = localStorage.getItem('mdeditor-theme') || 'dark';
 applyTheme(savedTheme);
@@ -1198,7 +1279,7 @@ applyTheme(savedTheme);
 // ---------- 상태 및 통계 ----------
 function updateWindowTitle() {
   const name = currentFile || '무제 문서';
-  document.title = (dirty ? '● ' : '') + name + ' — mdeditor';
+  document.title = (dirty ? '● ' : '') + name + ' — MDEditor';
 }
 
 function setStatus(msg, isDirty = dirty) {
@@ -1525,8 +1606,10 @@ editor.addEventListener('keydown', (e) => {
 // ---------- 실시간 렌더링 ----------
 async function render() {
   const seq = ++renderSeq;
+  if (renderAbort) renderAbort.abort();
+  renderAbort = new AbortController();
   try {
-    const res = await fetch('/api/render', { method: 'POST', body: editor.value });
+    const res = await fetch('/api/render', { method: 'POST', body: editor.value, signal: renderAbort.signal });
     const data = await res.json();
     if (seq !== renderSeq) return;
     if (!res.ok) { setStatus('렌더 오류', dirty); return; }
@@ -1563,14 +1646,14 @@ async function render() {
         mermaid.initialize({
           startOnLoad: false,
           theme: theme === 'dark' ? 'dark' : 'default',
-          securityLevel: 'loose'
+          securityLevel: 'strict'
         });
         await mermaid.run({ querySelector: '.mermaid' });
       } catch (err) {}
     }
 
     updateToc();
-  } catch (e) { setStatus('렌더 오류', dirty); }
+  } catch (e) { if (e && e.name === 'AbortError') return; setStatus('렌더 오류', dirty); }
 }
 
 function scheduleRender() {
@@ -1593,7 +1676,7 @@ window.addEventListener('pagehide', () => {
   navigator.sendBeacon('/api/exit');
 });
 
-// ---------- 파일 작업 ----------
+// ---------- 파일 작업 (불러오기 / 새 파일 / 저장) ----------
 async function errorOf(res) {
   const d = await res.json().catch(() => ({}));
   return d.error || res.status;
@@ -1602,25 +1685,14 @@ function normName(n) {
   n = n.trim();
   return /\.(md|markdown)$/i.test(n) ? n : n + '.md';
 }
-function hasFile(name) {
-  return [...fileList.options].some(o => o.value.toLowerCase() === name.toLowerCase());
-}
 function confirmDiscard() {
   return !dirty || confirm('저장하지 않은 변경사항이 있습니다. 계속 진행할까요?');
 }
-
-async function loadFileList() {
+async function serverFileExists(name) {
   try {
-    const res = await fetch('/api/list');
-    const data = await res.json();
-    fileList.innerHTML = '<option value="">— 파일 선택 —</option>';
-    data.files.forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f; opt.textContent = f;
-      fileList.appendChild(opt);
-    });
-    fileList.value = currentFile;
-  } catch (e) { setStatus('목록 불러오기 실패', dirty); }
+    const res = await fetch('/api/load?file=' + encodeURIComponent(name));
+    return res.ok;
+  } catch (e) { return false; }
 }
 
 async function openFile(file) {
@@ -1629,7 +1701,6 @@ async function openFile(file) {
     const res = await fetch('/api/load?file=' + encodeURIComponent(file));
     if (!res.ok) {
       setStatus('열기 실패', false);
-      fileList.value = currentFile;
       return false;
     }
     const data = await res.json();
@@ -1637,24 +1708,35 @@ async function openFile(file) {
     currentFile = file;
     isExternalDrop = false;
     dirty = false;
-    fileList.value = file;
     updateStats();
     render();
     setStatus('열림: ' + file, false);
     return true;
   } catch (e) {
     setStatus('열기 실패', false);
-    fileList.value = currentFile;
     return false;
   }
 }
 
-fileList.addEventListener('change', () => {
-  const file = fileList.value;
-  if (!file) { fileList.value = currentFile; return; }
-  if (!confirmDiscard()) { fileList.value = currentFile; return; }
-  openFile(file);
-});
+function loadLocalFile(file) {
+  if (!file) return;
+  if (!confirmDiscard()) { filePicker.value = ''; return; }
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    editor.value = ev.target.result;
+    currentFile = file.name;
+    isExternalDrop = true;
+    dirty = true;
+    filePicker.value = '';
+    updateStats();
+    render();
+    setStatus('불러옴: ' + file.name, true);
+  };
+  reader.readAsText(file);
+}
+
+document.getElementById('btnOpen').addEventListener('click', () => filePicker.click());
+filePicker.addEventListener('change', () => loadLocalFile(filePicker.files[0]));
 
 // 새 파일
 document.getElementById('btnNew').addEventListener('click', async () => {
@@ -1662,12 +1744,11 @@ document.getElementById('btnNew').addEventListener('click', async () => {
   const name = prompt('새 파일 이름 (.md):', 'untitled.md');
   if (!name || !name.trim()) return;
   const file = normName(name);
-  if (hasFile(file)) { setStatus('기존 파일 열림', false); await openFile(file); return; }
+  if (await serverFileExists(file)) { setStatus('기존 파일 열림', false); await openFile(file); return; }
   currentFile = file;
   isExternalDrop = false;
   editor.value = '';
   dirty = false;
-  fileList.value = '';
   updateStats();
   render();
   setStatus('새 파일: ' + file, false);
@@ -1679,7 +1760,7 @@ async function save() {
     const name = prompt('저장할 파일 이름 (.md):', 'untitled.md');
     if (!name || !name.trim()) return;
     const file = normName(name);
-    if (hasFile(file) && !confirm(file + ' 파일이 이미 있습니다. 덮어쓸까요?')) return;
+    if (await serverFileExists(file) && !confirm(file + ' 파일이 이미 있습니다. 덮어쓸까요?')) return;
     currentFile = file;
     isExternalDrop = false;
   }
@@ -1691,7 +1772,6 @@ async function save() {
       dirty = false;
       isExternalDrop = false;
       setStatus('저장됨', false);
-      await loadFileList();
     } else {
       setStatus('저장 실패: ' + await errorOf(res), dirty);
     }
@@ -1699,62 +1779,25 @@ async function save() {
 }
 document.getElementById('btnSave').addEventListener('click', save);
 
-// 이름 변경
-document.getElementById('btnRename').addEventListener('click', async () => {
-  if (!currentFile) { alert('먼저 열려 있는 파일이 있어야 합니다.'); return; }
-  const newName = prompt('새로운 파일 이름을 입력하세요:', currentFile);
-  if (!newName || !newName.trim() || newName.trim() === currentFile) return;
-  const targetFile = normName(newName);
-  try {
-    const res = await fetch(`/api/rename?from=${encodeURIComponent(currentFile)}&to=${encodeURIComponent(targetFile)}`, {
-      method: 'POST'
-    });
-    if (res.ok) {
-      currentFile = targetFile;
-      await loadFileList();
-      fileList.value = targetFile;
-      setStatus('이름 변경 완료: ' + targetFile, dirty);
-    } else {
-      alert('이름 변경 실패: ' + await errorOf(res));
-    }
-  } catch (e) { alert('이름 변경 실패'); }
-});
-
-// 삭제
-document.getElementById('btnDelete').addEventListener('click', async () => {
-  if (!currentFile) { alert('삭제할 파일이 없습니다.'); return; }
-  if (!confirm(`'${currentFile}' 파일을 완전히 삭제할까요?`)) return;
-  try {
-    const res = await fetch(`/api/delete?file=${encodeURIComponent(currentFile)}`, { method: 'POST' });
-    if (res.ok) {
-      setStatus('파일 삭제됨', false);
-      currentFile = '';
-      editor.value = '';
-      dirty = false;
-      updateStats();
-      render();
-      await loadFileList();
-    } else {
-      alert('삭제 실패: ' + await errorOf(res));
-    }
-  } catch (e) { alert('삭제 실패'); }
-});
-
 // PDF 인쇄
 document.getElementById('btnPrint').addEventListener('click', () => { window.print(); });
 
 // HTML 다운로드
 document.getElementById('btnExportHtml').addEventListener('click', () => {
+  const clone = preview.cloneNode(true);
+  clone.querySelectorAll('.copy-code-btn').forEach(b => b.remove());
+  clone.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.setAttribute('disabled', ''));
   const htmlContent = `<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<title>${currentFile || '문서'} — mdeditor</title>
+<title>${currentFile || '문서'} — MDEditor</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/font-kopubworld@1.0.3/css/dotum.css">
 <style>
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.8; max-width: 820px; margin: 48px auto; padding: 0 24px; color: #0f172a; }
-  h1, h2, h3 { line-height: 1.35; letter-spacing: -0.02em; }
+  body { font-family: "KoPubWorld Dotum", -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", Roboto, sans-serif; line-height: 1.9; max-width: 820px; margin: 48px auto; padding: 0 24px; color: #0f172a; }
+  h1, h2, h3 { line-height: 1.35; }
   table { border-collapse: collapse; width: 100%; margin: 20px 0; }
   th, td { border: 1px solid #e2e8f0; padding: 10px 14px; text-align: left; }
   th { background: #f8fafc; font-weight: 600; }
@@ -1766,7 +1809,7 @@ document.getElementById('btnExportHtml').addEventListener('click', () => {
 </style>
 </head>
 <body>
-${preview.innerHTML}
+${clone.innerHTML}
 </body>
 </html>`;
   const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
@@ -1778,38 +1821,11 @@ ${preview.innerHTML}
   setStatus('HTML 내보내기 완료');
 });
 
-// HTML 클립보드 복사
-document.getElementById('btnCopyHtml').addEventListener('click', async () => {
-  try {
-    const htmlBlob = new Blob([preview.innerHTML], { type: 'text/html' });
-    const textBlob = new Blob([preview.innerText], { type: 'text/plain' });
-    await navigator.clipboard.write([
-      new ClipboardItem({ 'text/html': htmlBlob, 'text/plain': textBlob })
-    ]);
-    setStatus('✓ 서식 있는 HTML 클립보드 복사 완료');
-  } catch (err) {
-    navigator.clipboard.writeText(preview.innerHTML).then(() => {
-      setStatus('✓ HTML 소스 복사 완료');
-    });
-  }
-});
-
-// 서버 종료
-document.getElementById('btnExit').addEventListener('click', async () => {
-  if (confirm('mdeditor 백엔드 서버를 완전히 종료하시겠습니까?')) {
-    try {
-      await fetch('/api/exit', { method: 'POST' });
-      document.body.innerHTML = `
-        <div style="height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#090d16; color:#f8fafc;">
-          <h2 style="font-size:20px; font-weight:600; color:#38bdf8; margin-bottom:8px;">mdeditor 서버가 종료되었습니다</h2>
-          <p style="font-size:14px; color:#94a3b8;">창을 닫으셔도 좋습니다.</p>
-        </div>`;
-    } catch (_) {}
-  }
-});
-
 // 도움말 모달
-document.getElementById('btnHelp').addEventListener('click', () => helpModal.classList.add('open'));
+document.getElementById('menuHelp').addEventListener('click', () => {
+  settingsMenu.classList.remove('open');
+  helpModal.classList.add('open');
+});
 document.getElementById('btnCloseHelp').addEventListener('click', () => helpModal.classList.remove('open'));
 document.getElementById('btnConfirmHelp').addEventListener('click', () => helpModal.classList.remove('open'));
 helpModal.addEventListener('click', (e) => {
@@ -1833,6 +1849,9 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape' && helpModal.classList.contains('open')) {
     helpModal.classList.remove('open');
+  }
+  if (e.key === 'Escape') {
+    settingsMenu.classList.remove('open');
   }
 });
 
@@ -1858,23 +1877,23 @@ window.addEventListener('drop', (e) => {
 });
 
 // 웰컴 데모 문서
-const WELCOME_DOC = `# mdeditor (Modern Studio)
+const WELCOME_DOC = `# MDEditor
 
-2026 트렌드의 **초경량 데스크톱 Markdown 스튜디오**입니다.
-*Linear / Raycast / Notion* 감성의 정제된 모노크롬 디자인 시스템과 반응형 레이아웃을 제공합니다.
+폴더 하나를 작업실 삼아 Markdown을 쓰고 바로 보는 로컬 에디터입니다.
+왼쪽에 쓰고 오른쪽에서 확인합니다.
 
 ---
 
-### 콜아웃 블록 (Callouts)
+### 콜아웃 블록
 
 > [!NOTE]
-> **중요 안내**: GitHub Alert 및 Notion 규격 콜아웃 블록을 완벽하게 렌더링합니다.
+> **참고**: GitHub Alert와 Notion 규격의 콜아웃을 보여줍니다.
 
-> [!TIP] 생산성 단축키
-> ==형광펜 하이라이트==와 [[Ctrl]] + [[S]] 단축키를 함께 활용해 보세요.
+> [!TIP] 단축키
+> ==형광펜==과 [[Ctrl]] + [[S]]를 함께 써 보세요.
 
-> [!WARNING] 실시간 동기화
-> 파일 수정 시 에디터 상태가 상단 인디케이터에 즉시 반영됩니다.
+> [!WARNING] 저장 상태
+> 파일을 고치면 상단 표시가 바로 바뀝니다.
 
 ---
 
@@ -1890,13 +1909,13 @@ graph TD
 
 ---
 
-### LaTeX 수식 지원 (Math)
+### LaTeX 수식
 
-오일러의 공식:
+오일러 등식:
 $$e^{i\pi} + 1 = 0$$
 
-피타고라스 정리 $a^2 + b^2 = c^2$ 및 질량-에너지 동등성 $E = mc^2$.
-화학식 윗첨자: $x^2^ + y^2^$.
+인라인 수식도 됩니다: $a^2 + b^2 = c^2$.
+윗첨자도 쓸 수 있습니다: x^2^ + y^2^.
 
 ---
 
@@ -1909,34 +1928,34 @@ $$e^{i\pi} + 1 = 0$$
 
 ---
 
-### 코드 블록 & 복사 (Code Highlighting)
+### 코드 블록
 
 \`\`\`rust
 fn main() {
-    println!("Hello, Modern Studio Markdown Editor in Rust!");
+    println!("Hello, MDEditor!");
 }
 \`\`\`
 
 ---
 
-### 인터랙티브 할 일 목록 (Interactive To-Do)
-*미리보기 창에서 체크박스를 직접 클릭해 보세요! 원본 에디터와 실시간 동기화됩니다.*
+### 할 일 목록
 
-- [x] mdeditor 실행하기
-- [ ] 체크박스 직접 눌러보기
-- [ ] 멋진 문서 작성 완료하기
+미리보기에서 체크하면 원본 텍스트도 함께 바뀝니다.
+
+- [x] MDEditor 실행하기
+- [ ] 첫 문서 작성하기
+- [ ] 단축키 익히기
 
 ---
 
-### 각주 (Footnotes)
+### 각주
 
-각주 참조 기능을 지원합니다[^1]. 문서 끝에 깔끔하게 정리됩니다.
+각주를 달 수 있습니다[^1].
 
-[^1]: 이것은 문서 하단에 자동으로 모아지는 각주 설명입니다.
+[^1]: 문서 끝에 모이는 각주입니다.
 `;
 
 (async function init() {
-  await loadFileList();
   const target = new URLSearchParams(window.location.search).get('file');
   if (target && await openFile(target)) return;
   editor.value = WELCOME_DOC;

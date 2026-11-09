@@ -5,12 +5,15 @@
 //       각주([^1] 및 [^1]: 본문), 표, 구분선, 단락(연속 줄 병합, 줄 끝 공백 2개 = 줄바꿈), 백슬래시 이스케이프
 // 미지원: _밑줄_ 강조, 참조 링크
 
+use std::collections::HashMap;
+
 const MAX_QUOTE_DEPTH: usize = 8; // 인용 재귀 상한 (스택 오버플로 방지)
 
 pub fn to_html(input: &str) -> String {
     let raw_lines: Vec<&str> = input.lines().collect();
     let (lines, footnotes) = extract_footnotes(&raw_lines);
-    let mut html = render_lines(&lines, 0);
+    let mut slug_counts: HashMap<String, usize> = HashMap::new();
+    let mut html = render_lines(&lines, 0, &mut slug_counts);
 
     if !footnotes.is_empty() {
         html.push_str("\n<hr class=\"footnotes-sep\"/>\n<section class=\"footnotes\">\n<ol>\n");
@@ -54,12 +57,12 @@ fn extract_footnotes<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<(String, Strin
     (cleaned, footnotes)
 }
 
-fn render(input: &str, depth: usize) -> String {
+fn render(input: &str, depth: usize, slug_counts: &mut HashMap<String, usize>) -> String {
     let lines: Vec<&str> = input.lines().collect();
-    render_lines(&lines, depth)
+    render_lines(&lines, depth, slug_counts)
 }
 
-fn render_lines(lines: &[&str], depth: usize) -> String {
+fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, usize>) -> String {
     let mut out = String::new();
     let mut para: Vec<&str> = Vec::new();
     let mut lists: Vec<(usize, bool)> = Vec::new(); // (들여쓰기, 순서있음)
@@ -107,17 +110,17 @@ fn render_lines(lines: &[&str], depth: usize) -> String {
             }
 
             if lang.eq_ignore_ascii_case("mermaid") {
-                out.push_str("<div class=\"code-block-wrapper mermaid-wrapper\">\n<div class=\"code-block-header\"><span class=\"code-lang\">MERMAID DIAGRAM</span><button class=\"copy-code-btn\" type=\"button\" onclick=\"copyCode(this)\">복사</button></div>\n<div class=\"mermaid\">\n");
+                out.push_str("<div class=\"code-block-wrapper mermaid-wrapper\">\n<div class=\"code-block-header\"><span class=\"code-lang\">Mermaid diagram</span><button class=\"copy-code-btn\" type=\"button\" onclick=\"copyCode(this)\">복사</button></div>\n<div class=\"mermaid\">\n");
                 out.push_str(&code);
                 out.push_str("</div>\n<pre style=\"display:none\"><code class=\"language-mermaid\">");
                 out.push_str(&code);
                 out.push_str("</code></pre>\n</div>\n");
             } else {
-                let lang_label = if lang.is_empty() { "TEXT" } else { lang };
+                let lang_label = if lang.is_empty() { "Text".to_string() } else { capitalize_first(lang) };
                 let code_class = if lang.is_empty() { String::new() } else { format!(" class=\"language-{}\"", escape_html(lang)) };
                 out.push_str(&format!(
                     "<div class=\"code-block-wrapper\">\n<div class=\"code-block-header\"><span class=\"code-lang\">{}</span><button class=\"copy-code-btn\" type=\"button\" onclick=\"copyCode(this)\">복사</button></div>\n<pre><code{}>",
-                    escape_html(&lang_label.to_uppercase()),
+                    escape_html(&lang_label),
                     code_class
                 ));
                 out.push_str(&code);
@@ -170,7 +173,7 @@ fn render_lines(lines: &[&str], depth: usize) -> String {
             if i < lines.len() {
                 i += 1; // 닫는 ::: 소비
             }
-            let inner_html = render(&block_lines.join("\n"), depth + 1);
+            let inner_html = render(&block_lines.join("\n"), depth + 1, slug_counts);
             out.push_str("<details class=\"notion-toggle\">\n");
             out.push_str(&format!("<summary>{}</summary>\n", inline(summary)));
             out.push_str("<div class=\"toggle-content\">\n");
@@ -235,7 +238,7 @@ fn render_lines(lines: &[&str], depth: usize) -> String {
         if let Some(level) = heading_level(trimmed) {
             flush_para(&mut out, &mut para);
             let text = trimmed[level..].trim();
-            let slug = slugify(text);
+            let slug = unique_slug(&slugify(text), slug_counts);
             out.push_str(&format!("<h{0} id=\"{2}\">{1}</h{0}>\n", level, inline(text), escape_html(&slug)));
             i += 1;
             continue;
@@ -253,7 +256,7 @@ fn render_lines(lines: &[&str], depth: usize) -> String {
             if let Some(first) = inner.first() {
                 if let Some((kind, title)) = parse_callout_header(first) {
                     let body_lines = &inner[1..];
-                    let body_rendered = render(&body_lines.join("\n"), depth + 1);
+                    let body_rendered = render(&body_lines.join("\n"), depth + 1, slug_counts);
                     let (icon, default_title, class_name) = callout_meta(&kind);
                     let display_title = if title.is_empty() { default_title } else { title.as_str() };
                     out.push_str(&format!(
@@ -267,7 +270,7 @@ fn render_lines(lines: &[&str], depth: usize) -> String {
                 } else if let Some((emoji, rest_text)) = parse_emoji_callout(first) {
                     let mut all_lines = vec![rest_text];
                     all_lines.extend_from_slice(&inner[1..]);
-                    let body_rendered = render(&all_lines.join("\n"), depth + 1);
+                    let body_rendered = render(&all_lines.join("\n"), depth + 1, slug_counts);
                     out.push_str(&format!(
                         "<div class=\"callout callout-custom\">\n<div class=\"callout-header\"><span class=\"callout-icon\">{}</span></div>\n<div class=\"callout-body\">\n{}</div>\n</div>\n",
                         emoji,
@@ -277,7 +280,7 @@ fn render_lines(lines: &[&str], depth: usize) -> String {
                 }
             }
             out.push_str("<blockquote>\n");
-            out.push_str(&render(&inner.join("\n"), depth + 1));
+            out.push_str(&render(&inner.join("\n"), depth + 1, slug_counts));
             out.push_str("</blockquote>\n");
             continue;
         }
@@ -397,6 +400,15 @@ fn heading_level(line: &str) -> Option<usize> {
     }
 }
 
+// 코드 언어 라벨용: 첫 글자만 대문자로 (문장형 표시)
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn slugify(text: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = true;
@@ -415,6 +427,19 @@ fn slugify(text: &str) -> String {
     if slug.is_empty() {
         "section".to_string()
     } else {
+        slug
+    }
+}
+
+// 중복 제목에는 -1, -2 접미사를 붙여 id 충돌 방지 (문서 전체에서 고유 보장)
+fn unique_slug(base: &str, counts: &mut HashMap<String, usize>) -> String {
+    let n = counts.entry(base.to_string()).or_insert(0);
+    if *n == 0 {
+        *n = 1;
+        base.to_string()
+    } else {
+        let slug = format!("{base}-{n}");
+        *n += 1;
         slug
     }
 }
@@ -734,10 +759,15 @@ fn is_relative_image_path(url: &str) -> bool {
 
 fn safe_image(url: &str) -> bool {
     let u = url.trim().to_ascii_lowercase();
-    u.starts_with("http://")
-        || u.starts_with("https://")
-        || u.starts_with("data:image/")
-        || is_relative_image_path(url)
+    if u.starts_with("http://") || u.starts_with("https://") {
+        return true;
+    }
+    // data: URL은 래스터 이미지만 허용 (svg+xml 등은 스크립트 표면이 있어 차단)
+    if let Some(mime) = u.strip_prefix("data:image/") {
+        let mime = mime.split(|c: char| c == ';' || c == ',' || c.is_whitespace()).next().unwrap_or("");
+        return matches!(mime, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif");
+    }
+    is_relative_image_path(url)
 }
 
 pub fn url_encode(s: &str) -> String {
@@ -1102,6 +1132,21 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_headings_get_unique_ids() {
+        let html = to_html("# 같은 제목\n\n# 같은 제목\n\n## 같은 제목\n");
+        assert!(html.contains("<h1 id=\"같은-제목\">같은 제목</h1>"), "{html}");
+        assert!(html.contains("<h1 id=\"같은-제목-1\">같은 제목</h1>"), "{html}");
+        assert!(html.contains("<h2 id=\"같은-제목-2\">같은 제목</h2>"), "{html}");
+    }
+
+    #[test]
+    fn data_svg_images_are_blocked_but_raster_data_urls_stay() {
+        assert!(!to_html("![a](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)").contains("<img"), "svg data URL 차단 실패");
+        assert!(!to_html("![a](DATA:IMAGE/SVG+XML;hi)").contains("<img"), "대소문자 우회 차단 실패");
+        assert!(to_html("![a](data:image/png;base64,iVBORw0KGgo=)").contains("<img src=\"data:image/png;base64,iVBORw0KGgo=\""), "png data URL 허용 실패");
+    }
+
+    #[test]
     fn code_block_is_escaped_and_unclosed_fence_ok() {
         assert!(to_html("```\n<b>*x*</b>\n```").contains("<pre><code>&lt;b&gt;*x*&lt;/b&gt;\n</code></pre>"));
         let _ = to_html("```\nnever closed");
@@ -1189,5 +1234,14 @@ mod tests {
         }
         let _ = to_html(&deep_toggle);
     }
-}
 
+    #[test]
+    fn code_language_labels_use_sentence_case() {
+        let rust = to_html("```rust\nlet x = 1;\n```");
+        assert!(rust.contains("<span class=\"code-lang\">Rust</span>"), "{rust}");
+        let mermaid = to_html("```mermaid\ngraph TD\n  A --> B\n```");
+        assert!(mermaid.contains("<span class=\"code-lang\">Mermaid diagram</span>"), "{mermaid}");
+        let plain = to_html("```\ntext\n```");
+        assert!(plain.contains("<span class=\"code-lang\">Text</span>"), "{plain}");
+    }
+}

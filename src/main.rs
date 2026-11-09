@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// mdeditor - 제로 의존성 Markdown 편집기 & 미리보기 서비스
+// MDEditor - 제로 의존성 Markdown 편집기 & 미리보기 서비스
 // 표준 라이브러리(std)만 사용하여 최대한 가볍게 구성했습니다.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -62,7 +62,7 @@ fn main() {
                 break;
             }
             Err(_) if fetch_info(&addr).as_deref() == Some(info.as_str()) => {
-                println!("[안내] 이 폴더를 서비스하는 mdeditor 가 이미 실행 중입니다. 앱 창을 엽니다.");
+                println!("[안내] 이 폴더를 서비스하는 MDEditor 가 이미 실행 중입니다. 앱 창을 엽니다.");
                 open_app_window(&browser_url(&addr, &open_file));
                 return;
             }
@@ -76,7 +76,7 @@ fn main() {
     let addr = format!("{HOST}:{port}");
 
     println!("================================================");
-    println!(" mdeditor 가 실행되었습니다.");
+    println!(" MDEditor 가 실행되었습니다.");
     println!(" 앱 창: http://{addr}");
     println!(" 작업 폴더: {}", root.display());
     if let Some(name) = &open_file {
@@ -257,10 +257,12 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
                 (Some(from_p), Some(to_p)) => {
                     if !from_p.exists() {
                         send_json(&mut stream, 404, "Not Found", r#"{"error":"원본 파일이 존재하지 않습니다"}"#)
-                    } else if to_p.exists() && from_p != to_p {
+                    } else if from_p == to_p {
+                        send_json(&mut stream, 200, "OK", r#"{"ok":true}"#)
+                    } else if to_p.exists() && !is_case_only_rename(&from_p, &to_p) {
                         send_json(&mut stream, 409, "Conflict", r#"{"error":"동일한 이름의 파일이 이미 존재합니다"}"#)
                     } else {
-                        match std::fs::rename(&from_p, &to_p) {
+                        match do_rename(&from_p, &to_p) {
                             Ok(_) => send_json(&mut stream, 200, "OK", r#"{"ok":true}"#),
                             Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
                         }
@@ -323,6 +325,33 @@ fn save_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+// 대소문자만 다른 이름 변경인지 판별 (대소문자 미구분 FS에서 같은 파일을 가리킴)
+fn is_case_only_rename(from_p: &Path, to_p: &Path) -> bool {
+    from_p.parent() == to_p.parent()
+        && match (
+            from_p.file_name().and_then(|s| s.to_str()),
+            to_p.file_name().and_then(|s| s.to_str()),
+        ) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b) && a != b,
+            _ => false,
+        }
+}
+
+// 이름 변경 실행. 대소문자만 바꾸는 경우 일부 FS에서 무시될 수 있어 임시 파일 경유.
+fn do_rename(from_p: &Path, to_p: &Path) -> std::io::Result<()> {
+    if !is_case_only_rename(from_p, to_p) {
+        return std::fs::rename(from_p, to_p);
+    }
+    let mut tmp = from_p.with_extension("rename-tmp");
+    let mut n = 0;
+    while tmp.exists() {
+        n += 1;
+        tmp = from_p.with_extension(format!("rename-tmp-{n}"));
+    }
+    std::fs::rename(from_p, &tmp)?;
+    std::fs::rename(&tmp, to_p)
 }
 
 // ---------- HTTP 요청 파싱 ----------
@@ -792,5 +821,28 @@ mod tests {
         assert_eq!(content_type_for_path(Path::new("a.svg")), "image/svg+xml");
         assert_eq!(content_type_for_path(Path::new("a.pdf")), "application/pdf");
         assert_eq!(content_type_for_path(Path::new("a.unknown")), "application/octet-stream");
+    }
+
+    #[test]
+    fn case_only_rename_detection() {
+        let root = Path::new("root");
+        assert!(is_case_only_rename(&root.join("A.md"), &root.join("a.md")));
+        assert!(!is_case_only_rename(&root.join("a.md"), &root.join("a.md")));
+        assert!(!is_case_only_rename(&root.join("a.md"), &root.join("b.md")));
+        assert!(!is_case_only_rename(&root.join("a.md"), &root.join("sub").join("A.md")));
+    }
+
+    #[test]
+    fn case_only_rename_roundtrip() {
+        let dir = std::env::temp_dir().join("mdeditor_test_rename");
+        std::fs::create_dir_all(&dir).unwrap();
+        let from = dir.join("Case.md");
+        std::fs::write(&from, b"hi").unwrap();
+        let to = dir.join("case.md");
+        do_rename(&from, &to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "hi");
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

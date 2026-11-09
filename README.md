@@ -1,25 +1,16 @@
-# 📝 mdeditor
+# 📝 MDEditor
 
-<p align="center">
-  <strong>외부 의존성 제로(0개) — 표준 라이브러리(std)만으로 구현된 초경량 Markdown 편집기 & 데스크톱 앱</strong>
-</p>
+**Rust 크레이트 의존성 제로 — 표준 라이브러리(std)만으로 빌드되는 초경량 Markdown 편집기 & 데스크톱 앱**
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2021" />
-  <img src="https://img.shields.io/badge/Dependencies-0-brightgreen?style=flat-square" alt="Zero Dependencies" />
-  <img src="https://img.shields.io/badge/Binary_Size-~561KB-blue?style=flat-square" alt="Binary Size" />
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" alt="Platform" />
-  <img src="https://img.shields.io/badge/Tests-36%20Passed-brightgreen?style=flat-square" alt="Tests" />
-  <img src="https://img.shields.io/badge/License-MIT-orange?style=flat-square" alt="License" />
-</p>
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Zero Rust Crates](https://img.shields.io/badge/Rust_Crates-0-brightgreen?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~561KB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-41%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
 ## 💡 소개
 
-**mdeditor**는 수백 메가바이트의 메모리를 소모하는 일렉트론(Electron)이나 무거운 외부 웹뷰 런타임 바인딩 없이, **오직 Rust 표준 라이브러리(`std`)만으로 제작된 초경량 Notion 스타일 Markdown 데스크톱 앱**입니다.
+**MDEditor**는 수백 메가바이트의 메모리를 소모하는 일렉트론(Electron)이나 무거운 외부 웹뷰 런타임 바인딩 없이, **오직 Rust 표준 라이브러리(`std`)만으로 제작된 초경량 Notion 스타일 Markdown 데스크톱 앱**입니다.
 
-- **외부 크레이트 0개 (Zero Dependencies)**: 외부 패키지 다운로드나 복잡한 C 링커(MSVC/MinGW) 충돌 없이 `cargo build` 한 번으로 즉시 빌드됩니다.
+- **외부 Rust 크레이트 0개**: 외부 패키지 다운로드나 복잡한 C 링커(MSVC/MinGW) 충돌 없이 `cargo build` 한 번으로 즉시 빌드됩니다. (수식·구문 강조·다이어그램 렌더링과 웹폰트는 CDN에서 로드되므로 오프라인에서는 해당 표시 기능이 제한됩니다)
 - **초경량 단일 바이너리 (~561KB)**: 릴리즈 빌드 최적화(`opt-level = "z"`, `LTO`, `strip`) 및 고해상도 다중 해상도 아이콘 임베딩을 통해 실행 파일 크기가 **약 561KB**에 불과하며, 시작 속도가 거의 즉각적입니다.
 - **Notion 수준의 현대적 표현력**: GitHub Alerts/Notion 콜아웃 블록, LaTeX 수식(KaTeX), Mermaid 다이어그램, 코드 구문 강조, 접기(Toggle), 표, 형광펜, 키캡, 각주 등 풍부한 문법을 지원합니다.
 - **로컬 이미지 & 애셋 서빙**: 원격 URL뿐만 아니라 문서와 같은 폴더나 하위 폴더(`images/`, `assets/`)에 위치한 로컬 그림 파일도 실시간으로 안전하게 서빙하여 보여줍니다.
@@ -43,21 +34,20 @@
 
 ### 🖨️ 공유 & 내보내기 (Export)
 - **🖨️ PDF / 인쇄 모드**: `@media print` 최적화 스타일링이 적용되어 브라우저 인쇄 기능을 통해 헤더와 에디터를 숨기고 깔끔한 인쇄물이나 PDF로 즉시 저장할 수 있습니다.
-- **💾 독립 실행형 HTML 파일 다운로드**: 스타일 시트와 KaTeX/Highlight.js가 포함된 완결형 `.html` 파일로 내보낼 수 있습니다.
-- **📋 서식 있는 HTML 클립보드 복사**: 원클릭으로 렌더링된 서식 있는 HTML을 복사하여 Google Docs, Word, Gmail, Slack, Notion에 그대로 붙여넣을 수 있습니다.
+- **💾 HTML 파일 다운로드**: 본문 HTML을 인라인하고 KaTeX/Highlight.js CSS는 CDN 참조로 포함한 `.html` 파일로 내보낼 수 있습니다.
 
 ### 📂 안전한 파일 관리 & 인스턴스 중복 방지
 - **원자적 저장 (Atomic Save)**: 임시 파일(`.tmp`)에 완전히 작성한 후 원자적 이름 교체를 수행하므로, 저장 도중 전원이 꺼지거나 크래시가 발생해도 원본 파일이 절대 손상되지 않습니다.
-- **파일 관리 기능**: UI 상에서 간편하게 새 파일 만들기(`Ctrl+N`), 저장(`Ctrl+S`), 이름 변경(Rename), 안전 삭제(Delete)를 수행할 수 있습니다.
-- **스마트 포트 바인딩 & 단일 인스턴스 활성화**: 이미 같은 폴더를 서비스 중인 mdeditor가 실행 중이면 중복 서버를 띄우지 않고 기존 브라우저 탭을 활성화합니다.
-- **깔끔한 종료 (Exit)**: 상단 종료(`⏻`) 버튼을 클릭하여 백엔드 서버를 즉시 안전하게 종료할 수 있습니다.
+- **파일 관리 기능**: 상단 메뉴에서 불러오기, 새 파일 만들기(`Ctrl+N`), 저장(`Ctrl+S`)을 수행할 수 있습니다.
+- **스마트 포트 바인딩 & 단일 인스턴스 활성화**: 이미 같은 폴더를 서비스 중인 MDEditor가 실행 중이면 중복 서버를 띄우지 않고 기존 브라우저 탭을 활성화합니다.
+- **깔끔한 종료 (Exit)**: 창 우측 상단의 `X` 버튼으로 창을 닫으면 백엔드 서버도 함께 안전하게 종료됩니다.
 
 ### 🛡️ 보안 설계 (Security & Hardening)
 - **디렉토리 탈출(Path Traversal) 원천 차단**: 상위 디렉토리 이동(`..`), 루트, 절대 경로 접근을 방어하며 작업 디렉토리 내부의 검증된 파일만 안전하게 접근합니다.
 - **로컬 애셋 안전 격리**: `/api/raw` 엔드포인트를 통해 허용된 미디어 확장자(`png, jpg, svg, webp, gif, pdf` 등)만 프로젝트 루트 하위에서 서빙합니다.
 - **Windows 특수 장치명 & ADS 방어**: `CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9` 및 대체 데이터 스트림(`file.md:stream`), 파일명 금지 문자(`< > : " | ? *`) 차단.
 - **DNS Rebinding & CSRF 방어**: `Host` 및 `Origin` 헤더를 엄격히 검증하여 로컬 주소(`127.0.0.1`, `localhost`)에서 발생한 정상 요청만 처리합니다.
-- **XSS 방어 & 스킴 화이트리스트**: 마크다운 렌더링 시 모든 HTML 엔티티를 이스케이프하며, 링크와 이미지 스킴은 `http://`, `https://`, `mailto:`, `#`만 허용합니다 (`javascript:`, `data:` 차단).
+- **XSS 방어 & 스킴 화이트리스트**: 마크다운 렌더링 시 모든 HTML 엔티티를 이스케이프하며, 링크는 `http://`, `https://`, `mailto:`, `#`만 허용하고(`javascript:`, `data:` 차단), 이미지 `data:` URL은 래스터 포맷(`png/jpg/gif/webp/bmp/ico/avif`)만 허용합니다 (`data:image/svg+xml` 차단).
 
 ---
 
@@ -130,7 +120,7 @@
 | **윗첨자 & 각주** | `x^2^` 및 `문장[^1]` + `[^1]: 내용` | 과학 수식 윗첨자 및 문서 하단 각주 자동 정리 |
 | **코드 블록 & 복사** | ` ```rust ... ``` ` | 상단 언어 뱃지 및 원클릭 클립보드 복사 버튼 |
 | **인터랙티브 태스크 목록** | `- [ ] 할 일`, `- [x] 완료` | 미리보기에서 체크박스 클릭 시 원본 에디터 실시간 동기화 |
-| **제목 (Headings)** | `# H1` 부터 `###### H6` 까지 | 슬러그 ID 앵커가 자동 생성되는 노션 스타일 헤딩 |
+| **제목 (Headings)** | `# H1` 부터 `###### H6` 까지 | 슬러그 ID 앵커가 자동 생성되는 노션 스타일 헤딩 (중복 제목은 `-1`, `-2` 접미사로 고유 ID 부여) |
 | **강조 (Emphasis)** | `**굵게**`, `*기울임*`, `***굵은 기울임***` | 다양한 인라인 서식 |
 | **취소선 (Strikethrough)** | `~~취소선~~` | 텍스트 가로줄 |
 | **목록 (Lists)** | 순서 없는 목록(`-`, `*`, `+`), 순서 있는 목록(`1.`) | 다단계 들여쓰기 중첩 지원 |
@@ -160,10 +150,10 @@ cargo run --release
 실행 즉시 단독 앱 윈도우가 브라우저에 표시됩니다. (기본 주소: `http://127.0.0.1:8080`)
 
 ### 3. Windows 설치 및 `.md` 기본 연결 (`install.bat`)
-Windows 환경에서 mdeditor를 정식 설치하고 `.md` 파일을 더블클릭할 때마다 mdeditor로 열리도록 기본 앱으로 등록할 수 있습니다:
+Windows 환경에서 MDEditor를 정식 설치하고 `.md` 파일을 더블클릭할 때마다 MDEditor로 열리도록 기본 앱으로 등록할 수 있습니다:
 - **`install.bat` 더블 클릭**:
   - `%LOCALAPPDATA%\Programs\mdeditor`에 최적화된 실행 파일 자동 설치
-  - Windows 레지스트리에 `.md`, `.markdown` 기본 연결 및 우클릭 "mdeditor로 편집" 메뉴 등록
+  - Windows 레지스트리에 `.md`, `.markdown` 기본 연결 및 우클릭 "MDEditor로 편집" 메뉴 등록
   - 시작 메뉴 및 바탕화면 바로가기 등록, 사용자 `PATH`에 등록되어 어디서나 `mdeditor` 실행 가능
   - 관리자 권한(UAC) 불필요, SmartScreen 보안 경고 없음
 - **설치 제거**: `uninstall.bat`을 실행하면 레지스트리 연결, 바로가기, 설치 파일이 깔끔하게 원상 복구됩니다.
@@ -197,7 +187,7 @@ mdeditor
 |---|---|---|---|
 | `GET` | `/` | - | 메인 에디터 및 미리보기 웹 UI |
 | `GET` | `/api/info` | - | 서버 식별 정보 (`{"app":"mdeditor","root":"..."}`) |
-| `GET` | `/api/list` | - | 작업 디렉토리 내 `.md` 파일 목록 JSON 반환 |
+| `GET` | `/api/list` | - | 작업 디렉토리 루트의 `.md` 파일 목록 JSON 반환 (하위 폴더 미포함, `.md`는 루트 1뎁스만 지원) |
 | `GET` | `/api/load` | `?file=파일명.md` | 대상 파일 내용 반환 (`{"content":"..."}`) |
 | `GET` | `/api/raw` | `?file=경로/이미지.png` | 작업 폴더 내 로컬 이미지/미디어 안전 스트리밍 |
 | `POST` | `/api/render` | 요청 본문(Markdown) | 변환된 HTML 반환 (`{"html":"..."}`) |
@@ -210,14 +200,14 @@ mdeditor
 
 ## 🧪 테스트 실행
 
-마크다운 파싱, 각주, Mermaid, 테이블 분리, 슬러그 생성, 보안 검증, 애셋 탈출 차단, 원자적 파일 I/O 등 **36개의 단위 테스트**가 작성되어 있습니다.
+마크다운 파싱, 각주, Mermaid, 테이블 분리, 슬러그 생성, 보안 검증, 애셋 탈출 차단, 원자적 파일 I/O 등 **41개의 단위 테스트**가 작성되어 있습니다.
 
 ```bash
 cargo test
 ```
 
 ```text
-running 36 tests
+running 41 tests
 test markdown::tests::backslash_escapes ... ok
 test markdown::tests::blockquote_merges_and_nests ... ok
 test markdown::tests::callouts_render ... ok
@@ -230,7 +220,7 @@ test markdown::tests::table_pads_missing_columns ... ok
 test tests::safe_asset_path_security ... ok
 test tests::atomic_save_roundtrip ... ok
 ...
-test result: ok. 36 passed; 0 failed; 0 ignored; finished in 0.05s
+test result: ok. 41 passed; 0 failed; 0 ignored; finished in 0.05s
 ```
 
 ---
@@ -238,3 +228,5 @@ test result: ok. 36 passed; 0 failed; 0 ignored; finished in 0.05s
 ## 📄 라이선스
 
 이 프로젝트는 [MIT License](LICENSE)에 따라 자유롭게 사용, 수정, 배포할 수 있습니다.
+
+UI 다듬기에는 Unslop 방법론([@heydamir](https://x.com/heydamir), CC BY 4.0)을 참고했습니다.

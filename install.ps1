@@ -1,9 +1,9 @@
-﻿# mdeditor Windows 설치 및 .md 파일 기본 연결 스크립트
+﻿# MDEditor Windows 설치 및 .md 파일 기본 연결 스크립트
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Host.UI.RawUI.WindowTitle = "mdeditor 설치 마법사"
+$Host.UI.RawUI.WindowTitle = "MDEditor 설치 마법사"
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   mdeditor Windows 설치 및 .md 파일 기본 연결 마법사" -ForegroundColor Cyan
+Write-Host "   MDEditor Windows 설치 및 .md 파일 기본 연결 마법사" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -79,14 +79,14 @@ Set-ItemProperty -Path "$progIdPath\shell\open" -Name "Icon" -Value "`"$targetEx
 Set-ItemProperty -Path "$progIdPath\shell\open\command" -Name "(Default)" -Value "`"$targetExe`" `"%1`""
 
 New-Item -Path "$progIdPath\shell\edit\command" -Force | Out-Null
-Set-ItemProperty -Path "$progIdPath\shell\edit" -Name "(Default)" -Value "mdeditor로 편집"
+Set-ItemProperty -Path "$progIdPath\shell\edit" -Name "(Default)" -Value "MDEditor로 편집"
 Set-ItemProperty -Path "$progIdPath\shell\edit" -Name "Icon" -Value "`"$targetExe`",0"
 Set-ItemProperty -Path "$progIdPath\shell\edit\command" -Name "(Default)" -Value "`"$targetExe`" `"%1`""
 
 # Applications 등록 (Windows 10/11 연결 프로그램 목록)
 $appPath = "HKCU:\Software\Classes\Applications\mdeditor.exe"
 New-Item -Path "$appPath\shell\open\command" -Force | Out-Null
-Set-ItemProperty -Path $appPath -Name "FriendlyAppName" -Value "mdeditor"
+Set-ItemProperty -Path $appPath -Name "FriendlyAppName" -Value "MDEditor"
 New-Item -Path "$appPath\SupportedTypes" -Force | Out-Null
 Set-ItemProperty -Path "$appPath\SupportedTypes" -Name ".md" -Value ""
 Set-ItemProperty -Path "$appPath\SupportedTypes" -Name ".markdown" -Value ""
@@ -97,7 +97,7 @@ foreach ($ext in @(".md", ".markdown")) {
     $menuPath = "HKCU:\Software\Classes\SystemFileAssociations\$ext\shell\mdeditor"
     $assocPath = "$menuPath\command"
     New-Item -Path $assocPath -Force | Out-Null
-    Set-ItemProperty -Path $menuPath -Name "(Default)" -Value "mdeditor로 편집"
+    Set-ItemProperty -Path $menuPath -Name "(Default)" -Value "MDEditor로 편집"
     Set-ItemProperty -Path $menuPath -Name "Icon" -Value "`"$targetExe`",0"
     Set-ItemProperty -Path $assocPath -Name "(Default)" -Value "`"$targetExe`" `"%1`""
 }
@@ -122,7 +122,7 @@ $startLnk = $wsh.CreateShortcut([System.IO.Path]::Combine($startMenuDir, 'mdedit
 $startLnk.TargetPath = $targetExe
 $startLnk.IconLocation = "$targetExe,0"
 $startLnk.WorkingDirectory = [System.Environment]::GetFolderPath('UserProfile')
-$startLnk.Description = 'mdeditor - 초경량 Markdown 편집기'
+$startLnk.Description = 'MDEditor - 초경량 Markdown 편집기'
 $startLnk.Save()
 
 # 바탕화면 바로가기
@@ -131,7 +131,7 @@ $desktopLnk = $wsh.CreateShortcut([System.IO.Path]::Combine($desktopDir, 'mdedit
 $desktopLnk.TargetPath = $targetExe
 $desktopLnk.IconLocation = "$targetExe,0"
 $desktopLnk.WorkingDirectory = [System.Environment]::GetFolderPath('UserProfile')
-$desktopLnk.Description = 'mdeditor - 초경량 Markdown 편집기'
+$desktopLnk.Description = 'MDEditor - 초경량 Markdown 편집기'
 $desktopLnk.Save()
 
 # 사용자 PATH 등록
@@ -156,8 +156,8 @@ public class WinShell {
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
-Write-Host "   mdeditor 설치가 완료되었습니다!" -ForegroundColor Green
-Write-Host "   - 이제 어떤 .md 파일을 더블클릭해도 mdeditor로 열립니다." -ForegroundColor White
+Write-Host "   MDEditor 설치가 완료되었습니다!" -ForegroundColor Green
+Write-Host "   - 이제 어떤 .md 파일을 더블클릭해도 MDEditor로 열립니다." -ForegroundColor White
 Write-Host "   - 시작 메뉴 및 바탕화면에 바로가기가 추가되었습니다." -ForegroundColor White
 Write-Host "   - 터미널 어디서나 'mdeditor [파일명]' 명령어로 실행할 수 있습니다." -ForegroundColor White
 Write-Host "   - 설치 제거는 언제든지 uninstall.bat을 실행하시면 됩니다." -ForegroundColor Gray

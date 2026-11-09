@@ -1,9 +1,9 @@
-﻿# mdeditor 제거 스크립트
+﻿# MDEditor 제거 스크립트
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Host.UI.RawUI.WindowTitle = "mdeditor 제거 마법사"
+$Host.UI.RawUI.WindowTitle = "MDEditor 제거 마법사"
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   mdeditor 제거 및 파일 연결 초기화" -ForegroundColor Cyan
+Write-Host "   MDEditor 제거 및 파일 연결 초기화" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -79,6 +79,6 @@ public class WinShellUn {
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
-Write-Host "   mdeditor가 정상적으로 제거되었습니다." -ForegroundColor Green
+Write-Host "   MDEditor가 정상적으로 제거되었습니다." -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
