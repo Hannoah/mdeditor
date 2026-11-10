@@ -1,0 +1,15 @@
+[package]
+name = "mdeditor-setup"
+version = "0.1.0"
+edition = "2021"
+description = "Production Single-File Windows Installer for MDEditor"
+
+[dependencies]
+# 제로 의존성 (std 라이브러리 및 Win32 API만 사용)
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

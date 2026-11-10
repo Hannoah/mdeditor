@@ -3,6 +3,45 @@
 세션 작업 내역을 일자별로 정리한 로그입니다.
 검증 수치는 실행 당시 실측값이며, `target/` 빌드 산출물은 기록 대상에서 제외합니다.
 
+## 2026-11-10 — 단일 독립 설치 파일(Setup.exe) 패키징, 이미지 삽입 기능 구현 및 편집기 핵심 버그(다중 블록 선택·하단 붙여넣기) 완벽 수정
+
+### 1. 단일 독립 실행형 Windows 설치 프로그램 구축 (`installer/`, `dist/MDEditor-Setup.exe`)
+- **원클릭 배포 바이너리 제작**:
+  - `installer/` 크레이트를 생성하고 `std`만 사용하여 외부 런타임/의존성 없이 작동하는 1.1 MB 크기의 단일 실행 파일 `MDEditor-Setup.exe` 구축.
+  - `mdeditor.exe`, `app.ico`, `install.ps1`, `uninstall.bat`, `uninstall.ps1`을 번들 데이터로 컴파일 타임 임베딩(`include_bytes!`).
+  - 더블클릭 시 Win32 대화상자(`MessageBoxW`)로 설치 안내를 제공하며, 임시 디렉토리에 번들을 풀어 원클릭 자동 설치 및 Windows 앱 등록/파일 확장자 연결/바로가기 생성 완료 후 즉시 실행.
+  - 무인/배치 모드 지원 (`/s`, `/silent`, `-q`, `--quiet`).
+- **원스톱 배포 자동화 파이프라인 (`package.ps1`, `package.bat`)**:
+  - `cargo test` (54개 테스트) 검증 → `cargo build --release` → `installer` 빌드 → `dist/` 산출물 패키징(`MDEditor-Setup.exe`, 버전 태그 바이너리, 포터블 zip) 및 `SHA256SUMS.txt` 생성까지 자동화.
+
+### 2. 이미지 삽입 전방위 기능 추가 (`src/main.rs`, `src/index.html`)
+- **백엔드 업로드 API (`POST /api/upload?name=...`)**:
+  - 요청 바디 바이너리를 워크스페이스 내 `images/` 폴더에 즉시 저장.
+  - 경로 탐색(Directory Traversal) 공격 방어 새니타이징 및 파일명 중복 시 자동 넘버링(`filename (1).ext`) 보장.
+  - 단위 테스트 `tests::upload_filename_sanitization_and_uniqueness` 추가 및 검증 완료.
+- **프론트엔드 이미지 삽입 인터페이스**:
+  - **노션 스타일 이미지 모달 (`#imageModal`)**: 헤더 이미지 버튼 및 단축키(`Ctrl+Shift+I`) 제공. 로컬 파일 업로드 드롭존 및 웹 URL 삽입 탭 지원.
+  - **클립보드 스크린샷 직접 붙여넣기 (`Ctrl+V`)**: 캡처 도구 등으로 캡처한 이미지를 편집기 내에서 바로 붙여넣으면 백엔드로 자동 업로드 후 마크다운 이미지 구문(`![image](images/...)`)으로 즉시 치환.
+  - **파일 탐색기 드래그 앤 드롭**: 데스크톱/탐색기에서 이미지 파일을 편집기 위로 끌어다 놓으면 자동 업로드 및 삽입.
+
+### 3. 편집기 핵심 UX 버그 해결 (`src/index.html`)
+- **다중 블록 동시 드래그 및 블록 간 선택 불가 버그 해결**:
+  - **원인 분석**: 기존에는 `#preview`는 일반 요소이고 각 블록 자식(`p`, `h1`, `li` 등)마다 개별적으로 `contenteditable="true"`가 부여되어 브라우저가 각 블록을 독립된 편집 영역으로 격리 취급함. 이로 인해 여러 블록을 마우스로 드래그하여 한 번에 선택하거나 `Ctrl+A`로 전체 선택하는 동작이 원천 차단됨.
+  - **해결**: `#preview`를 단일 편집 컨테이너(`contenteditable="true"`)로 일원화하고, 개별 자식 블록 요소의 `contenteditable` 속성을 전면 제거. 이제 여러 문단, 제목, 목록에 걸쳐 자유로운 마우스 드래그 선택, 다중 블록 삭제, 복사, 굵게/기울임 서식 일괄 적용이 완벽하게 작동.
+- **문서 맨 하단에 붙여넣기 시 맨 위에 붙는 버그 해결**:
+  - **원인 분석**: 빈 공간 또는 문서 맨 끝 클릭 시 커서 위치의 부모 노드가 `#preview` 자체로 잡히면서, `data-block="true"`를 찾지 못해 안전 폴백으로 지정되어 있던 `preview.firstElementChild`(문서 최상단 블록)로 강제 지정되어 상단에 붙여넣어지는 현상 발생.
+  - **해결**: 조상 노드를 탐색하는 `findClosestBlock(node)` 함수를 구현하고, 하단 여백 클릭이나 끝점 선택 시 `preview.lastElementChild`로 정확히 타겟팅되도록 수정. 텍스트 및 이미지 붙여넣기 시 현재 커서 위치 또는 문서 맨 하단에 정확히 삽입됨.
+
+### 4. 불필요한 개발/임시 파일 정리 및 형상 관리
+- 불필요한 스크립트(`build_icon.ps1`, `mdeditor.bat`) 및 임시 환경설정(`.env`) 삭제.
+- `.gitignore`에 패키징 산출물 디렉토리(`/dist`), 인스톨러 빌드 타깃(`/installer/target`), 도구 캐시(`.squad`) 등록.
+
+### 5. 검증 결과
+- `cargo fmt --check`: 클린 통과.
+- `cargo clippy -- -D warnings`: 메인 크레이트 및 인스톨러 크레이트 모두 0 경고 통과.
+- `cargo test`: 54개 단위 테스트 전체 성공 (54 passed, 0 failed in 0.14s).
+- 단일 설치 파일 `dist/MDEditor-Setup.exe` (1,137,664 바이트, ~1.1 MB) 빌드 및 체크섬 생성 완료.
+
 ## 2026-11-10 — 백엔드 최적화·리팩터링 및 프로덕션급 Windows 인스톨러/언인스톨러 스위트 구축
 
 ### 1. 백엔드 라우팅 및 리소스 최적화 (`src/main.rs`)

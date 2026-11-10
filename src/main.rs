@@ -373,6 +373,54 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
             }
         }
 
+        // 이미지 및 애셋 업로드: /api/upload?name=photo.png (body = 바이너리 데이터)
+        ("POST", "/api/upload") => {
+            let raw_name =
+                query_param(&req.query, "name").unwrap_or_else(|| "image.png".to_string());
+            let (stem, ext) = sanitize_upload_filename(&raw_name);
+            if !is_allowed_asset_ext(&ext) {
+                send_json(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    r#"{"error":"허용되지 않은 파일 형식입니다 (png, jpg, gif, svg, webp, bmp, ico 등 지원)"}"#,
+                )
+            } else {
+                let images_dir = root.join("images");
+                if !images_dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(&images_dir) {
+                        return send_json(
+                            &mut stream,
+                            500,
+                            "Error",
+                            &json_wrap("error", &format!("images 폴더를 생성할 수 없습니다: {e}")),
+                        );
+                    }
+                }
+
+                let dest_filename = unique_upload_filename(&images_dir, &stem, &ext);
+                let rel_path = format!("images/{dest_filename}");
+                let dest_path = images_dir.join(&dest_filename);
+
+                match std::fs::write(&dest_path, &req.body) {
+                    Ok(_) => {
+                        let json = format!(
+                            "{{\"ok\":true,\"path\":\"{}\",\"name\":\"{}\"}}",
+                            json_escape(&rel_path),
+                            json_escape(&dest_filename)
+                        );
+                        send_json(&mut stream, 200, "OK", &json)
+                    }
+                    Err(e) => send_json(
+                        &mut stream,
+                        500,
+                        "Error",
+                        &json_wrap("error", &format!("파일 저장에 실패했습니다: {e}")),
+                    ),
+                }
+            }
+        }
+
         // 파일 삭제: /api/delete?file=foo.md
         ("POST", "/api/delete") => {
             let file = query_param(&req.query, "file").unwrap_or_default();
@@ -765,6 +813,49 @@ fn is_allowed_asset_ext(ext: &str) -> bool {
             | "txt"
             | "csv"
     )
+}
+
+fn sanitize_upload_filename(raw: &str) -> (String, String) {
+    let p = Path::new(raw);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png")
+        .to_ascii_lowercase();
+
+    let clean_stem: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let clean_stem = if clean_stem.is_empty() {
+        "image".to_string()
+    } else {
+        clean_stem
+    };
+
+    (clean_stem, ext)
+}
+
+fn unique_upload_filename(dir: &Path, stem: &str, ext: &str) -> String {
+    let candidate = format!("{stem}.{ext}");
+    if !dir.join(&candidate).exists() {
+        return candidate;
+    }
+    let mut i = 1;
+    loop {
+        let candidate = format!("{stem}-{i}.{ext}");
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+        i += 1;
+    }
 }
 
 // 로컬 애셋/미디어 안전 경로 확인 (root 내부의 상대 하위 경로 허용, 경로 탈출 및 상위 이동 차단)
@@ -1339,5 +1430,31 @@ mod tests {
     fn json_escape_and_wrap() {
         let wrapped = json_wrap("title", "Hello \"world\"\nLine 2");
         assert_eq!(wrapped, "{\"title\":\"Hello \\\"world\\\"\\nLine 2\"}");
+    }
+
+    #[test]
+    fn upload_filename_sanitization_and_uniqueness() {
+        let (stem, ext) = sanitize_upload_filename("my photo (test)!?.png");
+        assert_eq!(stem, "my_photo__test___");
+        assert_eq!(ext, "png");
+
+        let (stem2, ext2) = sanitize_upload_filename("../../../secret.jpg");
+        assert_eq!(stem2, "secret");
+        assert_eq!(ext2, "jpg");
+
+        let temp = std::env::temp_dir().join("mdeditor_test_upload");
+        std::fs::create_dir_all(&temp).unwrap();
+        let f1 = unique_upload_filename(&temp, "pic", "png");
+        assert_eq!(f1, "pic.png");
+        std::fs::write(temp.join(&f1), b"data").unwrap();
+
+        let f2 = unique_upload_filename(&temp, "pic", "png");
+        assert_eq!(f2, "pic-1.png");
+        std::fs::write(temp.join(&f2), b"data").unwrap();
+
+        let f3 = unique_upload_filename(&temp, "pic", "png");
+        assert_eq!(f3, "pic-2.png");
+
+        std::fs::remove_dir_all(&temp).unwrap();
     }
 }

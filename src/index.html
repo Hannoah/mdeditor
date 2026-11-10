@@ -1519,6 +1519,81 @@
     justify-content: flex-end;
   }
 
+  /* Image Modal & Drop Zone */
+  .image-modal-dialog {
+    width: 480px;
+    max-width: 92vw;
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    animation: dialogPop 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .modal-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    padding: 0 16px;
+    background: var(--surface);
+    gap: 8px;
+  }
+  .modal-tab {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .modal-tab:hover {
+    color: var(--text);
+  }
+  .modal-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 30px 20px;
+    text-align: center;
+    cursor: pointer;
+    background: var(--surface);
+    transition: all 0.18s ease;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: var(--accent);
+    background: rgba(var(--accent-rgb), 0.05);
+  }
+  .drop-zone-icon {
+    color: var(--accent);
+    margin-bottom: 10px;
+    opacity: 0.9;
+  }
+  .drop-zone-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .drop-zone-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+  }
+  #preview.drag-active {
+    outline: 2px dashed var(--accent) !important;
+    outline-offset: -4px;
+    background: rgba(var(--accent-rgb), 0.02) !important;
+  }
+
   /* Responsive Mobile (헤더/툴바/상태바는 줄바꿈 없이 가로 스크롤 유지) */
   @media (max-width: 768px) {
     main { flex-direction: column; }
@@ -1601,6 +1676,13 @@
     </button>
     <button id="btnHeaderSearch" class="btn-icon ghost" title="본문 찾기 및 바꾸기 (Ctrl+F / Ctrl+H)">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+    </button>
+    <button id="btnHeaderImage" class="btn-icon ghost" title="이미지 삽입 (Ctrl+Shift+I)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+        <polyline points="21 15 16 10 5 21"></polyline>
+      </svg>
     </button>
   </div>
 
@@ -1781,6 +1863,7 @@
         <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd></td><td>본문 검색 (Find)</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>H</kbd></td><td>본문 찾기 및 바꾸기 (Find & Replace)</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd> / <kbd>I</kbd> / <kbd>K</kbd></td><td>선택 영역 굵게 / 기울임 / 하이퍼링크</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>I</kbd></td><td>이미지 삽입 (파일 업로드/웹 링크/클립보드)</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>Q</kbd></td><td>프로그램 안전 종료 (종료 확인 모달)</td></tr>
         <tr><td><kbd>/</kbd></td><td>블록 삽입 슬래시(/) 명령어 메뉴 열기</td></tr>
         <tr><td>마우스 드래그</td><td>플로팅 서식 툴바 (굵게, 기울임, 취소선, 형광펜, 코드, 키캡, 링크 등)</td></tr>
@@ -1833,7 +1916,59 @@
   </div>
 </div>
 
-<!-- Notion Live Canvas Slash Menu -->
+<!-- Image Insert Modal -->
+<div class="modal-overlay" id="imageModal" style="z-index: 250;">
+  <div class="modal image-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="imageModalTitle">
+    <div class="modal-header" style="padding: 14px 20px;">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent);">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <polyline points="21 15 16 10 5 21"/>
+        </svg>
+        <span style="font-size:15px; font-weight:600; color:var(--text);" id="imageModalTitle">이미지 삽입</span>
+      </div>
+      <button id="btnImageModalClose" class="btn-icon ghost" title="닫기 (Esc)" style="padding:4px 8px; font-size:14px; border-radius:6px;">✕</button>
+    </div>
+    <div class="modal-tabs">
+      <button class="modal-tab active" id="tabUploadImage" type="button">파일 업로드</button>
+      <button class="modal-tab" id="tabLinkImage" type="button">웹 링크 (URL)</button>
+    </div>
+    <div class="modal-body" style="padding: 20px;">
+      <!-- Tab 1: Upload File -->
+      <div id="tabPanelUpload" class="tab-panel">
+        <input type="file" id="imageFileInput" accept="image/*" style="display:none;" />
+        <div class="drop-zone" id="imageDropZone">
+          <div class="drop-zone-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <div class="drop-zone-title">이미지 파일을 이곳에 끌어다 놓거나 클릭하세요</div>
+          <div class="drop-zone-desc">PNG, JPG, GIF, SVG, WebP, BMP 지원 (최대 10MB)</div>
+          <button class="primary" id="btnBrowseImage" type="button" style="padding:6px 14px; font-size:12.5px; border-radius:6px;">컴퓨터에서 파일 선택</button>
+        </div>
+      </div>
+      <!-- Tab 2: Image URL -->
+      <div id="tabPanelLink" class="tab-panel" style="display:none;">
+        <div style="margin-bottom:12px;">
+          <label for="imageUrlInput" style="display:block;font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted);">이미지 URL</label>
+          <input type="url" id="imageUrlInput" placeholder="https://example.com/image.png" style="width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;" />
+        </div>
+        <div style="margin-bottom:18px;">
+          <label for="imageAltInput" style="display:block;font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text-muted);">대체 텍스트 (설명, 선택 사항)</label>
+          <input type="text" id="imageAltInput" placeholder="이미지 설명" style="width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px;" />
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;">
+          <button class="ghost" id="btnCancelImageLink" type="button" style="padding:7px 14px; font-size:13px; border-radius:6px;">취소</button>
+          <button class="primary" id="btnInsertImageLink" type="button" style="padding:7px 16px; font-size:13px; border-radius:6px;">이미지 삽입</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 <div class="slash-menu" id="slashMenu">
   <div class="slash-group-header" data-group="basic">기본 블록</div>
   <div class="slash-item" data-type="p" data-group="basic">
@@ -2761,13 +2896,22 @@ function setupNotionBlocks() {
   if (currentViewMode !== 'notion') return;
   document.body.classList.add('notion-view');
 
+  // 핵심: #preview 자체를 단일 contenteditable 루트로 지정하여 다중 블록 연속 드래그 및 전체 선택 허용
+  if (preview.getAttribute('contenteditable') !== 'true') {
+    preview.setAttribute('contenteditable', 'true');
+    preview.setAttribute('spellcheck', 'false');
+  }
+
+  // 상호작용 및 정적 위젯 요소에는 contenteditable="false" 설정
+  preview.querySelectorAll('.mermaid-wrapper, .code-block-header, .copy-code-btn, .code-lang, .math-block, img, .notion-card-edit-btn').forEach(el => {
+    el.setAttribute('contenteditable', 'false');
+  });
+
   const editableSelectors = 'h1, h2, h3, h4, h5, h6, p, blockquote > p, .callout-body > p, td, th, li, .code-block-wrapper:not(.mermaid-wrapper) pre code';
   preview.querySelectorAll(editableSelectors).forEach(block => {
     if (block.dataset.blockReady) return;
     block.dataset.blockReady = 'true';
     block.setAttribute('data-block', 'true');
-    block.setAttribute('contenteditable', 'true');
-    block.setAttribute('spellcheck', 'false');
 
     if (block.tagName.toLowerCase() === 'p') {
       block.setAttribute('data-placeholder', "텍스트를 입력하거나 '/'를 눌러 명령을 실행하세요...");
@@ -2783,27 +2927,51 @@ function setupNotionBlocks() {
         };
       }
     }
+  });
 
-    block.oninput = () => {
-      if (block.tagName.toLowerCase() === 'code') {
-        syncFromPreview();
-        return;
-      }
-      if (tryMarkdownAutoTransform(block)) return;
-      const text = block.textContent.trim();
-      if (text.startsWith('/')) {
-        const query = text.slice(1).trim().toLowerCase();
-        openSlashMenu(block, query);
-      } else {
-        closeSlashMenu();
+  // preview 레벨 단일 통합 이벤트 연결 (다중 블록 선택 및 복합 조작 지원)
+  if (!preview.dataset.eventsBound) {
+    preview.dataset.eventsBound = 'true';
+
+    preview.addEventListener('input', () => {
+      const sel = window.getSelection();
+      const node = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer : null;
+      const block = findClosestBlock(node);
+      if (block) {
+        if (block.tagName && block.tagName.toLowerCase() === 'code') {
+          syncFromPreview();
+          return;
+        }
+        if (tryMarkdownAutoTransform(block)) return;
+        const text = block.textContent.trim();
+        if (text.startsWith('/')) {
+          const query = text.slice(1).trim().toLowerCase();
+          openSlashMenu(block, query);
+        } else {
+          closeSlashMenu();
+        }
       }
       syncFromPreview();
-    };
+    });
 
-    block.onkeydown = (e) => {
-      handleNotionBlockKeydown(e, block);
-    };
-  });
+    preview.addEventListener('keydown', (e) => {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) {
+        // 다중 블록 선택 상태에서 Backspace, Delete, Enter 입력 시 브라우저의 기본 다중 삭제/대체 동작 위임
+        if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Enter') {
+          setTimeout(() => {
+            syncFromPreview();
+          }, 10);
+          return;
+        }
+      }
+      const node = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer : null;
+      const block = findClosestBlock(node);
+      if (block) {
+        handleNotionBlockKeydown(e, block);
+      }
+    });
+  }
 
   // 코드 블록 언어 클릭 변경 대화상자 연결
   preview.querySelectorAll('.code-block-wrapper:not(.mermaid-wrapper)').forEach(wrapper => {
@@ -3050,13 +3218,8 @@ function applySlashCommand(type) {
       break;
     }
     case 'image': {
-      const src = prompt('이미지 파일 경로 또는 URL (예: images/photo.png 또는 https://...):', 'image.png');
-      if (!src) return;
-      const alt = prompt('이미지 설명 (대체 텍스트):', '이미지') || '이미지';
-      const p = document.createElement('p');
-      p.innerHTML = `<img src="${src.startsWith('http') || src.startsWith('/') ? src : '/api/raw?file=' + encodeURIComponent(src)}" alt="${alt}">`;
-      newElement = p;
-      break;
+      openImageModal(block);
+      return;
     }
     case 'footnote': {
       const p = document.createElement('p');
@@ -3079,6 +3242,23 @@ function applySlashCommand(type) {
   }
   syncFromPreview();
   render();
+}
+
+function findClosestBlock(node) {
+  if (!node) return preview.lastElementChild;
+  if (node === preview) return preview.lastElementChild;
+  let curr = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+  while (curr && curr !== preview) {
+    if (curr.parentElement === preview) {
+      return curr;
+    }
+    const tag = curr.tagName ? curr.tagName.toLowerCase() : '';
+    if (/^(h[1-6]|p|li|blockquote|table|details)$/.test(tag) || (curr.classList && curr.classList.contains('code-block-wrapper'))) {
+      return curr;
+    }
+    curr = curr.parentElement;
+  }
+  return preview.lastElementChild;
 }
 
 function isCaretAtStart(el) {
@@ -3424,37 +3604,75 @@ function focusBlock(el) {
   } catch (_) {}
 }
 
-// Notion 모드 클린 텍스트 붙여넣기 인터셉트
-preview.addEventListener('paste', (e) => {
+// Notion 모드 클린 텍스트 및 이미지 통합 붙여넣기 인터셉트
+preview.addEventListener('paste', async (e) => {
   if (currentViewMode !== 'notion') return;
-  e.preventDefault();
+
+  // 1. 클립보드에 이미지 파일이 포함되어 있는지 확인
+  if (e.clipboardData && e.clipboardData.items) {
+    for (const item of e.clipboardData.items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) {
+          const now = new Date();
+          const timestamp = now.getFullYear() +
+            String(now.getMonth() + 1).padStart(2, '0') +
+            String(now.getDate()).padStart(2, '0') + '_' +
+            String(now.getHours()).padStart(2, '0') +
+            String(now.getMinutes()).padStart(2, '0') +
+            String(now.getSeconds()).padStart(2, '0');
+          const ext = file.type.split('/')[1] || 'png';
+          const namedFile = new File([file], `screenshot_${timestamp}.${ext}`, { type: file.type });
+          await uploadAndInsertImage(namedFile, null);
+          return;
+        }
+      }
+    }
+  }
+
+  // 2. 텍스트 붙여넣기
   const text = (e.clipboardData || window.clipboardData).getData('text/plain');
   if (!text) return;
+  e.preventDefault();
 
   const sel = window.getSelection();
-  const targetEl = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer.parentElement : null;
-  const inTableCell = targetEl?.closest('td, th');
-  const inCode = targetEl?.closest('pre, code');
+  const startNode = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer : null;
+  const currentBlock = findClosestBlock(startNode) || preview.lastElementChild;
+  const inTableCell = startNode?.parentElement?.closest('td, th');
+  const inCode = startNode?.parentElement?.closest('pre, code');
 
+  // 단일 줄이거나 테이블/코드블록 내부인 경우: 현재 커서 위치에 바로 텍스트 삽입
   if (inTableCell || inCode || !text.includes('\n')) {
     document.execCommand('insertText', false, text);
     syncFromPreview();
     return;
   }
 
+  // 다중 줄 텍스트 붙여넣기:
   const lines = text.split(/\r?\n/);
-  const currentBlock = targetEl?.closest('[data-block="true"]') || preview.firstElementChild;
   document.execCommand('insertText', false, lines[0]);
 
-  let insertAfterEl = currentBlock || preview;
+  let insertAfterEl = currentBlock || preview.lastElementChild;
+  if (!insertAfterEl) {
+    insertAfterEl = document.createElement('p');
+    insertAfterEl.innerHTML = '<br>';
+    preview.appendChild(insertAfterEl);
+  }
+
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     const p = document.createElement('p');
-    if (line) p.textContent = line;
-    else p.innerHTML = '<br>';
+    if (line.trim().length > 0) {
+      p.textContent = line;
+    } else {
+      p.innerHTML = '<br>';
+    }
+    p.setAttribute('data-block-ready', 'true');
     insertAfterEl.after(p);
     insertAfterEl = p;
   }
+
   setupNotionBlocks();
   focusBlock(insertAfterEl);
   syncFromPreview();
@@ -4986,9 +5204,185 @@ if (menuExit) {
   });
 }
 
+// ---------- 이미지 삽입 및 업로드 관리 ----------
+const imageModal = document.getElementById('imageModal');
+const btnImageModalClose = document.getElementById('btnImageModalClose');
+const tabUploadImage = document.getElementById('tabUploadImage');
+const tabLinkImage = document.getElementById('tabLinkImage');
+const tabPanelUpload = document.getElementById('tabPanelUpload');
+const tabPanelLink = document.getElementById('tabPanelLink');
+const imageDropZone = document.getElementById('imageDropZone');
+const imageFileInput = document.getElementById('imageFileInput');
+const btnBrowseImage = document.getElementById('btnBrowseImage');
+const imageUrlInput = document.getElementById('imageUrlInput');
+const imageAltInput = document.getElementById('imageAltInput');
+const btnInsertImageLink = document.getElementById('btnInsertImageLink');
+const btnCancelImageLink = document.getElementById('btnCancelImageLink');
+const btnHeaderImage = document.getElementById('btnHeaderImage');
+
+let imageTargetBlock = null;
+
+function openImageModal(targetBlock = null) {
+  imageTargetBlock = targetBlock;
+  if (tabUploadImage) tabUploadImage.click();
+  if (imageUrlInput) imageUrlInput.value = '';
+  if (imageAltInput) imageAltInput.value = '';
+  if (imageModal) imageModal.classList.add('open');
+}
+
+function closeImageModal() {
+  if (imageModal) imageModal.classList.remove('open');
+  imageTargetBlock = null;
+}
+
+if (btnHeaderImage) {
+  btnHeaderImage.addEventListener('click', () => openImageModal());
+}
+if (btnImageModalClose) {
+  btnImageModalClose.addEventListener('click', closeImageModal);
+}
+if (imageModal) {
+  imageModal.addEventListener('click', (e) => {
+    if (e.target === imageModal) closeImageModal();
+  });
+}
+
+// 탭 전환
+if (tabUploadImage && tabLinkImage) {
+  tabUploadImage.addEventListener('click', () => {
+    tabUploadImage.classList.add('active');
+    tabLinkImage.classList.remove('active');
+    tabPanelUpload.style.display = 'block';
+    tabPanelLink.style.display = 'none';
+  });
+  tabLinkImage.addEventListener('click', () => {
+    tabLinkImage.classList.add('active');
+    tabUploadImage.classList.remove('active');
+    tabPanelUpload.style.display = 'none';
+    tabPanelLink.style.display = 'block';
+    setTimeout(() => imageUrlInput && imageUrlInput.focus(), 50);
+  });
+}
+
+// 파일 선택 버튼 & 파일 인풋
+if (btnBrowseImage && imageFileInput) {
+  btnBrowseImage.addEventListener('click', (e) => {
+    e.stopPropagation();
+    imageFileInput.click();
+  });
+}
+if (imageDropZone && imageFileInput) {
+  imageDropZone.addEventListener('click', () => imageFileInput.click());
+  imageDropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    imageDropZone.classList.add('dragover');
+  });
+  imageDropZone.addEventListener('dragleave', () => imageDropZone.classList.remove('dragover'));
+  imageDropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    imageDropZone.classList.remove('dragover');
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleImageFiles(Array.from(e.dataTransfer.files));
+    }
+  });
+  imageFileInput.addEventListener('change', () => {
+    if (imageFileInput.files && imageFileInput.files.length > 0) {
+      handleImageFiles(Array.from(imageFileInput.files));
+      imageFileInput.value = '';
+    }
+  });
+}
+
+// 웹 링크 삽입 버튼
+if (btnInsertImageLink) {
+  btnInsertImageLink.addEventListener('click', () => {
+    const url = imageUrlInput ? imageUrlInput.value.trim() : '';
+    if (!url) {
+      if (imageUrlInput) imageUrlInput.focus();
+      return;
+    }
+    const alt = imageAltInput ? imageAltInput.value.trim() : '이미지';
+    insertImageElement(url, alt, imageTargetBlock);
+    closeImageModal();
+  });
+}
+if (btnCancelImageLink) {
+  btnCancelImageLink.addEventListener('click', closeImageModal);
+}
+
+// 다중 파일 업로드 처리
+async function handleImageFiles(files) {
+  const imageFiles = files.filter(f => f.type.startsWith('image/') || /\.(png|jpe?g|gif|svg|webp|bmp|ico)$/i.test(f.name));
+  if (imageFiles.length === 0) {
+    showToast('지원되는 이미지 형식(PNG, JPG, GIF, SVG, WebP 등)이 아닙니다.');
+    return;
+  }
+  closeImageModal();
+  for (const file of imageFiles) {
+    await uploadAndInsertImage(file, imageTargetBlock);
+  }
+}
+
+// 백엔드 /api/upload 호출 및 문서 삽입
+async function uploadAndInsertImage(file, targetBlock) {
+  showToast(`${file.name} 업로드 중…`);
+  try {
+    const res = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      body: file
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || '업로드 실패 (' + res.status + ')');
+    }
+    const data = await res.json();
+    const alt = file.name.replace(/\.[^/.]+$/, '');
+    insertImageElement(data.path, alt, targetBlock);
+    showToast(`이미지 "${file.name}" 삽입 완료`, 2000);
+  } catch (err) {
+    showToast(`이미지 업로드 오류: ${err.message}`, 3500);
+  }
+}
+
+// DOM에 이미지 블록 삽입 및 마크다운 동기화
+function insertImageElement(src, alt, targetBlock) {
+  const p = document.createElement('p');
+  const displaySrc = (src.startsWith('http://') || src.startsWith('https://') || src.startsWith('/'))
+    ? src
+    : '/api/raw?file=' + encodeURIComponent(src);
+  p.innerHTML = `<img src="${displaySrc}" alt="${escapeHtml(alt || '이미지')}">`;
+  p.setAttribute('data-block-ready', 'true');
+
+  if (targetBlock && targetBlock.parentNode) {
+    targetBlock.parentNode.replaceChild(p, targetBlock);
+  } else {
+    const sel = window.getSelection();
+    let currentBlock = sel && sel.anchorNode ? findClosestBlock(sel.anchorNode) : null;
+    if (currentBlock && currentBlock.parentNode === preview) {
+      currentBlock.after(p);
+    } else {
+      preview.appendChild(p);
+    }
+  }
+
+  const nextP = document.createElement('p');
+  nextP.innerHTML = '<br>';
+  p.after(nextP);
+  placeCaretAt(nextP, 0);
+
+  dirty = true;
+  syncFromPreview();
+  render();
+}
+
 // 전역 단축키
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey) {
+    if (e.shiftKey && e.key.toLowerCase() === 'i') {
+      e.preventDefault();
+      openImageModal();
+      return;
+    }
     if (e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
     if (e.key.toLowerCase() === 'n') { e.preventDefault(); btnNew.click(); }
     if (e.key.toLowerCase() === 'o') { e.preventDefault(); openFileListModal(); }
@@ -5009,6 +5403,7 @@ document.addEventListener('keydown', (e) => {
     helpModal.classList.toggle('open');
   }
   if (e.key === 'Escape') {
+    if (imageModal && imageModal.classList.contains('open')) { closeImageModal(); return; }
     if (confirmDialogModal && confirmDialogModal.classList.contains('open')) closeConfirmDialog('cancel');
     if (helpModal.classList.contains('open')) helpModal.classList.remove('open');
     if (fileListModal.classList.contains('open')) closeFileListModal();
@@ -5020,10 +5415,34 @@ document.addEventListener('keydown', (e) => {
 });
 
 // 드래그 앤 드롭
-window.addEventListener('dragover', (e) => { e.preventDefault(); });
+window.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  if (e.dataTransfer && e.dataTransfer.types && Array.from(e.dataTransfer.types).includes('Files')) {
+    preview.classList.add('drag-active');
+  }
+});
+window.addEventListener('dragleave', (e) => {
+  if (e.clientX <= 0 || e.clientY <= 0 || e.clientX >= window.innerWidth || e.clientY >= window.innerHeight) {
+    preview.classList.remove('drag-active');
+  }
+});
 window.addEventListener('drop', async (e) => {
   e.preventDefault();
-  const file = e.dataTransfer && e.dataTransfer.files[0];
+  preview.classList.remove('drag-active');
+  if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+  const files = Array.from(e.dataTransfer.files);
+
+  // 1. 이미지 파일 드롭 처리
+  const imageFiles = files.filter(f => f.type.startsWith('image/') || /\.(png|jpe?g|gif|svg|webp|bmp|ico)$/i.test(f.name));
+  if (imageFiles.length > 0) {
+    for (const img of imageFiles) {
+      await uploadAndInsertImage(img, null);
+    }
+    return;
+  }
+
+  // 2. 마크다운 파일 드롭 처리
+  const file = files[0];
   if (file && (file.name.toLowerCase().endsWith('.md') || file.name.toLowerCase().endsWith('.markdown'))) {
     if (!await confirmDiscard()) return;
     const reader = new FileReader();

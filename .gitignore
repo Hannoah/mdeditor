@@ -1,3 +1,6 @@
 /target
+/dist
+/installer/target
 **/*.rs.bk
 .env
+.squad
