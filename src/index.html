@@ -634,6 +634,7 @@
   body.notion-view #preview {
     outline: none;
     cursor: text;
+    min-height: calc(100vh - 200px);
   }
   body.notion-view #preview [data-block] {
     position: relative;
@@ -1099,9 +1100,26 @@
   .code-lang {
     font-family: "JetBrains Mono", monospace;
     font-weight: 500;
-    font-size: 12px;
+    font-size: 11.5px;
     letter-spacing: 0.02em;
     color: var(--text-muted);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  .code-lang:hover {
+    background: var(--hover-overlay);
+    color: var(--accent);
+  }
+  .code-block-wrapper:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  #preview pre code[contenteditable="true"] {
+    outline: none;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
   .copy-code-btn {
     padding: 3px 9px;
@@ -1912,7 +1930,9 @@
   <button type="button" data-cmd="strike" title="취소선"><s>S</s></button>
   <button type="button" data-cmd="mark" title="형광펜 강조">==</button>
   <button type="button" data-cmd="code" title="인라인 코드">&lt;&gt;</button>
-  <button type="button" data-cmd="link" title="링크">🔗</button>
+  <button type="button" data-cmd="kbd" title="키보드 키 (<kbd>)"><kbd style="font-size:10px; font-family:inherit;">K</kbd></button>
+  <button type="button" data-cmd="link" title="링크 (Ctrl+K)">🔗</button>
+  <button type="button" data-cmd="clear" title="서식 지우기">✕</button>
 </div>
 
 <!-- Inline Source Editor Card (for Math, Mermaid) -->
@@ -2667,7 +2687,7 @@ function setupNotionBlocks() {
   if (currentViewMode !== 'notion') return;
   document.body.classList.add('notion-view');
 
-  const editableSelectors = 'h1, h2, h3, h4, h5, h6, p, blockquote > p, .callout-body > p, td, th, li';
+  const editableSelectors = 'h1, h2, h3, h4, h5, h6, p, blockquote > p, .callout-body > p, td, th, li, .code-block-wrapper:not(.mermaid-wrapper) pre code';
   preview.querySelectorAll(editableSelectors).forEach(block => {
     if (block.dataset.blockReady) return;
     block.dataset.blockReady = 'true';
@@ -2691,6 +2711,10 @@ function setupNotionBlocks() {
     }
 
     block.oninput = () => {
+      if (block.tagName.toLowerCase() === 'code') {
+        syncFromPreview();
+        return;
+      }
       if (tryMarkdownAutoTransform(block)) return;
       const text = block.textContent.trim();
       if (text.startsWith('/')) {
@@ -2705,6 +2729,37 @@ function setupNotionBlocks() {
     block.onkeydown = (e) => {
       handleNotionBlockKeydown(e, block);
     };
+  });
+
+  // 코드 블록 언어 클릭 변경 대화상자 연결
+  preview.querySelectorAll('.code-block-wrapper:not(.mermaid-wrapper)').forEach(wrapper => {
+    const langSpan = wrapper.querySelector('.code-lang');
+    const codeEl = wrapper.querySelector('pre code');
+    if (langSpan && !langSpan.dataset.langHandler) {
+      langSpan.dataset.langHandler = 'true';
+      langSpan.setAttribute('title', '클릭하여 언어 변경');
+      langSpan.onclick = (e) => {
+        e.stopPropagation();
+        const currentMatch = codeEl ? (codeEl.className.match(/language-([a-zA-Z0-9_-]+)/) || []) : [];
+        const currentLang = currentMatch[1] || '';
+        const newLang = prompt('코드 블록 언어 (예: python, rust, javascript, html, css, json 등):', currentLang);
+        if (newLang !== null) {
+          const clean = newLang.trim().toLowerCase();
+          langSpan.textContent = clean ? (clean.charAt(0).toUpperCase() + clean.slice(1)) : 'Text';
+          if (codeEl) {
+            codeEl.className = codeEl.className.replace(/\blanguage-[a-zA-Z0-9_-]+\b/g, '').trim();
+            if (clean) {
+              codeEl.classList.add(`language-${clean}`);
+            }
+            if (window.hljs) {
+              delete codeEl.dataset.highlighted;
+              hljs.highlightElement(codeEl);
+            }
+          }
+          syncFromPreview();
+        }
+      };
+    }
   });
 
   // 수식 및 Mermaid 다이어그램 전용 호버 편집 버튼 부착
@@ -2944,6 +2999,29 @@ function applySlashCommand(type) {
   render();
 }
 
+function isCaretAtStart(el) {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || !sel.rangeCount) return false;
+  const range = sel.getRangeAt(0);
+  const preRange = range.cloneRange();
+  preRange.selectNodeContents(el);
+  preRange.setEnd(range.startContainer, range.startOffset);
+  return preRange.toString().replace(/[\u200B-\u200D\uFEFF]/g, '').length === 0;
+}
+
+function focusBlockStart(el) {
+  if (!el) return;
+  el.focus();
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(true);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch (_) {}
+}
+
 function handleNotionBlockKeydown(e, block) {
   if (slashMenu && slashMenu.classList.contains('open')) {
     const visibleItems = Array.from(slashMenu.querySelectorAll('.slash-item')).filter(it => it.style.display !== 'none');
@@ -2974,6 +3052,35 @@ function handleNotionBlockKeydown(e, block) {
       e.preventDefault();
       closeSlashMenu();
       return;
+    }
+  }
+
+  // Code Block inside Notion mode: Tab indents 2 spaces, Enter inserts newline
+  if (block.tagName.toLowerCase() === 'code') {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      document.execCommand('insertText', false, '  ');
+      syncFromPreview();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      document.execCommand('insertText', false, '\n');
+      syncFromPreview();
+      return;
+    }
+    if (e.key === 'Backspace' && !block.textContent.trim()) {
+      const wrapper = block.closest('.code-block-wrapper');
+      if (wrapper) {
+        e.preventDefault();
+        const p = document.createElement('p');
+        p.innerHTML = '<br>';
+        wrapper.replaceWith(p);
+        setupNotionBlocks();
+        focusBlock(p);
+        syncFromPreview();
+        return;
+      }
     }
   }
 
@@ -3152,11 +3259,13 @@ function handleNotionBlockKeydown(e, block) {
     }
   }
 
-  // Backspace on empty block removes it and focuses previous block
+  // Backspace: empty block removal or offset-0 block un-wrapping
   if (e.key === 'Backspace') {
     const text = block.textContent.trim();
+    const tag = block.tagName.toLowerCase();
+
+    // 1) 빈 블록 삭제 및 이전 블록 포커스
     if (!text || text === '/') {
-      const tag = block.tagName.toLowerCase();
       if (/^h[1-6]$/.test(tag) || tag === 'blockquote') {
         e.preventDefault();
         const p = document.createElement('p');
@@ -3177,6 +3286,44 @@ function handleNotionBlockKeydown(e, block) {
           syncFromPreview();
           return;
         }
+      }
+    }
+
+    // 2) 내용이 있는 블록의 0번 오프셋(맨 앞)에서 백스페이스 입력 시 일반 문단으로 전환
+    if (isCaretAtStart(block)) {
+      if (/^h[1-6]$/.test(tag)) {
+        e.preventDefault();
+        const p = document.createElement('p');
+        p.innerHTML = block.innerHTML || '<br>';
+        block.replaceWith(p);
+        setupNotionBlocks();
+        focusBlockStart(p);
+        syncFromPreview();
+        return;
+      }
+      if (tag === 'li') {
+        e.preventDefault();
+        const parentList = block.parentElement;
+        const p = document.createElement('p');
+        const cloned = block.cloneNode(true);
+        cloned.querySelector('input[type="checkbox"]')?.remove();
+        p.innerHTML = cloned.innerHTML.trim() || '<br>';
+        if (block.nextElementSibling) {
+          const nextList = parentList.cloneNode(false);
+          while (block.nextSibling) {
+            nextList.appendChild(block.nextSibling);
+          }
+          parentList.after(p);
+          p.after(nextList);
+        } else {
+          parentList.after(p);
+        }
+        block.remove();
+        if (parentList.children.length === 0) parentList.remove();
+        setupNotionBlocks();
+        focusBlockStart(p);
+        syncFromPreview();
+        return;
       }
     }
   }
@@ -3283,9 +3430,24 @@ if (floatingFormatBar) {
           }
           break;
         }
+        case 'kbd': {
+          const sel = window.getSelection();
+          if (sel.rangeCount) {
+            const range = sel.getRangeAt(0);
+            const kbd = document.createElement('kbd');
+            kbd.appendChild(range.extractContents());
+            range.insertNode(kbd);
+          }
+          break;
+        }
         case 'link': {
           const url = prompt('링크 URL (https://...):', 'https://');
           if (url) document.execCommand('createLink', false, url);
+          break;
+        }
+        case 'clear': {
+          document.execCommand('removeFormat');
+          document.execCommand('unlink');
           break;
         }
       }
@@ -3427,6 +3589,24 @@ window.copyCode = function(btn) {
     }, 1500);
   }).catch(() => { setStatus('복사 실패'); });
 };
+
+// ---------- Notion 모드: 캔버스 여백 또는 하단 빈 공간 클릭 시 새 문단 생성/포커스 ----------
+previewContainer.addEventListener('click', (e) => {
+  if (currentViewMode !== 'notion') return;
+  if (e.target === previewContainer || e.target === preview) {
+    const lastBlock = preview.lastElementChild;
+    if (lastBlock && lastBlock.tagName.toLowerCase() === 'p' && !lastBlock.textContent.trim()) {
+      focusBlock(lastBlock);
+    } else {
+      const p = document.createElement('p');
+      p.innerHTML = '<br>';
+      preview.appendChild(p);
+      setupNotionBlocks();
+      focusBlock(p);
+      syncFromPreview();
+    }
+  }
+});
 
 // ---------- 체크박스 및 링크 연동 ----------
 preview.addEventListener('click', (e) => {
@@ -4182,21 +4362,24 @@ fileSearchInput.addEventListener('input', renderFileList);
 fileSearchInput.addEventListener('keydown', (e) => {
   const items = fileItemsList.querySelectorAll('.file-item');
   if (items.length === 0) return;
+  if (selectedFileIndex < 0 || selectedFileIndex >= items.length) {
+    selectedFileIndex = 0;
+  }
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    items[selectedFileIndex].classList.remove('selected');
+    items[selectedFileIndex]?.classList.remove('selected');
     selectedFileIndex = (selectedFileIndex + 1) % items.length;
-    items[selectedFileIndex].classList.add('selected');
-    items[selectedFileIndex].scrollIntoView({ block: 'nearest' });
+    items[selectedFileIndex]?.classList.add('selected');
+    items[selectedFileIndex]?.scrollIntoView({ block: 'nearest' });
   } else if (e.key === 'ArrowUp') {
     e.preventDefault();
-    items[selectedFileIndex].classList.remove('selected');
+    items[selectedFileIndex]?.classList.remove('selected');
     selectedFileIndex = (selectedFileIndex - 1 + items.length) % items.length;
-    items[selectedFileIndex].classList.add('selected');
-    items[selectedFileIndex].scrollIntoView({ block: 'nearest' });
+    items[selectedFileIndex]?.classList.add('selected');
+    items[selectedFileIndex]?.scrollIntoView({ block: 'nearest' });
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    items[selectedFileIndex].click();
+    items[selectedFileIndex]?.click();
   } else if (e.key === 'Escape') {
     closeFileListModal();
   }
@@ -4542,6 +4725,16 @@ document.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'o') { e.preventDefault(); openFileListModal(); }
     if (e.key.toLowerCase() === 'f') { e.preventDefault(); openSearch(false); }
     if (e.key.toLowerCase() === 'h') { e.preventDefault(); openSearch(true); }
+    if (e.key.toLowerCase() === 'k') {
+      if (currentViewMode === 'notion') {
+        e.preventDefault();
+        const url = prompt('링크 URL (https://...):', 'https://');
+        if (url) {
+          document.execCommand('createLink', false, url);
+          syncFromPreview();
+        }
+      }
+    }
   }
   if (e.altKey) {
     if (e.key === '1') { e.preventDefault(); setViewMode('notion'); }
