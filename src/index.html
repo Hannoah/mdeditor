@@ -1352,6 +1352,47 @@
     overflow: hidden;
     box-shadow: var(--shadow-lg);
   }
+  .dialog-modal {
+    width: 440px;
+    max-width: 92vw;
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    animation: dialogPop 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes dialogPop {
+    from { opacity: 0; transform: scale(0.96) translateY(4px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  .dialog-icon-wrap {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .dialog-icon-wrap.warning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+  }
+  .dialog-icon-wrap.danger {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+  }
+  .dialog-icon-wrap.info {
+    background: rgba(var(--accent-rgb), 0.15);
+    color: var(--accent);
+  }
+  .dialog-icon-wrap.exit {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+  }
+  #btnDialogSecondary:hover {
+    background: rgba(239, 68, 68, 0.1) !important;
+  }
   .modal-header {
     display: flex;
     justify-content: space-between;
@@ -1524,6 +1565,11 @@
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
     <span>도움말</span>
   </button>
+  <div style="height:1px; background:var(--border); margin:4px 0;"></div>
+  <button id="menuExit" type="button" title="프로그램 종료 (Ctrl+Q)">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+    <span style="color:#ef4444;">프로그램 종료</span>
+  </button>
 </div>
 
 <main>
@@ -1638,6 +1684,7 @@
         <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd></td><td>본문 검색 (Find)</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>H</kbd></td><td>본문 찾기 및 바꾸기 (Find & Replace)</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd> / <kbd>I</kbd> / <kbd>K</kbd></td><td>선택 영역 굵게 / 기울임 / 하이퍼링크</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + <kbd>Q</kbd></td><td>프로그램 안전 종료 (종료 확인 모달)</td></tr>
         <tr><td><kbd>/</kbd></td><td>블록 삽입 슬래시(/) 명령어 메뉴 열기</td></tr>
         <tr><td>마우스 드래그</td><td>플로팅 서식 툴바 (굵게, 기울임, 취소선, 형광펜, 코드, 키캡, 링크 등)</td></tr>
         <tr><td>언어 배지 클릭</td><td>코드 블록 프로그래밍 언어 실시간 변경</td></tr>
@@ -1660,6 +1707,31 @@
     </div>
     <div class="modal-footer">
       <button class="primary" id="btnConfirmHelp">확인</button>
+    </div>
+  </div>
+</div>
+
+<!-- Custom Confirm / Exit Dialog Modal -->
+<div class="modal-overlay" id="confirmDialogModal" style="z-index: 300;">
+  <div class="modal dialog-modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+    <div class="modal-header" style="border-bottom: none; padding: 18px 20px 8px;">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <div class="dialog-icon-wrap warning" id="dialogIconWrap">
+          <svg id="dialogIconSvg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+        </div>
+        <span style="font-size:15px; font-weight:600; color:var(--text);" id="dialogTitle">저장되지 않은 변경사항</span>
+      </div>
+      <button id="btnDialogClose" class="btn-icon ghost" title="닫기 (Esc)" style="padding:4px 8px; font-size:14px; border-radius:6px;">✕</button>
+    </div>
+    <div class="modal-body" style="padding: 6px 20px 18px;">
+      <div style="font-size: 13.5px; color: var(--text-muted); line-height: 1.6;" id="dialogMessage"></div>
+    </div>
+    <div class="modal-footer" style="gap: 8px; border-top: 1px solid var(--border); background: var(--surface-elevated); padding: 12px 20px; border-radius: 0 0 12px 12px;">
+      <button class="ghost" id="btnDialogCancel" style="padding:7px 14px; font-size:13px; border-radius:6px;">취소</button>
+      <button class="ghost" id="btnDialogSecondary" style="padding:7px 14px; font-size:13px; border-radius:6px; color:#ef4444; border:1px solid rgba(239,68,68,0.3);">저장 안 함</button>
+      <button class="primary" id="btnDialogPrimary" style="padding:7px 16px; font-size:13px; border-radius:6px; font-weight:500;">저장 후 계속</button>
     </div>
   </div>
 </div>
@@ -2057,6 +2129,17 @@ function setViewMode() {
 
 // ---------- 노션 통합 라이브 캔버스 엔진 (DOM <-> Markdown) ----------
 let previewSyncTimer = null;
+let autoSaveTimer = null;
+
+function scheduleAutoSave() {
+  clearTimeout(autoSaveTimer);
+  if (!currentFile || isExternalDrop) return;
+  autoSaveTimer = setTimeout(() => {
+    if (dirty && currentFile && !isExternalDrop) {
+      save().catch(() => {});
+    }
+  }, 2000);
+}
 
 function syncFromPreview() {
   if (currentViewMode !== 'notion') return;
@@ -2069,6 +2152,7 @@ function syncFromPreview() {
       updateStats();
       updateFileDisplay();
       setStatus('편집 중… (노션 모드)', true);
+      scheduleAutoSave();
     }
   }, 90);
 }
@@ -3396,9 +3480,13 @@ preview.addEventListener('click', (e) => {
       try {
         const u = new URL(href, window.location.origin);
         const fileParam = u.searchParams.get('file');
-        if (fileParam && confirmDiscard()) {
-          openFile(fileParam);
-          window.history.pushState({}, '', href);
+        if (fileParam) {
+          confirmDiscard().then((ok) => {
+            if (ok) {
+              openFile(fileParam);
+              window.history.pushState({}, '', href);
+            }
+          });
         }
       } catch (_) {}
       return;
@@ -4004,7 +4092,7 @@ function createFileItemElement(file) {
   `;
 
   div.addEventListener('click', async () => {
-    if (confirmDiscard()) {
+    if (await confirmDiscard()) {
       closeFileListModal();
       await openFile(file);
       window.history.pushState({}, '', '/?file=' + encodeURIComponent(file));
@@ -4014,7 +4102,15 @@ function createFileItemElement(file) {
   const delBtn = div.querySelector('.btn-item-delete');
   delBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (!confirm(`정말 '${file}' 파일을 영구 삭제할까요?\n(휴지통에서 복구할 수 없습니다)`)) return;
+    const choice = await showConfirmDialog({
+      title: '파일 영구 삭제',
+      message: `정말 <strong>${escapeHtml(file)}</strong> 파일을 영구 삭제할까요?<br><span style="color:#ef4444;font-size:12px;">휴지통에서 복구할 수 없으며 영구적으로 제거됩니다.</span>`,
+      icon: 'danger',
+      primaryText: '삭제',
+      primaryDanger: true,
+      cancelText: '취소'
+    });
+    if (choice !== 'primary') return;
     try {
       const res = await fetch('/api/delete?file=' + encodeURIComponent(file), { method: 'POST' });
       if (res.ok) {
@@ -4285,6 +4381,182 @@ window.addEventListener('pagehide', () => {
   navigator.sendBeacon('/api/exit?tab=' + encodeURIComponent(tabId));
 });
 
+// ---------- 노션 스타일 커스텀 모달 대화상자 (Confirm/Exit) ----------
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+let confirmDialogResolver = null;
+const confirmDialogModal = document.getElementById('confirmDialogModal');
+const dialogTitle = document.getElementById('dialogTitle');
+const dialogMessage = document.getElementById('dialogMessage');
+const dialogIconWrap = document.getElementById('dialogIconWrap');
+const dialogIconSvg = document.getElementById('dialogIconSvg');
+const btnDialogPrimary = document.getElementById('btnDialogPrimary');
+const btnDialogSecondary = document.getElementById('btnDialogSecondary');
+const btnDialogCancel = document.getElementById('btnDialogCancel');
+const btnDialogClose = document.getElementById('btnDialogClose');
+
+const DIALOG_ICONS = {
+  warning: '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line>',
+  danger: '<circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line>',
+  info: '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line>',
+  exit: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line>'
+};
+
+function showConfirmDialog(options) {
+  return new Promise((resolve) => {
+    confirmDialogResolver = resolve;
+    dialogTitle.textContent = options.title || '확인';
+    dialogMessage.innerHTML = options.message || '';
+
+    const iconType = options.icon || 'warning';
+    dialogIconWrap.className = 'dialog-icon-wrap ' + (iconType === 'danger' ? 'danger' : iconType === 'info' ? 'info' : iconType === 'exit' ? 'exit' : 'warning');
+    dialogIconSvg.innerHTML = DIALOG_ICONS[iconType] || DIALOG_ICONS.warning;
+
+    btnDialogPrimary.textContent = options.primaryText || '확인';
+    if (options.primaryDanger) {
+      btnDialogPrimary.style.background = '#ef4444';
+      btnDialogPrimary.style.borderColor = '#dc2626';
+      btnDialogPrimary.style.color = '#fff';
+    } else {
+      btnDialogPrimary.style.background = '';
+      btnDialogPrimary.style.borderColor = '';
+      btnDialogPrimary.style.color = '';
+    }
+
+    if (options.secondaryText) {
+      btnDialogSecondary.style.display = 'inline-block';
+      btnDialogSecondary.textContent = options.secondaryText;
+    } else {
+      btnDialogSecondary.style.display = 'none';
+    }
+
+    if (options.cancelText !== null && options.cancelText !== undefined) {
+      btnDialogCancel.style.display = 'inline-block';
+      btnDialogCancel.textContent = options.cancelText || '취소';
+    } else {
+      btnDialogCancel.style.display = 'none';
+    }
+
+    confirmDialogModal.classList.add('open');
+    btnDialogPrimary.focus();
+  });
+}
+
+function closeConfirmDialog(result) {
+  if (confirmDialogModal.classList.contains('open')) {
+    confirmDialogModal.classList.remove('open');
+    if (confirmDialogResolver) {
+      const res = confirmDialogResolver;
+      confirmDialogResolver = null;
+      res(result);
+    }
+  }
+}
+
+btnDialogPrimary.addEventListener('click', () => closeConfirmDialog('primary'));
+btnDialogSecondary.addEventListener('click', () => closeConfirmDialog('secondary'));
+btnDialogCancel.addEventListener('click', () => closeConfirmDialog('cancel'));
+btnDialogClose.addEventListener('click', () => closeConfirmDialog('cancel'));
+confirmDialogModal.addEventListener('click', (e) => {
+  if (e.target === confirmDialogModal) closeConfirmDialog('cancel');
+});
+
+async function confirmDiscard() {
+  if (!dirty) return true;
+  const fileName = currentFile || '제목 없는 문서';
+  const choice = await showConfirmDialog({
+    title: '저장되지 않은 변경사항',
+    message: `<strong>${escapeHtml(fileName)}</strong> 문서에 저장되지 않은 변경사항이 있습니다.<br>계속 진행하기 전에 저장할까요?`,
+    icon: 'warning',
+    primaryText: '저장 후 계속',
+    secondaryText: '저장 안 함',
+    cancelText: '취소'
+  });
+
+  if (choice === 'primary') {
+    return await save();
+  }
+  if (choice === 'secondary') {
+    dirty = false;
+    return true;
+  }
+  return false;
+}
+
+function showExitOverlay() {
+  document.body.innerHTML = `
+    <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; background:var(--bg); color:var(--text); font-family:var(--font-sans); text-align:center; padding:20px;">
+      <div style="width:54px; height:54px; border-radius:16px; background:rgba(239,68,68,0.12); color:#ef4444; display:flex; align-items:center; justify-content:center; margin-bottom:20px;">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+      </div>
+      <h2 style="font-size:20px; font-weight:600; margin-bottom:8px;">프로그램이 안전하게 종료되었습니다</h2>
+      <p style="font-size:14px; color:var(--text-muted); margin-bottom:24px;">모든 데이터가 안전하게 저장되었습니다. 이 창을 닫아주세요.</p>
+      <button onclick="window.close()" class="primary" style="padding:8px 22px; font-size:13.5px; border-radius:8px; cursor:pointer;">창 닫기</button>
+    </div>
+  `;
+}
+
+async function exitApp() {
+  if (dirty) {
+    const fileName = currentFile || '제목 없는 문서';
+    const choice = await showConfirmDialog({
+      title: '프로그램 종료',
+      message: `<strong>${escapeHtml(fileName)}</strong> 문서에 저장되지 않은 변경사항이 있습니다.<br>변경사항을 저장하고 프로그램을 종료할까요?`,
+      icon: 'warning',
+      primaryText: '저장 후 종료',
+      secondaryText: '저장 안 함 (종료)',
+      cancelText: '취소'
+    });
+
+    if (choice === 'primary') {
+      const ok = await save();
+      if (!ok) return;
+    } else if (choice === 'secondary') {
+      dirty = false;
+    } else {
+      return;
+    }
+  } else {
+    const choice = await showConfirmDialog({
+      title: '프로그램 종료',
+      message: '마크다운 에디터를 종료할까요?',
+      icon: 'exit',
+      primaryText: '프로그램 종료',
+      primaryDanger: true,
+      cancelText: '취소'
+    });
+    if (choice !== 'primary') return;
+  }
+
+  dirty = false;
+  try {
+    await fetch('/api/exit?tab=' + encodeURIComponent(tabId), { method: 'POST' });
+  } catch (_) {}
+
+  window.close();
+  showExitOverlay();
+}
+
+// 탭 전환 / 블러 시 자동 안전 저장
+window.addEventListener('visibilitychange', () => {
+  if (document.hidden && dirty && currentFile && !isExternalDrop) {
+    save().catch(() => {});
+  }
+});
+window.addEventListener('blur', () => {
+  if (dirty && currentFile && !isExternalDrop) {
+    save().catch(() => {});
+  }
+});
+
 // ---------- 파일 작업 (불러오기 / 새 파일 / 저장) ----------
 async function errorOf(res) {
   const d = await res.json().catch(() => ({}));
@@ -4293,9 +4565,6 @@ async function errorOf(res) {
 function normName(n) {
   n = n.trim();
   return /\.(md|markdown)$/i.test(n) ? n : n + '.md';
-}
-function confirmDiscard() {
-  return !dirty || confirm('저장하지 않은 변경사항이 있습니다. 계속 진행할까요?');
 }
 async function serverFileExists(name) {
   try {
@@ -4330,9 +4599,9 @@ async function openFile(file) {
   }
 }
 
-function loadLocalFile(file) {
+async function loadLocalFile(file) {
   if (!file) return;
-  if (!confirmDiscard()) { filePicker.value = ''; return; }
+  if (!await confirmDiscard()) { filePicker.value = ''; return; }
   const reader = new FileReader();
   reader.onload = (ev) => {
     editor.value = ev.target.result;
@@ -4355,7 +4624,7 @@ filePicker.addEventListener('change', () => loadLocalFile(filePicker.files[0]));
 
 // 새 파일
 btnNew.addEventListener('click', async () => {
-  if (!confirmDiscard()) return;
+  if (!await confirmDiscard()) return;
   const name = prompt('새 파일 이름 (.md):', 'untitled.md');
   if (!name || !name.trim()) return;
   const file = normName(name);
@@ -4375,13 +4644,24 @@ btnNew.addEventListener('click', async () => {
 async function save() {
   if (currentViewMode === 'notion') {
     clearTimeout(previewSyncTimer);
+    clearTimeout(autoSaveTimer);
     editor.value = serializePreviewToMarkdown(preview);
   }
   if (!currentFile) {
     const name = prompt('저장할 파일 이름 (.md):', 'untitled.md');
-    if (!name || !name.trim()) return;
+    if (!name || !name.trim()) return false;
     const file = normName(name);
-    if (await serverFileExists(file) && !confirm(file + ' 파일이 이미 있습니다. 덮어쓸까요?')) return;
+    if (await serverFileExists(file)) {
+      const choice = await showConfirmDialog({
+        title: '파일 덮어쓰기',
+        message: `<strong>${escapeHtml(file)}</strong> 파일이 이미 디스크에 존재합니다.<br>기존 내용을 덮어쓸까요?`,
+        icon: 'warning',
+        primaryText: '덮어쓰기',
+        primaryDanger: true,
+        cancelText: '취소'
+      });
+      if (choice !== 'primary') return false;
+    }
     currentFile = file;
     isExternalDrop = false;
   }
@@ -4395,11 +4675,17 @@ async function save() {
       updateFileDisplay();
       setStatus('저장됨', false);
       showToast('✓ 저장되었습니다: ' + currentFile);
+      return true;
     } else {
-      setStatus('저장 실패: ' + await errorOf(res), dirty);
-      showToast('저장 실패: ' + await errorOf(res));
+      const err = await errorOf(res);
+      setStatus('저장 실패: ' + err, dirty);
+      showToast('저장 실패: ' + err);
+      return false;
     }
-  } catch (e) { setStatus('저장 실패', dirty); }
+  } catch (e) {
+    setStatus('저장 실패', dirty);
+    return false;
+  }
 }
 btnSave.addEventListener('click', save);
 
@@ -4472,6 +4758,15 @@ helpModal.addEventListener('click', (e) => {
   if (e.target === helpModal) helpModal.classList.remove('open');
 });
 
+// 프로그램 종료 메뉴 버튼
+const menuExit = document.getElementById('menuExit');
+if (menuExit) {
+  menuExit.addEventListener('click', () => {
+    settingsMenu.classList.remove('open');
+    exitApp();
+  });
+}
+
 // 전역 단축키
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey) {
@@ -4480,6 +4775,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'o') { e.preventDefault(); openFileListModal(); }
     if (e.key.toLowerCase() === 'f') { e.preventDefault(); openSearch(false); }
     if (e.key.toLowerCase() === 'h') { e.preventDefault(); openSearch(true); }
+    if (e.key.toLowerCase() === 'q') { e.preventDefault(); exitApp(); }
     if (e.key.toLowerCase() === 'k') {
       e.preventDefault();
       const url = prompt('링크 URL (https://...):', 'https://');
@@ -4494,6 +4790,7 @@ document.addEventListener('keydown', (e) => {
     helpModal.classList.toggle('open');
   }
   if (e.key === 'Escape') {
+    if (confirmDialogModal && confirmDialogModal.classList.contains('open')) closeConfirmDialog('cancel');
     if (helpModal.classList.contains('open')) helpModal.classList.remove('open');
     if (fileListModal.classList.contains('open')) closeFileListModal();
     if (searchBar.classList.contains('open')) closeSearch();
@@ -4505,11 +4802,11 @@ document.addEventListener('keydown', (e) => {
 
 // 드래그 앤 드롭
 window.addEventListener('dragover', (e) => { e.preventDefault(); });
-window.addEventListener('drop', (e) => {
+window.addEventListener('drop', async (e) => {
   e.preventDefault();
   const file = e.dataTransfer && e.dataTransfer.files[0];
   if (file && (file.name.toLowerCase().endsWith('.md') || file.name.toLowerCase().endsWith('.markdown'))) {
-    if (!confirmDiscard()) return;
+    if (!await confirmDiscard()) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
       editor.value = ev.target.result;

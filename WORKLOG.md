@@ -407,7 +407,40 @@
 - **배포 완료**:
   - 최신 최적화 릴리즈 바이너리(673,280 바이트)를 `install.ps1`을 통해 로컬 설치 경로(`%LOCALAPPDATA%\Programs\mdeditor\mdeditor.exe`)에 완전 배포 및 설치본 일치 검증 완료.
 
+## 2026-11-10 — 노션 스타일 모달 메시지 박스 및 종료/자동 저장 UX 개선 (배포 6차)
+
+### 1. 브라우저 네이티브 confirm() 제거 및 노션 스타일 커스텀 모달 구현 (`src/index.html`)
+- 브라우저 기본의 각진 흰색 alert/confirm 팝업창을 완전히 제거.
+- 세련된 노션 디자인 가이드에 맞춘 전용 모달 (`#confirmDialogModal`, `.dialog-modal`) 도입:
+  - 12px 둥근 모서리, 소프트 그림자(`var(--shadow-lg)`), 다크/라이트 테마 자동 반응.
+  - 컨텍스트별 SVG 아이콘 및 뱃지 배경 (`.warning`, `.danger`, `.info`, `.exit`).
+  - 팝인 애니메이션(`dialogPop`, `cubic-bezier(0.16, 1, 0.3, 1)`).
+  - 버튼 레이아웃: `[저장 후 계속 / 저장 후 종료]` (Primary Accent), `[저장 안 함]` (Muted Red Ghost), `[취소]` (Ghost).
+  - 키보드 접근성: Esc 키로 안전 취소/닫기 및 모달 열림 시 확인 버튼 자동 포커스.
+
+### 2. 프로그램 종료 (Exit) 및 단축키 연동 (`src/index.html`)
+- 설정 메뉴(`#settingsMenu`)에 "프로그램 종료" 버튼 (`#menuExit`, 레드 아이콘) 추가.
+- 전역 단축키 <kbd>Ctrl</kbd>+<kbd>Q</kbd> 바인딩:
+  - 미저장 변경사항이 있을 때: "저장 후 종료", "저장 안 함 (종료)", "취소" 3선택지 제공.
+  - 변경사항이 저장되어 있을 때: "프로그램 종료", "취소" 확인 제공.
+  - 종료 승인 시 백엔드 세션(`/api/exit?tab=...`) 안전 호출 후 `window.close()` 실행 및 브라우저 정책 차단 시 안전 종료 안내 화면(`showExitOverlay`) 표시.
+
+### 3. 디바운스 자동 저장 (Auto-Save) 연동 (`src/index.html`)
+- 노션 라이브 캔버스에서 타이핑 중 2초간 입력이 멈추면 백그라운드에서 디스크로 자동 저장(`scheduleAutoSave`).
+- 탭 전환(`visibilitychange: hidden`) 또는 창 포커스 아웃(`blur`) 발생 시 즉시 디스크 안전 저장.
+- 문서가 자동으로 안전 저장되므로, 실수로 창을 닫더라도 데이터 유실이 없으며 브라우저의 투박한 기본 팝업이 뜨지 않고 깔끔하게 닫힘.
+
+### 4. 파일 삭제 및 덮어쓰기 모달 업그레이드 (`src/index.html`)
+- 파일 목록 탐색기(`Ctrl+O`)에서 파일 삭제 시 노션 스타일 경고 모달 표시 (`danger` 뱃지 및 영구 삭제 주의 안내).
+- 파일 덮어쓰기 저장 시 기존 파일 존재 경고 모달 표시.
+
+### 5. 검증 및 배포 결과
+- `cargo fmt --check`: 클린 통과.
+- `cargo clippy -- -D warnings`: 무경고 무에러 클린 통과.
+- `cargo test`: 전체 51개 단위 테스트 100% 통과 (51 passed, 0 failed).
+- `cargo build --release`: 최신 바이너리 성공적 빌드.
+- `install.ps1`: 로컬 Windows 환경(`%LOCALAPPDATA%\Programs\mdeditor`) 배포 완료 및 바이너리 SHA256 해시 일치 검증 완료.
+
 ## 미반영·주의사항
-- `cargo clippy -- -D warnings` 2건, `cargo fmt --check` 차이는 변경 전부터 있던 것으로 손대지 않음.
 - 설치 프로그램은 샌드박스 밖 쓰기라 직접 실행 불가 — `install.bat` 사용자 실행 + 결과 검증 방식으로 배포함.
 - 소스를 고친 뒤에는 `install.bat` 재실행해야 설치본에 반영됨.
