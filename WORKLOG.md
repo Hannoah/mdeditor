@@ -3,6 +3,42 @@
 세션 작업 내역을 일자별로 정리한 로그입니다.
 검증 수치는 실행 당시 실측값이며, `target/` 빌드 산출물은 기록 대상에서 제외합니다.
 
+## 2026-11-10 — 백엔드 최적화·리팩터링 및 프로덕션급 Windows 인스톨러/언인스톨러 스위트 구축
+
+### 1. 백엔드 라우팅 및 리소스 최적화 (`src/main.rs`)
+- **디렉토리/파일 인자 분기 처리 정밀화 (`resolve_target`)**:
+  - 커맨드라인 또는 탐색기 컨텍스트 메뉴에서 디렉토리 경로가 인자로 전달될 때(`abs.is_dir()`), 해당 디렉토리를 루트 작업 폴더로 즉시 바인딩하고 파일 열기 파라미터를 초기화하여 폴더 열기 기능 완전 지원.
+  - 파일 인자 전달 시 해당 파일의 부모 디렉토리를 루트로, 파일명을 초기 로드 파일로 안전하게 분기.
+- **HTTP 응답 버퍼링 및 시스템 콜 절감 (`send_response_cache`)**:
+  - `BufWriter::with_capacity(16 * 1024, stream)`을 도입하여 HTTP 헤더와 응답 본문을 메모리 버퍼에서 단일 TCP 패킷/단일 write 시스템 콜로 병합 전송함으로써 네트워크 패킷 단편화 방지 및 응답 레이턴시 최소화.
+- **JSON 직렬화 무할당 최적화 (`write_json_escaped`, `list_markdown_files`, `json_wrap`)**:
+  - `write_json_escaped`를 통해 기할당된 `String` 버퍼에 직접 이스케이프 문자를 스트리밍하도록 개선.
+  - `list_markdown_files`에서 중간 `Vec<String>` 할당 2회 및 `join(",")` 재할당을 전면 제거하여 파일 목록 조회 시 단일 문자열 버퍼로 조합.
+- **CLI 옵션 및 콘솔 리디렉션 (`--version`, `--help`)**:
+  - `-v, --version`, `-h, --help` 옵션 추가.
+  - GUI 서브시스템(`windows_subsystem = "windows"`) 상태에서 터미널 호출 시 `AttachConsole(ATTACH_PARENT_PROCESS)` 및 `CONOUT$` 스트림 핸들 재연결을 통해 콘솔 출력 지원.
+
+### 2. 프로덕션급 Windows 설치/제거 마법사 업그레이드 (`install.ps1`, `install.bat`, `uninstall.ps1`, `uninstall.bat`)
+- **실행 중인 프로세스 감지 및 안전 종료**:
+  - 설치 및 제거 시 백그라운드에 구동 중인 `mdeditor.exe` 인스턴스를 감지하여 파일 잠금 충돌(File Lock) 없이 안전하게 종료 후 교체/제거.
+- **Windows 설정 "설정 > 앱 > 설치된 앱" (프로그램 추가/제거) 공식 등록**:
+  - `HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MDEditor`에 `DisplayName`, `DisplayVersion`, `Publisher`, `DisplayIcon`, `InstallLocation`, `UninstallString`, `QuietUninstallString`, `EstimatedSize`, `URLInfoAbout`, `NoModify`, `NoRepair` 완벽 등록.
+  - Windows 기본 설정 UI 및 제어판에서 앱 아이콘과 함께 표시되며, "제거" 클릭 시 즉시 제거 마법사 연동.
+- **Windows 탐색기 폴더 및 폴더 배경 우클릭 컨텍스트 메뉴 ("MDEditor로 이 폴더 열기")**:
+  - `HKCU:\Software\Classes\Directory\shell\MDEditor` 및 `HKCU:\Software\Classes\Directory\Background\shell\MDEditor` 등록 (`"%V"` 전달).
+  - 어떤 폴더나 폴더 빈 공간에서도 우클릭 한 번으로 해당 위치를 루트로 MDEditor 실행 가능.
+- **설치/제거 CLI 파라미터 및 마법사 비주얼 개선**:
+  - `-Quiet`, `-NoDesktopShortcut`, `-RunAfterInstall` 파라미터 지원.
+  - ASCII 로고 배너, 단계별 상태 인디케이터(`[1/6] ~ [6/6]`), `[✓]` 체크마크 등 상용 제품 수준의 콘솔 UX 제공.
+  - 제거 시 인스톨러 디렉토리 자체 삭제를 위한 지연 백그라운드 프로세스 스케줄링 적용.
+
+### 3. 검증 결과
+- `cargo fmt --check`: 클린 통과.
+- `cargo clippy -- -D warnings`: 무경고 무에러 통과.
+- `cargo test`: 53개 단위 테스트 전체 통과 (53 passed, 0 failed in 0.04s).
+- `cargo build --release`: **693,760 바이트 (~677 KB)**.
+- `install.ps1`: 성공적으로 배포 완료 및 레지스트리/바이너리 해시 일치 검증 (`6AF8CD3D4F125983F4FE3A3DDBED26E6CD03D828E424D44BEB825A0970DDAC76`).
+
 ## 2026-11-10 — 블록 측면 인셋 라인 및 배경 박스 제거, 노션 표준 타이포그래피 정제
 
 ### 1. 포커스 시 블록 측면 인셋 라인 및 배경 박스 효과 제거 (`src/index.html`)

@@ -4,7 +4,7 @@
 // 표준 라이브러리(std)만 사용하여 최대한 가볍게 구성했습니다.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -49,29 +49,36 @@ fn unregister_tab(tab_id: &str) -> usize {
 }
 
 fn main() {
-    // 커맨드라인 인자 파싱: 연결 프로그램으로 실행 시 .md 파일 경로가 넘어옴
-    //   예) mdeditor.exe "C:\docs\memo.md"
-    let file_arg: Option<PathBuf> = std::env::args()
-        .skip(1)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // --version / -v 및 --help / -h 커맨드라인 옵션 처리
+    for arg in &args {
+        match arg.as_str() {
+            "-v" | "--version" => {
+                attach_console();
+                print_version();
+                return;
+            }
+            "-h" | "--help" => {
+                attach_console();
+                print_help();
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // 커맨드라인 파일/폴더 인자 파싱:
+    //   - mdeditor.exe "C:\docs\memo.md" -> 작업 폴더 C:\docs, 여는 파일 memo.md
+    //   - mdeditor.exe "C:\docs"         -> 작업 폴더 C:\docs, 여는 파일 없음
+    //   - mdeditor.exe                   -> 현재 폴더(cwd)
+    let file_arg: Option<PathBuf> = args
+        .into_iter()
         .find(|a| !a.starts_with('-'))
         .map(PathBuf::from);
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    // 작업 루트 결정:
-    //   - 파일 인자가 있으면 그 파일의 부모 폴더
-    //   - 없으면 현재 실행 디렉토리
-    let (root, open_file): (PathBuf, Option<String>) = match &file_arg {
-        Some(p) => {
-            let abs = std::fs::canonicalize(p).unwrap_or_else(|_| cwd.join(p));
-            let parent = abs.parent().map(Path::to_path_buf).unwrap_or(cwd);
-            let name = abs.file_name().and_then(|n| n.to_str()).map(str::to_string);
-            (parent, name)
-        }
-        None => (cwd, None),
-    };
-    // 서버 간 root 비교를 위해 정규화
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let (root, open_file) = resolve_target(file_arg.as_deref(), &cwd);
     let info = info_json(&root);
 
     // 포트 바인딩: 이미 같은 폴더를 서비스 중인 mdeditor 가 있으면 브라우저만 열고,
@@ -142,6 +149,70 @@ fn main() {
         }
     }
 }
+
+// 실행 인자(파일 또는 디렉토리)에 따른 작업 루트와 초기 로드 파일 결정
+fn resolve_target(file_arg: Option<&Path>, cwd: &Path) -> (PathBuf, Option<String>) {
+    match file_arg {
+        Some(p) => {
+            let abs = std::fs::canonicalize(p).unwrap_or_else(|_| cwd.join(p));
+            if abs.is_dir() {
+                let canonical_dir = std::fs::canonicalize(&abs).unwrap_or(abs);
+                (canonical_dir, None)
+            } else {
+                let parent = abs
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| cwd.to_path_buf());
+                let canonical_parent = std::fs::canonicalize(&parent).unwrap_or(parent);
+                let name = abs.file_name().and_then(|n| n.to_str()).map(str::to_string);
+                (canonical_parent, name)
+            }
+        }
+        None => {
+            let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+            (canonical_cwd, None)
+        }
+    }
+}
+
+fn print_version() {
+    print_output(&format!("MDEditor v{}\n", env!("CARGO_PKG_VERSION")));
+}
+
+fn print_help() {
+    let help = format!(
+        "MDEditor v{}\n초경량 무의존성 Markdown 데스크톱 편집기 & 미리보기\n\n사용법:\n  mdeditor [옵션] [파일 또는 폴더 경로]\n\n옵션:\n  -v, --version    버전 정보를 출력합니다\n  -h, --help       도움말을 출력합니다\n\n예시:\n  mdeditor               현재 작업 폴더를 루트로 MDEditor 실행\n  mdeditor memo.md       memo.md 파일을 즉시 열고 편집\n  mdeditor C:\\docs       C:\\docs 폴더를 루트로 열기\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    print_output(&help);
+}
+
+fn print_output(text: &str) {
+    #[cfg(windows)]
+    {
+        use std::fs::OpenOptions;
+        if let Ok(mut f) = OpenOptions::new().write(true).open("CONOUT$") {
+            let _ = write!(f, "{text}");
+            return;
+        }
+    }
+    print!("{text}");
+}
+
+#[cfg(windows)]
+fn attach_console() {
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
+    unsafe {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn AttachConsole(dwProcessId: u32) -> i32;
+        }
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_console() {}
 
 // 열어야 할 브라우저 URL (파일 인자가 있으면 ?file=... 로 자동 로드)
 fn browser_url(addr: &str, open_file: &Option<String>) -> String {
@@ -770,11 +841,18 @@ fn list_markdown_files(root: &Path) -> String {
     let mut names: Vec<String> = Vec::new();
     collect_markdown_files(root, root, 0, &mut names);
     names.sort();
-    let items: Vec<String> = names
-        .iter()
-        .map(|n| format!("\"{}\"", json_escape(n)))
-        .collect();
-    format!("{{\"files\":[{}]}}", items.join(","))
+    let mut out = String::with_capacity(32 + names.len() * 32);
+    out.push_str("{\"files\":[");
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        write_json_escaped(name, &mut out);
+        out.push('"');
+    }
+    out.push_str("]}");
+    out
 }
 
 fn collect_markdown_files(dir: &Path, base: &Path, depth: usize, out: &mut Vec<String>) {
@@ -852,13 +930,14 @@ fn send_response_cache(
     body: &[u8],
     cache_control: &str,
 ) -> std::io::Result<()> {
-    let header = format!(
+    let mut writer = BufWriter::with_capacity(16 * 1024, stream);
+    write!(
+        writer,
         "HTTP/1.1 {code} {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: {cache_control}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
-    );
-    stream.write_all(header.as_bytes())?;
-    stream.write_all(body)?;
-    stream.flush()
+    )?;
+    writer.write_all(body)?;
+    writer.flush()
 }
 
 // ---------- 유틸 ----------
@@ -910,8 +989,7 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + s.len() / 8 + 16);
+fn write_json_escaped(s: &str, out: &mut String) {
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -919,15 +997,29 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + s.len() / 8 + 16);
+    write_json_escaped(s, &mut out);
     out
 }
 
 fn json_wrap(key: &str, value: &str) -> String {
-    format!("{{\"{}\":\"{}\"}}", key, json_escape(value))
+    let mut out = String::with_capacity(key.len() + value.len() + 16);
+    out.push_str("{\"");
+    write_json_escaped(key, &mut out);
+    out.push_str("\":\"");
+    write_json_escaped(value, &mut out);
+    out.push_str("\"}");
+    out
 }
 
 // ---------- 단독 데스크톱 앱 창 열기 (주소창/탭 없는 데스크톱 윈도우 모드) ----------
@@ -1215,5 +1307,37 @@ mod tests {
         assert!(!p.exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_target_file_and_directory() {
+        let temp = std::env::temp_dir().join("mdeditor_test_resolve");
+        let sub = temp.join("folder");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("doc.md");
+        std::fs::write(&file, b"# Hello").unwrap();
+
+        // 1. 디렉토리를 넘겼을 때
+        let (root, open) = resolve_target(Some(&sub), &temp);
+        assert_eq!(root, sub.canonicalize().unwrap());
+        assert_eq!(open, None);
+
+        // 2. 파일을 넘겼을 때
+        let (root, open) = resolve_target(Some(&file), &temp);
+        assert_eq!(root, sub.canonicalize().unwrap());
+        assert_eq!(open.as_deref(), Some("doc.md"));
+
+        // 3. 인자가 없을 때 (None)
+        let (root, open) = resolve_target(None, &temp);
+        assert_eq!(root, temp.canonicalize().unwrap());
+        assert_eq!(open, None);
+
+        std::fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[test]
+    fn json_escape_and_wrap() {
+        let wrapped = json_wrap("title", "Hello \"world\"\nLine 2");
+        assert_eq!(wrapped, "{\"title\":\"Hello \\\"world\\\"\\nLine 2\"}");
     }
 }
