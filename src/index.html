@@ -27,75 +27,75 @@
 <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
 
 <style>
-  /* ---------- 2026 Modern Design System (Linear / Raycast / Notion) ---------- */
+  /* ---------- 2026 Production Design System (Notion / Linear Standard) ---------- */
   :root[data-theme="dark"] {
-    --bg: #090d16;
-    --surface: #0f172a;
-    --surface-elevated: #1e293b;
-    --surface-hover: #334155;
+    --bg: #191919;
+    --surface: #202020;
+    --surface-elevated: #262626;
+    --surface-hover: #303030;
     --border: rgba(255, 255, 255, 0.08);
     --border-hover: rgba(255, 255, 255, 0.16);
-    --border-focus: #38bdf8;
+    --border-focus: #2383e2;
     
-    --text: #f8fafc;
-    --text-muted: #94a3b8;
-    --text-faint: #64748b;
+    --text: #ebebeb;
+    --text-muted: #9b9b9b;
+    --text-faint: #6e6e6e;
     
-    --accent: #38bdf8;
-    --accent-rgb: 56, 189, 248;
-    --accent-hover: #0ea5e9;
-    --on-accent: #06283a;
+    --accent: #2383e2;
+    --accent-rgb: 35, 131, 226;
+    --accent-hover: #1b6fc2;
+    --on-accent: #ffffff;
     
-    --code-bg: #0c1220;
-    --code-header: #141c2e;
-    --mark-bg: rgba(250, 204, 21, 0.18);
+    --code-bg: #222222;
+    --code-header: #292929;
+    --mark-bg: rgba(234, 179, 8, 0.22);
     --mark-text: #fef08a;
-    --kbd-bg: #1e293b;
-    --kbd-border: #334155;
+    --kbd-bg: #262626;
+    --kbd-border: #3b3b3b;
     
-    --table-header: #141c2e;
-    --table-alt: #0d1424;
-    --table-hover: rgba(56, 189, 248, 0.06);
+    --table-header: #242424;
+    --table-alt: #1d1d1d;
+    --table-hover: rgba(255, 255, 255, 0.03);
 
-    --modal-overlay: rgba(3, 7, 18, 0.75);
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+    --modal-overlay: rgba(0, 0, 0, 0.68);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 16px 36px rgba(0, 0, 0, 0.6);
   }
 
   :root[data-theme="light"] {
-    --bg: #f8fafc;
-    --surface: #ffffff;
-    --surface-elevated: #f1f5f9;
-    --surface-hover: #e2e8f0;
+    --bg: #ffffff;
+    --surface: #f7f7f5;
+    --surface-elevated: #ffffff;
+    --surface-hover: #efefed;
     --border: rgba(0, 0, 0, 0.08);
-    --border-hover: rgba(0, 0, 0, 0.14);
-    --border-focus: #0284c7;
+    --border-hover: rgba(0, 0, 0, 0.16);
+    --border-focus: #2383e2;
     
-    --text: #0f172a;
-    --text-muted: #64748b;
-    --text-faint: #94a3b8;
+    --text: #37352f;
+    --text-muted: #787774;
+    --text-faint: #9b9a97;
     
-    --accent: #0284c7;
-    --accent-rgb: 2, 132, 199;
-    --accent-hover: #0369a1;
+    --accent: #2383e2;
+    --accent-rgb: 35, 131, 226;
+    --accent-hover: #1a6fbf;
     --on-accent: #ffffff;
     
-    --code-bg: #f1f5f9;
-    --code-header: #e2e8f0;
-    --mark-bg: #fef08a;
-    --mark-text: #854d0e;
-    --kbd-bg: #ffffff;
-    --kbd-border: #cbd5e1;
+    --code-bg: #f7f6f3;
+    --code-header: #eeedea;
+    --mark-bg: rgba(245, 224, 94, 0.45);
+    --mark-text: #37352f;
+    --kbd-bg: #f7f6f3;
+    --kbd-border: #d3d1cb;
     
-    --table-header: #f1f5f9;
-    --table-alt: #f8fafc;
-    --table-hover: rgba(2, 132, 199, 0.04);
+    --table-header: #f7f6f3;
+    --table-alt: #fbfbfa;
+    --table-hover: rgba(55, 53, 47, 0.03);
 
-    --modal-overlay: rgba(15, 23, 42, 0.45);
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
-    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+    --modal-overlay: rgba(15, 15, 15, 0.42);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 16px 36px rgba(0, 0, 0, 0.12);
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -612,6 +612,14 @@
     outline: none;
     cursor: text;
     min-height: calc(100vh - 200px);
+    transition: max-width 0.2s cubic-bezier(0.16, 1, 0.3, 1), font-size 0.15s ease;
+  }
+  body.full-width #preview {
+    max-width: 100% !important;
+    padding: 0 36px;
+  }
+  body.small-text #preview {
+    font-size: 14.5px !important;
   }
   body.notion-view #preview [data-block] {
     outline: none;
@@ -620,8 +628,8 @@
   body.notion-view #preview [data-block]:focus {
     outline: none;
   }
-  body.notion-view #preview p[data-placeholder]:empty::before,
-  body.notion-view #preview p[data-placeholder]:has(> br:only-child)::before {
+  body.notion-view #preview p[data-placeholder]:focus:empty::before,
+  body.notion-view #preview p[data-placeholder]:focus:has(> br:only-child)::before {
     content: attr(data-placeholder);
     color: var(--text-faint);
     pointer-events: none;
@@ -728,6 +736,27 @@
     font-size: 11px;
     color: var(--text-faint);
   }
+  .slash-group-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 6px 8px 3px;
+    user-select: none;
+  }
+  .slash-icon.type-h1, .slash-icon.type-h2, .slash-icon.type-h3 { background: rgba(35, 131, 226, 0.12); color: #2383e2; }
+  .slash-icon.type-task { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+  .slash-icon.type-bullet, .slash-icon.type-number { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
+  .slash-icon.type-quote { background: rgba(139, 92, 246, 0.12); color: #8b5cf6; }
+  .slash-icon.type-callout { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+  .slash-icon.type-code { background: rgba(244, 63, 94, 0.12); color: #f43f5e; }
+  .slash-icon.type-table { background: rgba(6, 182, 212, 0.12); color: #06b6d4; }
+  .slash-icon.type-math { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+  .slash-icon.type-mermaid { background: rgba(99, 102, 241, 0.12); color: #6366f1; }
+  .slash-icon.type-image { background: rgba(20, 184, 166, 0.12); color: #14b8a6; }
+  .slash-icon.type-toggle { background: rgba(168, 85, 247, 0.12); color: #a855f7; }
+  .slash-icon.type-divider { background: rgba(100, 116, 139, 0.12); color: #64748b; }
 
   /* Floating Selection Formatting Bar */
   .floating-format-bar {
@@ -736,21 +765,25 @@
     background: var(--surface-elevated);
     border: 1px solid var(--border);
     border-radius: 8px;
-    box-shadow: var(--shadow-md);
-    padding: 3px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22), 0 2px 6px rgba(0, 0, 0, 0.1);
+    padding: 3px 5px;
     display: none;
     align-items: center;
     gap: 2px;
-    backdrop-filter: blur(12px);
+    backdrop-filter: blur(16px) saturate(180%);
+    animation: barPop 0.12s cubic-bezier(0.16, 1, 0.3, 1);
   }
-  .floating-format-bar.open { display: flex; animation: searchFadeIn 0.12s ease; }
+  @keyframes barPop {
+    from { opacity: 0; transform: scale(0.95) translateY(4px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  .floating-format-bar.open { display: flex; }
   .floating-format-bar button {
     background: transparent;
     border: none;
     border-radius: 5px;
-    padding: 4px 7px;
+    padding: 4px 6px;
     font-size: 12px;
-    font-weight: 600;
     cursor: pointer;
     color: var(--text-muted);
     min-width: 26px;
@@ -758,10 +791,22 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    transition: background-color 0.1s ease, color 0.1s ease;
   }
   .floating-format-bar button:hover {
     background: var(--surface-hover);
     color: var(--text);
+  }
+  .floating-format-bar button.active {
+    background: rgba(var(--accent-rgb), 0.18);
+    color: var(--accent);
+  }
+  .floating-format-bar .format-sep {
+    width: 1px;
+    height: 14px;
+    background: var(--border);
+    margin: 0 3px;
+    flex-shrink: 0;
   }
 
   /* Inline Source Editor Card (for Math, Mermaid) */
@@ -936,8 +981,8 @@
   }
   #preview {
     width: 100%;
-    max-width: 820px;
-    line-height: 1.9;
+    max-width: 840px;
+    line-height: 1.65;
     font-size: 16px;
     color: var(--text);
   }
@@ -945,27 +990,27 @@
   /* ---------- Notion-Level Premium Typography & Markdown Styling ---------- */
   #preview h1, #preview h2, #preview h3, #preview h4 {
     color: var(--text);
-    line-height: 1.35;
+    line-height: 1.3;
     scroll-margin-top: 24px;
-    letter-spacing: 0;
+    letter-spacing: -0.015em;
   }
   #preview h1, #preview h2 { font-weight: 700; }
-  #preview h3, #preview h4 { font-weight: 500; }
+  #preview h3, #preview h4 { font-weight: 600; }
   #preview h1 {
-    font-size: 2.1em;
-    margin: 32px 0 16px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border);
+    font-size: 1.95em;
+    margin: 34px 0 6px;
+    padding-bottom: 0;
+    border-bottom: none;
   }
   #preview h2 {
-    font-size: 1.55em;
-    margin: 28px 0 12px;
-    padding-bottom: 6px;
-    border-bottom: 1px solid var(--border);
+    font-size: 1.5em;
+    margin: 26px 0 4px;
+    padding-bottom: 0;
+    border-bottom: none;
   }
-  #preview h3 { font-size: 1.28em; margin: 20px 0 10px; }
-  #preview h4 { font-size: 1.1em; margin: 16px 0 8px; }
-  #preview p { margin: 12px 0; }
+  #preview h3 { font-size: 1.25em; margin: 20px 0 3px; }
+  #preview h4 { font-size: 1.1em; margin: 16px 0 2px; }
+  #preview p { margin: 4px 0; }
   #preview strong { font-weight: 600; color: var(--text); }
   #preview em { font-style: italic; }
   #preview del { color: var(--text-faint); text-decoration: line-through; }
@@ -1237,21 +1282,54 @@
   }
   .math-inline { padding: 0 4px; font-size: 0.95em; }
 
-  /* Task Checkbox */
-  #preview ul, #preview ol { padding-left: 24px; margin: 10px 0; }
-  #preview li { margin: 4px 0; }
-  #preview li.task-list-item { list-style-type: none; margin-left: -20px; display: flex; align-items: baseline; gap: 8px; }
+  /* Task Checkbox (Notion-grade custom rounded interactive checkbox) */
+  #preview ul, #preview ol { padding-left: 24px; margin: 6px 0; }
+  #preview li { margin: 3px 0; }
+  #preview li.task-list-item {
+    list-style-type: none;
+    margin-left: -22px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 1px 0;
+  }
   #preview li.task-list-item input[type="checkbox"] {
-    margin: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid var(--border-hover);
+    border-radius: 4px;
+    background: transparent;
     cursor: pointer;
-    accent-color: var(--accent);
-    transform: translateY(2px);
-    width: 15px;
-    height: 15px;
+    margin-top: 4px;
+    flex-shrink: 0;
+    position: relative;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  }
+  #preview li.task-list-item input[type="checkbox"]:hover {
+    border-color: var(--accent);
+    background: rgba(var(--accent-rgb), 0.08);
+  }
+  #preview li.task-list-item input[type="checkbox"]:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  #preview li.task-list-item input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 4.5px;
+    top: 1.5px;
+    width: 4px;
+    height: 8px;
+    border: solid #ffffff;
+    border-width: 0 1.8px 1.8px 0;
+    transform: rotate(45deg);
   }
   #preview li.task-list-item.checked {
     color: var(--text-faint);
     text-decoration: line-through;
+    text-decoration-color: var(--text-faint);
   }
 
   /* Tables */
@@ -1299,6 +1377,11 @@
     z-index: 20;
     box-shadow: var(--shadow-lg);
     backdrop-filter: blur(16px);
+    animation: drawerSlide 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes drawerSlide {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
   }
   #tocDrawer.open { display: flex; }
   .toc-header {
@@ -1548,6 +1631,14 @@
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
     <span id="menuThemeLabel">라이트 모드로 전환</span>
   </button>
+  <button id="menuFullWidth" type="button" title="문서 본문 전체 너비 토글">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
+    <span id="menuFullWidthLabel">전체 너비: 끔</span>
+  </button>
+  <button id="menuFontSize" type="button" title="본문 글꼴 크기 토글 (보통 / 작게)">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>
+    <span id="menuFontSizeLabel">글꼴 크기: 보통</span>
+  </button>
   <button id="menuWordWrap" type="button" title="자동 줄바꿈 켜기/끄기">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"></line><path d="M3 12h15a3 3 0 1 1 0 6h-4"></path><polyline points="16 16 14 18 16 20"></polyline></svg>
     <span id="menuWordWrapLabel">줄바꿈: 켬</span>
@@ -1653,7 +1744,13 @@
     </div>
     <div class="modal-body" style="padding: 8px 12px; max-height: 380px;" id="fileItemsList"></div>
     <div class="modal-footer" style="justify-content: space-between; align-items: center;">
-      <span style="font-size: 11.5px; color: var(--text-faint);">Tip: 마크다운 상호 링크 [문서](other.md)도 바로 열립니다</span>
+      <span style="font-size: 11.5px; color: var(--text-faint); display: flex; align-items: center; gap: 4px;">
+        <kbd style="font-size: 10px; padding: 1px 4px;">↑</kbd><kbd style="font-size: 10px; padding: 1px 4px;">↓</kbd> 이동
+        <span style="margin: 0 4px; opacity: 0.5;">·</span>
+        <kbd style="font-size: 10px; padding: 1px 4px;">↵</kbd> 열기
+        <span style="margin: 0 4px; opacity: 0.5;">·</span>
+        <kbd style="font-size: 10px; padding: 1px 4px;">Esc</kbd> 닫기
+      </span>
       <div style="display:flex; gap:8px;">
         <button class="ghost" id="btnModalOpenFile">OS 탐색기에서 열기</button>
         <button class="primary" id="btnModalNewFile">새 파일 (+)</button>
@@ -1738,123 +1835,126 @@
 
 <!-- Notion Live Canvas Slash Menu -->
 <div class="slash-menu" id="slashMenu">
-  <div class="slash-item" data-type="p">
-    <div class="slash-icon">¶</div>
+  <div class="slash-group-header" data-group="basic">기본 블록</div>
+  <div class="slash-item" data-type="p" data-group="basic">
+    <div class="slash-icon type-p">¶</div>
     <div class="slash-item-text">
       <div class="slash-item-title">텍스트</div>
       <div class="slash-item-desc">일반 문단 작성</div>
     </div>
   </div>
-  <div class="slash-item" data-type="h1">
-    <div class="slash-icon">H1</div>
+  <div class="slash-item" data-type="h1" data-group="basic">
+    <div class="slash-icon type-h1">H1</div>
     <div class="slash-item-text">
       <div class="slash-item-title">제목 1</div>
       <div class="slash-item-desc">가장 큰 섹션 제목 (#)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="h2">
-    <div class="slash-icon">H2</div>
+  <div class="slash-item" data-type="h2" data-group="basic">
+    <div class="slash-icon type-h2">H2</div>
     <div class="slash-item-text">
       <div class="slash-item-title">제목 2</div>
       <div class="slash-item-desc">중간 크기 제목 (##)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="h3">
-    <div class="slash-icon">H3</div>
+  <div class="slash-item" data-type="h3" data-group="basic">
+    <div class="slash-icon type-h3">H3</div>
     <div class="slash-item-text">
       <div class="slash-item-title">제목 3</div>
       <div class="slash-item-desc">작은 소제목 (###)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="task">
-    <div class="slash-icon">☑</div>
+  <div class="slash-item" data-type="task" data-group="basic">
+    <div class="slash-icon type-task">☑</div>
     <div class="slash-item-text">
       <div class="slash-item-title">할 일 목록</div>
       <div class="slash-item-desc">인터랙티브 체크박스 (- [ ])</div>
     </div>
   </div>
-  <div class="slash-item" data-type="bullet">
-    <div class="slash-icon">•</div>
+  <div class="slash-item" data-type="bullet" data-group="basic">
+    <div class="slash-icon type-bullet">•</div>
     <div class="slash-item-text">
       <div class="slash-item-title">글머리 기호 목록</div>
       <div class="slash-item-desc">원형 불릿 목록 (-)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="number">
-    <div class="slash-icon">1.</div>
+  <div class="slash-item" data-type="number" data-group="basic">
+    <div class="slash-icon type-number">1.</div>
     <div class="slash-item-text">
       <div class="slash-item-title">번호 매기기 목록</div>
       <div class="slash-item-desc">순서가 있는 번호 목록 (1.)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="quote">
-    <div class="slash-icon">”</div>
+  <div class="slash-item" data-type="quote" data-group="basic">
+    <div class="slash-icon type-quote">”</div>
     <div class="slash-item-text">
       <div class="slash-item-title">인용구</div>
       <div class="slash-item-desc">왼쪽 강조선 인용 블록 (>)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="callout">
-    <div class="slash-icon">💡</div>
+  <div class="slash-item" data-type="divider" data-group="basic">
+    <div class="slash-icon type-divider">—</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">구분선</div>
+      <div class="slash-item-desc">콘텐츠 구분선 (---)</div>
+    </div>
+  </div>
+
+  <div class="slash-group-header" data-group="advanced">고급 및 미디어</div>
+  <div class="slash-item" data-type="callout" data-group="advanced">
+    <div class="slash-icon type-callout">💡</div>
     <div class="slash-item-text">
       <div class="slash-item-title">콜아웃 블록</div>
       <div class="slash-item-desc">Notion / GitHub Alert 박스</div>
     </div>
   </div>
-  <div class="slash-item" data-type="code">
-    <div class="slash-icon">&lt;&gt;</div>
+  <div class="slash-item" data-type="code" data-group="advanced">
+    <div class="slash-icon type-code">&lt;&gt;</div>
     <div class="slash-item-text">
       <div class="slash-item-title">코드 블록</div>
       <div class="slash-item-desc">구문 강조 코드 블록 (```)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="math">
-    <div class="slash-icon">fx</div>
-    <div class="slash-item-text">
-      <div class="slash-item-title">수학 공식</div>
-      <div class="slash-item-desc">LaTeX KaTeX 수식 ($$)</div>
-    </div>
-  </div>
-  <div class="slash-item" data-type="mermaid">
-    <div class="slash-icon">◈</div>
-    <div class="slash-item-text">
-      <div class="slash-item-title">Mermaid 다이어그램</div>
-      <div class="slash-item-desc">순서도 및 아키텍처 다이어그램</div>
-    </div>
-  </div>
-  <div class="slash-item" data-type="table">
-    <div class="slash-icon">▦</div>
+  <div class="slash-item" data-type="table" data-group="advanced">
+    <div class="slash-icon type-table">▦</div>
     <div class="slash-item-text">
       <div class="slash-item-title">표 (Table)</div>
       <div class="slash-item-desc">2x3 마크다운 데이터 표</div>
     </div>
   </div>
-  <div class="slash-item" data-type="toggle">
-    <div class="slash-icon">▶</div>
+  <div class="slash-item" data-type="toggle" data-group="advanced">
+    <div class="slash-icon type-toggle">▶</div>
     <div class="slash-item-text">
       <div class="slash-item-title">접기 (토글)</div>
       <div class="slash-item-desc">상세 내용을 숨기고 펼치는 블록 (:::toggle)</div>
     </div>
   </div>
-  <div class="slash-item" data-type="image">
-    <div class="slash-icon">🖼️</div>
+  <div class="slash-item" data-type="math" data-group="advanced">
+    <div class="slash-icon type-math">fx</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">수학 공식</div>
+      <div class="slash-item-desc">LaTeX KaTeX 수식 ($$)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="mermaid" data-group="advanced">
+    <div class="slash-icon type-mermaid">◈</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">Mermaid 다이어그램</div>
+      <div class="slash-item-desc">순서도 및 아키텍처 다이어그램</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="image" data-group="advanced">
+    <div class="slash-icon type-image">🖼️</div>
     <div class="slash-item-text">
       <div class="slash-item-title">이미지</div>
       <div class="slash-item-desc">로컬 또는 웹 이미지 삽입 (![설명](경로))</div>
     </div>
   </div>
-  <div class="slash-item" data-type="footnote">
-    <div class="slash-icon">^fn</div>
+  <div class="slash-item" data-type="footnote" data-group="advanced">
+    <div class="slash-icon type-footnote">^fn</div>
     <div class="slash-item-text">
       <div class="slash-item-title">각주</div>
       <div class="slash-item-desc">문서 하단 각주 링크 ([^1])</div>
-    </div>
-  </div>
-  <div class="slash-item" data-type="divider">
-    <div class="slash-icon">—</div>
-    <div class="slash-item-text">
-      <div class="slash-item-title">구분선</div>
-      <div class="slash-item-desc">콘텐츠 구분선 (---)</div>
     </div>
   </div>
   <div class="slash-empty-msg" id="slashEmptyMsg" style="display:none;">일치하는 블록 명령어가 없습니다</div>
@@ -1862,14 +1962,32 @@
 
 <!-- Notion Floating Selection Formatting Toolbar -->
 <div class="floating-format-bar" id="floatingFormatBar">
-  <button type="button" data-cmd="bold" title="굵게 (Ctrl+B)"><b>B</b></button>
-  <button type="button" data-cmd="italic" title="기울임 (Ctrl+I)"><i>I</i></button>
-  <button type="button" data-cmd="strike" title="취소선"><s>S</s></button>
-  <button type="button" data-cmd="mark" title="형광펜 강조">==</button>
-  <button type="button" data-cmd="code" title="인라인 코드">&lt;&gt;</button>
-  <button type="button" data-cmd="kbd" title="키보드 키 (<kbd>)"><kbd style="font-size:10px; font-family:inherit;">K</kbd></button>
-  <button type="button" data-cmd="link" title="링크 (Ctrl+K)">🔗</button>
-  <button type="button" data-cmd="clear" title="서식 지우기">✕</button>
+  <button type="button" data-cmd="bold" title="굵게 (Ctrl+B)">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"></path></svg>
+  </button>
+  <button type="button" data-cmd="italic" title="기울임 (Ctrl+I)">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="19" y1="4" x2="10" y2="4"></line><line x1="14" y1="20" x2="5" y2="20"></line><line x1="15" y1="4" x2="9" y2="20"></line></svg>
+  </button>
+  <button type="button" data-cmd="strike" title="취소선">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4H9a3 3 0 0 0-2.83 4"></path><path d="M14 12a4 4 0 0 1 0 8H6"></path><line x1="4" y1="12" x2="20" y2="12"></line></svg>
+  </button>
+  <div class="format-sep"></div>
+  <button type="button" data-cmd="mark" title="형광펜 강조">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#eab308" stroke-width="2.2"><path d="m9 11-6 6v3h3l6-6"></path><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"></path></svg>
+  </button>
+  <button type="button" data-cmd="code" title="인라인 코드">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+  </button>
+  <button type="button" data-cmd="kbd" title="키보드 키 (<kbd>)">
+    <kbd style="font-size:10px; font-family:inherit; padding: 1px 4px;">K</kbd>
+  </button>
+  <div class="format-sep"></div>
+  <button type="button" data-cmd="link" title="링크 (Ctrl+K)">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+  </button>
+  <button type="button" data-cmd="clear" title="서식 지우기">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+  </button>
 </div>
 
 <!-- Inline Source Editor Card (for Math, Mermaid) -->
@@ -2057,6 +2175,50 @@ document.getElementById('menuWordWrap').addEventListener('click', () => {
 });
 applyWordWrap(isWordWrap);
 
+// ---------- 전체 너비 (Full Width) 토글 ----------
+const menuFullWidth = document.getElementById('menuFullWidth');
+const menuFullWidthLabel = document.getElementById('menuFullWidthLabel');
+let isFullWidth = localStorage.getItem('mdeditor-fullwidth') === 'true';
+
+function applyFullWidth(enabled) {
+  isFullWidth = enabled;
+  document.body.classList.toggle('full-width', enabled);
+  localStorage.setItem('mdeditor-fullwidth', enabled ? 'true' : 'false');
+  if (menuFullWidthLabel) {
+    menuFullWidthLabel.textContent = enabled ? '전체 너비: 켬' : '전체 너비: 끔';
+  }
+}
+if (menuFullWidth) {
+  menuFullWidth.addEventListener('click', () => {
+    settingsMenu.classList.remove('open');
+    applyFullWidth(!isFullWidth);
+    showToast(isFullWidth ? '전체 너비 모드가 켜졌습니다.' : '표준 너비 모드로 전환되었습니다.');
+  });
+}
+applyFullWidth(isFullWidth);
+
+// ---------- 글꼴 크기 토글 ----------
+const menuFontSize = document.getElementById('menuFontSize');
+const menuFontSizeLabel = document.getElementById('menuFontSizeLabel');
+let isSmallText = localStorage.getItem('mdeditor-smalltext') === 'true';
+
+function applyFontSize(isSmall) {
+  isSmallText = isSmall;
+  document.body.classList.toggle('small-text', isSmall);
+  localStorage.setItem('mdeditor-smalltext', isSmall ? 'true' : 'false');
+  if (menuFontSizeLabel) {
+    menuFontSizeLabel.textContent = isSmall ? '글꼴 크기: 작게' : '글꼴 크기: 보통';
+  }
+}
+if (menuFontSize) {
+  menuFontSize.addEventListener('click', () => {
+    settingsMenu.classList.remove('open');
+    applyFontSize(!isSmallText);
+    showToast(isSmallText ? '작은 글꼴 모드가 적용되었습니다.' : '표준 글꼴 모드가 적용되었습니다.');
+  });
+}
+applyFontSize(isSmallText);
+
 // ---------- 클립보드 복사 서브메뉴 ----------
 document.getElementById('menuCopyMd').addEventListener('click', () => {
   settingsMenu.classList.remove('open');
@@ -2118,7 +2280,22 @@ editor.addEventListener('keyup', updateCursorPos);
 editor.addEventListener('click', updateCursorPos);
 editor.addEventListener('select', updateCursorPos);
 document.addEventListener('selectionchange', () => {
-  if (document.activeElement === editor) updateCursorPos();
+  if (document.activeElement === editor) {
+    updateCursorPos();
+  } else if (selectionCountEl) {
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && preview.contains(sel.anchorNode)) {
+      const len = sel.toString().length;
+      if (len > 0) {
+        selectionCountEl.style.display = 'inline';
+        selectionCountEl.textContent = `· ${len.toLocaleString()}자 선택됨`;
+      } else {
+        selectionCountEl.style.display = 'none';
+      }
+    } else {
+      selectionCountEl.style.display = 'none';
+    }
+  }
 });
 
 // ---------- 노션 통합 라이브 캔버스 전용 모드 ----------
@@ -2723,6 +2900,14 @@ function openSlashMenu(targetBlock, query = '') {
   const emptyMsg = document.getElementById('slashEmptyMsg');
   if (emptyMsg) emptyMsg.style.display = visibleCount === 0 ? 'block' : 'none';
 
+  const groupHeaders = slashMenu.querySelectorAll('.slash-group-header');
+  groupHeaders.forEach(gh => {
+    const groupName = gh.getAttribute('data-group');
+    const groupItems = slashMenu.querySelectorAll(`.slash-item[data-group="${groupName}"]`);
+    const anyVisible = Array.from(groupItems).some(it => it.style.display !== 'none');
+    gh.style.display = anyVisible ? 'block' : 'none';
+  });
+
   const visibleItems = Array.from(slashMenu.querySelectorAll('.slash-item')).filter(it => it.style.display !== 'none');
   if (visibleItems.length > 0) {
     activeSlashIndex = 0;
@@ -3296,6 +3481,22 @@ document.addEventListener('selectionchange', () => {
   floatingFormatBar.style.top = Math.max(10, rect.top - 46) + 'px';
   floatingFormatBar.style.left = Math.max(10, rect.left + rect.width / 2 - floatingFormatBar.offsetWidth / 2) + 'px';
   floatingFormatBar.classList.add('open');
+
+  try {
+    const isBold = document.queryCommandState('bold');
+    const isItalic = document.queryCommandState('italic');
+    const isStrike = document.queryCommandState('strikeThrough');
+    
+    floatingFormatBar.querySelector('[data-cmd="bold"]')?.classList.toggle('active', isBold);
+    floatingFormatBar.querySelector('[data-cmd="italic"]')?.classList.toggle('active', isItalic);
+    floatingFormatBar.querySelector('[data-cmd="strike"]')?.classList.toggle('active', isStrike);
+
+    const anchorNode = sel.anchorNode;
+    const parentEl = anchorNode?.nodeType === Node.ELEMENT_NODE ? anchorNode : anchorNode?.parentElement;
+    floatingFormatBar.querySelector('[data-cmd="mark"]')?.classList.toggle('active', !!parentEl?.closest('mark'));
+    floatingFormatBar.querySelector('[data-cmd="code"]')?.classList.toggle('active', !!parentEl?.closest('code'));
+    floatingFormatBar.querySelector('[data-cmd="link"]')?.classList.toggle('active', !!parentEl?.closest('a'));
+  } catch (_) {}
 });
 
 if (floatingFormatBar) {
@@ -3309,21 +3510,39 @@ if (floatingFormatBar) {
         case 'strike': document.execCommand('strikeThrough'); break;
         case 'mark': {
           const sel = window.getSelection();
-          if (sel.rangeCount) {
-            const range = sel.getRangeAt(0);
-            const mark = document.createElement('mark');
-            mark.appendChild(range.extractContents());
-            range.insertNode(mark);
+          if (sel && sel.rangeCount) {
+            const anchor = sel.anchorNode;
+            const parent = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
+            const existingMark = parent?.closest('mark');
+            if (existingMark) {
+              const p = existingMark.parentNode;
+              while (existingMark.firstChild) p.insertBefore(existingMark.firstChild, existingMark);
+              p.removeChild(existingMark);
+            } else {
+              const range = sel.getRangeAt(0);
+              const mark = document.createElement('mark');
+              mark.appendChild(range.extractContents());
+              range.insertNode(mark);
+            }
           }
           break;
         }
         case 'code': {
           const sel = window.getSelection();
-          if (sel.rangeCount) {
-            const range = sel.getRangeAt(0);
-            const code = document.createElement('code');
-            code.appendChild(range.extractContents());
-            range.insertNode(code);
+          if (sel && sel.rangeCount) {
+            const anchor = sel.anchorNode;
+            const parent = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
+            const existingCode = parent?.closest('code');
+            if (existingCode && !existingCode.closest('pre')) {
+              const p = existingCode.parentNode;
+              while (existingCode.firstChild) p.insertBefore(existingCode.firstChild, existingCode);
+              p.removeChild(existingCode);
+            } else {
+              const range = sel.getRangeAt(0);
+              const code = document.createElement('code');
+              code.appendChild(range.extractContents());
+              range.insertNode(code);
+            }
           }
           break;
         }
