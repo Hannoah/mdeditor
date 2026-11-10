@@ -3,12 +3,14 @@
 // MDEditor - 제로 의존성 Markdown 편집기 & 미리보기 서비스
 // 표준 라이브러리(std)만 사용하여 최대한 가볍게 구성했습니다.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod markdown;
 
@@ -24,6 +26,27 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static EXIT_SEQ: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_TABS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+fn register_tab_ping(tab_id: &str) {
+    if tab_id.is_empty() {
+        return;
+    }
+    let mut guard = ACTIVE_TABS.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    let now = Instant::now();
+    map.insert(tab_id.to_string(), now);
+    map.retain(|_, last_seen| now.duration_since(*last_seen) < Duration::from_secs(15));
+}
+
+fn unregister_tab(tab_id: &str) -> usize {
+    let mut guard = ACTIVE_TABS.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    let now = Instant::now();
+    map.remove(tab_id);
+    map.retain(|_, last_seen| now.duration_since(*last_seen) < Duration::from_secs(15));
+    map.len()
+}
 
 fn main() {
     // 커맨드라인 인자 파싱: 연결 프로그램으로 실행 시 .md 파일 경로가 넘어옴
@@ -62,7 +85,9 @@ fn main() {
                 break;
             }
             Err(_) if fetch_info(&addr).as_deref() == Some(info.as_str()) => {
-                println!("[안내] 이 폴더를 서비스하는 MDEditor 가 이미 실행 중입니다. 앱 창을 엽니다.");
+                println!(
+                    "[안내] 이 폴더를 서비스하는 MDEditor 가 이미 실행 중입니다. 앱 창을 엽니다."
+                );
                 open_app_window(&browser_url(&addr, &open_file));
                 return;
             }
@@ -70,7 +95,10 @@ fn main() {
         }
     }
     let Some((listener, port)) = bound else {
-        eprintln!("[오류] 사용 가능한 포트가 없습니다 ({PORT}~{}).", PORT + PORT_TRIES - 1);
+        eprintln!(
+            "[오류] 사용 가능한 포트가 없습니다 ({PORT}~{}).",
+            PORT + PORT_TRIES - 1
+        );
         return;
     };
     let addr = format!("{HOST}:{port}");
@@ -136,7 +164,11 @@ fn fetch_info(addr: &str) -> Option<String> {
     let sa: SocketAddr = addr.parse().ok()?;
     let mut s = TcpStream::connect_timeout(&sa, Duration::from_millis(500)).ok()?;
     s.set_read_timeout(Some(Duration::from_millis(500))).ok()?;
-    write!(s, "GET /api/info HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").ok()?;
+    write!(
+        s,
+        "GET /api/info HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
     let mut buf = String::new();
     (&mut s).take(64 * 1024).read_to_string(&mut buf).ok()?;
     buf.split_once("\r\n\r\n").map(|(_, body)| body.to_string())
@@ -153,6 +185,7 @@ struct Request {
 }
 
 fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> std::io::Result<()> {
+    let _ = stream.set_nodelay(true);
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
 
@@ -166,7 +199,12 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
         return send_html(&mut stream, 403, "Forbidden", "<h1>403 Forbidden</h1>");
     }
     if req.oversize {
-        return send_json(&mut stream, 413, "Payload Too Large", r#"{"error":"본문이 너무 큽니다 (최대 10MB)"}"#);
+        return send_json(
+            &mut stream,
+            413,
+            "Payload Too Large",
+            r#"{"error":"본문이 너무 큽니다 (최대 10MB)"}"#,
+        );
     }
 
     // exit 요청이 아닌 유효한 요청이 들어오면 대기 중인 자동 종료를 취소 (F5 새로고침 방어)
@@ -178,8 +216,15 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
         // 메인 편집기 페이지
         ("GET", "/") => send_html(&mut stream, 200, "OK", INDEX_HTML),
 
-        // 파비콘 / 앱 창 아이콘
-        ("GET", "/favicon.ico") => send_response(&mut stream, 200, "OK", "image/x-icon", APP_ICO),
+        // 파비콘 / 앱 창 아이콘 (브라우저 캐시 허용)
+        ("GET", "/favicon.ico") => send_response_cache(
+            &mut stream,
+            200,
+            "OK",
+            "image/x-icon",
+            APP_ICO,
+            "public, max-age=86400",
+        ),
 
         // 서버 식별 (두 번째 실행 시 중복 서버 판별용)
         ("GET", "/api/info") => send_json(&mut stream, 200, "OK", info),
@@ -196,25 +241,41 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
             match safe_path(root, &file) {
                 Some(p) => match std::fs::read_to_string(&p) {
                     // UTF-8 BOM(메모장 저장본)은 제거해야 첫 줄 제목이 인식된다
-                    Ok(c) => send_json(&mut stream, 200, "OK", &json_wrap("content", c.trim_start_matches('\u{feff}'))),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        send_json(&mut stream, 404, "Not Found", r#"{"error":"파일을 찾을 수 없습니다"}"#)
-                    }
+                    Ok(c) => send_json(
+                        &mut stream,
+                        200,
+                        "OK",
+                        &json_wrap("content", c.trim_start_matches('\u{feff}')),
+                    ),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => send_json(
+                        &mut stream,
+                        404,
+                        "Not Found",
+                        r#"{"error":"파일을 찾을 수 없습니다"}"#,
+                    ),
                     // 읽기 실패를 빈 문서로 위장하면 저장 시 원본이 덮어써진다 → 반드시 오류로 알린다
                     Err(e) => send_json(
                         &mut stream,
                         500,
                         "Error",
-                        &json_wrap("error", &format!("파일을 읽을 수 없습니다 (UTF-8 인코딩이 아닐 수 있음): {e}")),
+                        &json_wrap(
+                            "error",
+                            &format!("파일을 읽을 수 없습니다 (UTF-8 인코딩이 아닐 수 있음): {e}"),
+                        ),
                     ),
                 },
-                None => send_json(&mut stream, 400, "Bad Request", r#"{"error":"잘못된 파일명"}"#),
+                None => send_json(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    r#"{"error":"잘못된 파일명"}"#,
+                ),
             }
         }
 
-        // 마크다운 -> HTML 미리보기 렌더링
+        // 마크다운 -> HTML 미리보기 렌더링 (불필요한 String 복사 제거)
         ("POST", "/api/render") => {
-            let md = String::from_utf8_lossy(&req.body).to_string();
+            let md = String::from_utf8_lossy(&req.body);
             let html = markdown::to_html(&md);
             send_json(&mut stream, 200, "OK", &json_wrap("html", &html))
         }
@@ -225,9 +286,19 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
             match safe_path(root, &file) {
                 Some(p) => match save_atomic(&p, &req.body) {
                     Ok(_) => send_json(&mut stream, 200, "OK", r#"{"ok":true}"#),
-                    Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
+                    Err(e) => send_json(
+                        &mut stream,
+                        500,
+                        "Error",
+                        &json_wrap("error", &e.to_string()),
+                    ),
                 },
-                None => send_json(&mut stream, 400, "Bad Request", r#"{"error":"잘못된 파일명"}"#),
+                None => send_json(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    r#"{"error":"잘못된 파일명"}"#,
+                ),
             }
         }
 
@@ -239,13 +310,28 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
                     if p.exists() {
                         match std::fs::remove_file(&p) {
                             Ok(_) => send_json(&mut stream, 200, "OK", r#"{"ok":true}"#),
-                            Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
+                            Err(e) => send_json(
+                                &mut stream,
+                                500,
+                                "Error",
+                                &json_wrap("error", &e.to_string()),
+                            ),
                         }
                     } else {
-                        send_json(&mut stream, 404, "Not Found", r#"{"error":"삭제할 파일이 존재하지 않습니다"}"#)
+                        send_json(
+                            &mut stream,
+                            404,
+                            "Not Found",
+                            r#"{"error":"삭제할 파일이 존재하지 않습니다"}"#,
+                        )
                     }
                 }
-                None => send_json(&mut stream, 400, "Bad Request", r#"{"error":"잘못된 파일명"}"#),
+                None => send_json(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    r#"{"error":"잘못된 파일명"}"#,
+                ),
             }
         }
 
@@ -256,19 +342,39 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
             match (safe_path(root, &from), safe_path(root, &to)) {
                 (Some(from_p), Some(to_p)) => {
                     if !from_p.exists() {
-                        send_json(&mut stream, 404, "Not Found", r#"{"error":"원본 파일이 존재하지 않습니다"}"#)
+                        send_json(
+                            &mut stream,
+                            404,
+                            "Not Found",
+                            r#"{"error":"원본 파일이 존재하지 않습니다"}"#,
+                        )
                     } else if from_p == to_p {
                         send_json(&mut stream, 200, "OK", r#"{"ok":true}"#)
                     } else if to_p.exists() && !is_case_only_rename(&from_p, &to_p) {
-                        send_json(&mut stream, 409, "Conflict", r#"{"error":"동일한 이름의 파일이 이미 존재합니다"}"#)
+                        send_json(
+                            &mut stream,
+                            409,
+                            "Conflict",
+                            r#"{"error":"동일한 이름의 파일이 이미 존재합니다"}"#,
+                        )
                     } else {
                         match do_rename(&from_p, &to_p) {
                             Ok(_) => send_json(&mut stream, 200, "OK", r#"{"ok":true}"#),
-                            Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
+                            Err(e) => send_json(
+                                &mut stream,
+                                500,
+                                "Error",
+                                &json_wrap("error", &e.to_string()),
+                            ),
                         }
                     }
                 }
-                _ => send_json(&mut stream, 400, "Bad Request", r#"{"error":"잘못된 파일명"}"#),
+                _ => send_json(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    r#"{"error":"잘못된 파일명"}"#,
+                ),
             }
         }
 
@@ -281,15 +387,45 @@ fn handle_client(mut stream: TcpStream, root: &Path, port: u16, info: &str) -> s
                         let mime = content_type_for_path(&p);
                         send_response(&mut stream, 200, "OK", mime, &bytes)
                     }
-                    Err(e) => send_json(&mut stream, 500, "Error", &json_wrap("error", &e.to_string())),
+                    Err(e) => send_json(
+                        &mut stream,
+                        500,
+                        "Error",
+                        &json_wrap("error", &e.to_string()),
+                    ),
                 },
-                None => send_json(&mut stream, 404, "Not Found", r#"{"error":"파일을 찾을 수 없거나 허용되지 않은 경로입니다"}"#),
+                None => send_json(
+                    &mut stream,
+                    404,
+                    "Not Found",
+                    r#"{"error":"파일을 찾을 수 없거나 허용되지 않은 경로입니다"}"#,
+                ),
             }
         }
 
-        // 창 닫을 때 백엔드 자동 종료 (F5 새로고침 시 즉시 종료되지 않도록 2초 유예 시간 부여)
+        // 탭 생존 신호 (주기적 핑으로 다중 창/탭 관리)
+        ("POST", "/api/ping") | ("GET", "/api/ping") => {
+            let tab = query_param(&req.query, "tab").unwrap_or_default();
+            register_tab_ping(&tab);
+            send_json(&mut stream, 200, "OK", r#"{"pong":true}"#)
+        }
+
+        // 창 닫을 때 백엔드 자동 종료 (다중 탭 고려 및 F5 새로고침 방어)
         ("POST", "/api/exit") => {
+            let tab = query_param(&req.query, "tab").unwrap_or_default();
+            let remaining = if !tab.is_empty() {
+                unregister_tab(&tab)
+            } else {
+                0
+            };
+
             let _ = send_json(&mut stream, 200, "OK", r#"{"bye":true}"#);
+
+            // 다른 활성 탭이 남아있다면 서버를 종료하지 않음
+            if remaining > 0 {
+                return Ok(());
+            }
+
             let my_seq = EXIT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(2000));
@@ -314,12 +450,24 @@ fn origin_allowed(req: &Request, port: u16) -> bool {
             .is_none_or(|o| hosts.iter().any(|h| *o == format!("http://{h}")))
 }
 
-// 임시 파일에 쓴 뒤 rename → 저장 도중 크래시해도 원본이 잘리지 않는다
+// 임시 파일에 쓴 뒤 동기화 후 rename → 저장 도중 크래시해도 원본이 잘리지 않고 충돌 방지
 fn save_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let pid = std::process::id();
+    let seq = EXIT_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp"); // .md 로 끝나지 않으므로 목록에 노출되지 않는다
+    tmp.push(format!(".tmp-{pid}-{seq}"));
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, body)?;
+
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+    }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -341,6 +489,11 @@ fn is_case_only_rename(from_p: &Path, to_p: &Path) -> bool {
 
 // 이름 변경 실행. 대소문자만 바꾸는 경우 일부 FS에서 무시될 수 있어 임시 파일 경유.
 fn do_rename(from_p: &Path, to_p: &Path) -> std::io::Result<()> {
+    if let Some(parent) = to_p.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     if !is_case_only_rename(from_p, to_p) {
         return std::fs::rename(from_p, to_p);
     }
@@ -356,17 +509,20 @@ fn do_rename(from_p: &Path, to_p: &Path) -> std::io::Result<()> {
 
 // ---------- HTTP 요청 파싱 ----------
 // 한 줄을 MAX_LINE 까지만 읽는다 (무한 길이 헤더 방지)
-fn read_line_limited(reader: &mut BufReader<TcpStream>) -> std::io::Result<String> {
+fn read_line_limited<R: Read>(reader: &mut BufReader<R>) -> std::io::Result<String> {
     let mut line = String::new();
     reader.by_ref().take(MAX_LINE).read_line(&mut line)?;
     if line.len() as u64 >= MAX_LINE && !line.ends_with('\n') {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "헤더가 너무 깁니다"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "헤더가 너무 깁니다",
+        ));
     }
     Ok(line)
 }
 
 fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut reader = BufReader::new(stream);
     let request_line = read_line_limited(&mut reader)?;
     if request_line.is_empty() {
         return Ok(None);
@@ -394,7 +550,10 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
         }
         count += 1;
         if count > MAX_HEADERS {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "헤더가 너무 많습니다"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "헤더가 너무 많습니다",
+            ));
         }
         if let Some((k, v)) = line.split_once(':') {
             let v = v.trim();
@@ -426,7 +585,7 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     }))
 }
 
-// ---------- 경로 보안: 작업 폴더 밖/하위폴더 접근 차단, 마크다운 확장자만 허용 ----------
+// ---------- 경로 보안: 작업 폴더 내부(하위 폴더 포함) 안전 접근, 마크다운 확장자만 허용 ----------
 fn is_markdown_name(name: &str) -> bool {
     let l = name.to_lowercase();
     l.ends_with(".md") || l.ends_with(".markdown")
@@ -434,28 +593,81 @@ fn is_markdown_name(name: &str) -> bool {
 
 // file 은 query_param 에서 이미 디코딩된 값이다 (여기서 다시 디코딩하면 '+', '%' 파일명이 깨진다)
 fn safe_path(root: &Path, file: &str) -> Option<PathBuf> {
-    if !is_markdown_name(file) {
+    if file.is_empty()
+        || file.ends_with(' ')
+        || file.ends_with('.')
+        || file.starts_with(' ')
+        || !is_markdown_name(file)
+    {
         return None;
     }
-    // Windows: 대체 데이터 스트림(a.md:x), 금지 문자, 제어 문자
-    if file.contains(|c: char| c.is_control() || "<>:\"|?*".contains(c)) {
+    // Windows: 대체 데이터 스트림(a.md:x), 드라이브 문자(C:), UNC(\\), 루트(/), 금지 문자, 제어 문자
+    if file.contains(':')
+        || file.starts_with('\\')
+        || file.starts_with('/')
+        || file.contains(|c: char| c.is_control() || "<>\"|?*".contains(c))
+    {
         return None;
     }
-    // Windows 예약 장치 이름 (CON.md, NUL.md, COM1.md ...)
-    let stem = file.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit());
-    if reserved {
-        return None;
-    }
-    // 절대경로/상위 이동(..)/하위 디렉토리 모두 차단 → 파일명 한 조각만 허용
+
     let candidate = Path::new(file);
-    let mut comps = candidate.components();
-    match (comps.next(), comps.next()) {
-        (Some(Component::Normal(_)), None) => Some(root.join(candidate)),
-        _ => None,
+    let mut depth = 0;
+    for comp in candidate.components() {
+        match comp {
+            Component::Normal(c) => {
+                depth += 1;
+                let s = c.to_string_lossy();
+                if s.ends_with(' ') || s.ends_with('.') || s.starts_with(' ') {
+                    return None;
+                }
+                let stem = s
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_ascii_uppercase();
+                let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                    || (stem.len() == 4
+                        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                        && stem.as_bytes()[3].is_ascii_digit());
+                if reserved {
+                    return None;
+                }
+            }
+            _ => return None, // 절대경로, 루트(/), 상위이동(..) 등 비정상 컴포넌트 원천 차단
+        }
+    }
+
+    if depth == 0 {
+        return None;
+    }
+
+    let full = root.join(candidate);
+    let canonical_root = root
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| root.to_path_buf());
+
+    if full.exists() {
+        let canonical_full = full.canonicalize().ok()?;
+        if !canonical_full.starts_with(&canonical_root) || !canonical_full.is_file() {
+            return None;
+        }
+        Some(canonical_full)
+    } else {
+        // 새 파일인 경우: 가장 가까운 상위 디렉토리를 찾아 canonical_root 내부인지 검증
+        let mut cur = full.parent();
+        while let Some(ancestor) = cur {
+            if ancestor.exists() {
+                let canonical_ancestor = ancestor.canonicalize().ok()?;
+                if !canonical_ancestor.starts_with(&canonical_root) {
+                    return None;
+                }
+                break;
+            }
+            cur = ancestor.parent();
+        }
+        Some(full)
     }
 }
 
@@ -463,14 +675,34 @@ fn safe_path(root: &Path, file: &str) -> Option<PathBuf> {
 fn is_allowed_asset_ext(ext: &str) -> bool {
     matches!(
         ext,
-        "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "ico" | "avif"
-            | "pdf" | "mp4" | "webm" | "mp3" | "wav" | "ogg" | "json" | "txt" | "csv"
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "svg"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "avif"
+            | "pdf"
+            | "mp4"
+            | "webm"
+            | "mp3"
+            | "wav"
+            | "ogg"
+            | "json"
+            | "txt"
+            | "csv"
     )
 }
 
 // 로컬 애셋/미디어 안전 경로 확인 (root 내부의 상대 하위 경로 허용, 경로 탈출 및 상위 이동 차단)
 fn safe_asset_path(root: &Path, file: &str) -> Option<PathBuf> {
-    if file.is_empty() || file.contains(|c: char| c.is_control() || "<>:\"|?*".contains(c)) {
+    if file.is_empty()
+        || file.ends_with(' ')
+        || file.ends_with('.')
+        || file.contains(|c: char| c.is_control() || "<>:\"|?*".contains(c))
+    {
         return None;
     }
     // Windows 드라이브 문자(C:), UNC(\\), ADS, 루트(/) 차단
@@ -484,13 +716,20 @@ fn safe_asset_path(root: &Path, file: &str) -> Option<PathBuf> {
             _ => return None,
         }
     }
-    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if !is_allowed_asset_ext(&ext) {
         return None;
     }
     let full = root.join(p);
     let canonical_full = full.canonicalize().ok()?;
-    let canonical_root = root.canonicalize().ok().unwrap_or_else(|| root.to_path_buf());
+    let canonical_root = root
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| root.to_path_buf());
     if !canonical_full.starts_with(&canonical_root) {
         return None;
     }
@@ -501,7 +740,11 @@ fn safe_asset_path(root: &Path, file: &str) -> Option<PathBuf> {
 }
 
 fn content_type_for_path(path: &Path) -> &'static str {
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -525,30 +768,70 @@ fn content_type_for_path(path: &Path) -> &'static str {
 
 fn list_markdown_files(root: &Path) -> String {
     let mut names: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if is_markdown_name(name) {
-                        names.push(name.to_string());
-                    }
+    collect_markdown_files(root, root, 0, &mut names);
+    names.sort();
+    let items: Vec<String> = names
+        .iter()
+        .map(|n| format!("\"{}\"", json_escape(n)))
+        .collect();
+    format!("{{\"files\":[{}]}}", items.join(","))
+}
+
+fn collect_markdown_files(dir: &Path, base: &Path, depth: usize, out: &mut Vec<String>) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.')
+            || matches!(
+                name,
+                "target" | "node_modules" | "dist" | "build" | "vendor" | "venv"
+            )
+        {
+            continue;
+        }
+        if file_type.is_file() {
+            if is_markdown_name(name) {
+                if let Ok(rel) = path.strip_prefix(base) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    out.push(rel_str);
                 }
             }
+        } else if file_type.is_dir() {
+            collect_markdown_files(&path, base, depth + 1, out);
         }
     }
-    names.sort();
-    let items: Vec<String> = names.iter().map(|n| format!("\"{}\"", json_escape(n))).collect();
-    format!("{{\"files\":[{}]}}", items.join(","))
 }
 
 // ---------- 응답 헬퍼 ----------
 fn send_html(stream: &mut TcpStream, code: u16, status: &str, body: &str) -> std::io::Result<()> {
-    send_response(stream, code, status, "text/html; charset=utf-8", body.as_bytes())
+    send_response(
+        stream,
+        code,
+        status,
+        "text/html; charset=utf-8",
+        body.as_bytes(),
+    )
 }
 
 fn send_json(stream: &mut TcpStream, code: u16, status: &str, body: &str) -> std::io::Result<()> {
-    send_response(stream, code, status, "application/json; charset=utf-8", body.as_bytes())
+    send_response(
+        stream,
+        code,
+        status,
+        "application/json; charset=utf-8",
+        body.as_bytes(),
+    )
 }
 
 fn send_response(
@@ -558,8 +841,19 @@ fn send_response(
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    send_response_cache(stream, code, status, content_type, body, "no-cache")
+}
+
+fn send_response_cache(
+    stream: &mut TcpStream,
+    code: u16,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    cache_control: &str,
+) -> std::io::Result<()> {
     let header = format!(
-        "HTTP/1.1 {code} {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {code} {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: {cache_control}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes())?;
@@ -604,7 +898,7 @@ fn url_decode(s: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).to_string()
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string())
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -617,7 +911,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(s.len() + s.len() / 8 + 16);
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -652,14 +946,13 @@ fn open_app_window(url: &str) {
             "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
         ];
         for edge in edge_candidates {
-            if std::path::Path::new(edge).exists() {
-                if std::process::Command::new(edge)
+            if std::path::Path::new(edge).exists()
+                && std::process::Command::new(edge)
                     .args([&format!("--app={url}"), "--window-size=1280,820"])
                     .spawn()
                     .is_ok()
-                {
-                    return;
-                }
+            {
+                return;
             }
         }
 
@@ -670,14 +963,13 @@ fn open_app_window(url: &str) {
             "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
         ];
         for chrome in chrome_candidates {
-            if std::path::Path::new(chrome).exists() {
-                if std::process::Command::new(chrome)
+            if std::path::Path::new(chrome).exists()
+                && std::process::Command::new(chrome)
                     .args([&format!("--app={url}"), "--window-size=1280,820"])
                     .spawn()
                     .is_ok()
-                {
-                    return;
-                }
+            {
+                return;
             }
         }
     }
@@ -695,7 +987,9 @@ fn open_app_window(url: &str) {
 
     // fallback: 시스템 기본 브라우저
     #[cfg(windows)]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -741,18 +1035,65 @@ mod tests {
         assert!(safe_path(root, "memo.md").is_some());
         assert!(safe_path(root, "메모.MD").is_some());
         assert!(safe_path(root, "a+b %20.markdown").is_some()); // 이중 디코딩 없이 그대로
+        assert!(safe_path(root, "sub/guide.md").is_some());
+        assert!(safe_path(root, "docs/sub/guide.markdown").is_some());
     }
 
     #[test]
     fn safe_path_rejects_escapes() {
         let root = Path::new("root");
         for bad in [
-            "", "memo.txt", "../x.md", "..\\x.md", "sub/x.md", "sub\\x.md", "/abs.md",
-            "C:\\x.md", "C:x.md", "a.md:ads.md", "con.md", "NUL.md", "com1.md", "lpt9.md",
-            "a|b.md", "a\0.md",
+            "",
+            "memo.txt",
+            "../x.md",
+            "..\\x.md",
+            "sub/../x.md",
+            "sub/../../x.md",
+            "/abs.md",
+            "\\abs.md",
+            "C:\\x.md",
+            "C:x.md",
+            "a.md:ads.md",
+            "con.md",
+            "sub/con.md",
+            "NUL.md",
+            "com1.md",
+            "lpt9.md",
+            "a|b.md",
+            "a\0.md",
+            "trailing.md ",
+            "trailing.md.",
+            "sub /x.md",
         ] {
             assert!(safe_path(root, bad).is_none(), "통과하면 안 됨: {bad:?}");
         }
+    }
+
+    #[test]
+    fn list_markdown_files_recursive() {
+        let dir = std::env::temp_dir().join("mdeditor_test_list_rec");
+        let sub = dir.join("docs");
+        let ignored = dir.join("target");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(&ignored).unwrap();
+        std::fs::write(dir.join("root.md"), b"root").unwrap();
+        std::fs::write(sub.join("sub.md"), b"sub").unwrap();
+        std::fs::write(ignored.join("ignored.md"), b"ignored").unwrap();
+
+        let json = list_markdown_files(&dir);
+        assert!(json.contains("\"root.md\""));
+        assert!(json.contains("\"docs/sub.md\""));
+        assert!(!json.contains("ignored.md"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tab_session_lifecycle() {
+        register_tab_ping("tab-1");
+        register_tab_ping("tab-2");
+        assert_eq!(unregister_tab("tab-1"), 1);
+        assert_eq!(unregister_tab("tab-2"), 0);
     }
 
     #[test]
@@ -767,9 +1108,15 @@ mod tests {
     #[test]
     fn host_and_origin_checks() {
         assert!(origin_allowed(&req("127.0.0.1:8080", None), 8080));
-        assert!(origin_allowed(&req("localhost:8080", Some("http://localhost:8080")), 8080));
+        assert!(origin_allowed(
+            &req("localhost:8080", Some("http://localhost:8080")),
+            8080
+        ));
         assert!(!origin_allowed(&req("evil.com:8080", None), 8080)); // DNS rebinding
-        assert!(!origin_allowed(&req("127.0.0.1:8080", Some("http://evil.com")), 8080)); // CSRF
+        assert!(!origin_allowed(
+            &req("127.0.0.1:8080", Some("http://evil.com")),
+            8080
+        )); // CSRF
         assert!(!origin_allowed(&req("127.0.0.1:8080", Some("null")), 8080));
         assert!(!origin_allowed(&req("127.0.0.1:8081", None), 8080));
     }
@@ -820,7 +1167,10 @@ mod tests {
         assert_eq!(content_type_for_path(Path::new("a.jpg")), "image/jpeg");
         assert_eq!(content_type_for_path(Path::new("a.svg")), "image/svg+xml");
         assert_eq!(content_type_for_path(Path::new("a.pdf")), "application/pdf");
-        assert_eq!(content_type_for_path(Path::new("a.unknown")), "application/octet-stream");
+        assert_eq!(
+            content_type_for_path(Path::new("a.unknown")),
+            "application/octet-stream"
+        );
     }
 
     #[test]
@@ -829,7 +1179,10 @@ mod tests {
         assert!(is_case_only_rename(&root.join("A.md"), &root.join("a.md")));
         assert!(!is_case_only_rename(&root.join("a.md"), &root.join("a.md")));
         assert!(!is_case_only_rename(&root.join("a.md"), &root.join("b.md")));
-        assert!(!is_case_only_rename(&root.join("a.md"), &root.join("sub").join("A.md")));
+        assert!(!is_case_only_rename(
+            &root.join("a.md"),
+            &root.join("sub").join("A.md")
+        ));
     }
 
     #[test]
@@ -843,6 +1196,24 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "hi");
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert_eq!(entries.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn file_deletion_and_safe_path() {
+        let dir = std::env::temp_dir().join("mdeditor_test_delete");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("to_delete.md");
+        std::fs::write(&file, b"content").unwrap();
+        assert!(file.exists());
+
+        let p = safe_path(&dir, "to_delete.md").unwrap();
+        std::fs::remove_file(&p).unwrap();
+        assert!(!file.exists());
+
+        assert!(safe_path(&dir, "to_delete.md").is_some());
+        assert!(!p.exists());
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -2,7 +2,7 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let out_dir = std::env::var("OUT_DIR").unwrap();
         let res_path = std::path::Path::new(&out_dir).join("app.res");
-        
+
         let mut compiled = false;
         // GNU / LLVM windres
         for cmd in ["windres", "llvm-windres"] {

@@ -34,15 +34,24 @@ pub fn to_html(input: &str) -> String {
 fn extract_footnotes<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<(String, String)>) {
     let mut cleaned = Vec::with_capacity(lines.len());
     let mut footnotes = Vec::new();
+    let mut in_code_fence = false;
     let mut i = 0;
     while i < lines.len() {
-        let trimmed = lines[i].trim();
-        if trimmed.starts_with("[^") {
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code_fence = !in_code_fence;
+            cleaned.push(lines[i]);
+            i += 1;
+            continue;
+        }
+        if !in_code_fence && trimmed.starts_with("[^") {
             if let Some(colon) = trimmed.find("]:") {
                 let id = trimmed[2..colon].trim().to_string();
                 let mut def = trimmed[colon + 2..].trim().to_string();
                 i += 1;
-                while i < lines.len() && (lines[i].starts_with("    ") || lines[i].starts_with('\t')) {
+                while i < lines.len()
+                    && (lines[i].starts_with("    ") || lines[i].starts_with('\t'))
+                {
                     def.push(' ');
                     def.push_str(lines[i].trim());
                     i += 1;
@@ -63,7 +72,7 @@ fn render(input: &str, depth: usize, slug_counts: &mut HashMap<String, usize>) -
 }
 
 fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, usize>) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(lines.len() * 48);
     let mut para: Vec<&str> = Vec::new();
     let mut lists: Vec<(usize, bool)> = Vec::new(); // (들여쓰기, 순서있음)
     let mut blank_in_list = false;
@@ -97,13 +106,19 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
             close_lists(&mut out, &mut lists);
         }
 
-        // 코드블록 ```lang
-        if trimmed.starts_with("```") {
+        // 코드블록 ```lang 또는 ~~~lang
+        let fence_info = if trimmed.starts_with("```") {
+            Some(("```", trimmed.strip_prefix("```").unwrap_or("").trim()))
+        } else if trimmed.starts_with("~~~") {
+            Some(("~~~", trimmed.strip_prefix("~~~").unwrap_or("").trim()))
+        } else {
+            None
+        };
+        if let Some((fence, lang)) = fence_info {
             flush_para(&mut out, &mut para);
-            let lang = trimmed.strip_prefix("```").unwrap_or("").trim();
             i += 1;
             let mut code = String::new();
-            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+            while i < lines.len() && !lines[i].trim_start().starts_with(fence) {
                 code.push_str(&escape_html(lines[i]));
                 code.push('\n');
                 i += 1;
@@ -112,12 +127,22 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
             if lang.eq_ignore_ascii_case("mermaid") {
                 out.push_str("<div class=\"code-block-wrapper mermaid-wrapper\">\n<div class=\"code-block-header\"><span class=\"code-lang\">Mermaid diagram</span><button class=\"copy-code-btn\" type=\"button\" onclick=\"copyCode(this)\">복사</button></div>\n<div class=\"mermaid\">\n");
                 out.push_str(&code);
-                out.push_str("</div>\n<pre style=\"display:none\"><code class=\"language-mermaid\">");
+                out.push_str(
+                    "</div>\n<pre style=\"display:none\"><code class=\"language-mermaid\">",
+                );
                 out.push_str(&code);
                 out.push_str("</code></pre>\n</div>\n");
             } else {
-                let lang_label = if lang.is_empty() { "Text".to_string() } else { capitalize_first(lang) };
-                let code_class = if lang.is_empty() { String::new() } else { format!(" class=\"language-{}\"", escape_html(lang)) };
+                let lang_label = if lang.is_empty() {
+                    "Text".to_string()
+                } else {
+                    capitalize_first(lang)
+                };
+                let code_class = if lang.is_empty() {
+                    String::new()
+                } else {
+                    format!(" class=\"language-{}\"", escape_html(lang))
+                };
                 out.push_str(&format!(
                     "<div class=\"code-block-wrapper\">\n<div class=\"code-block-header\"><span class=\"code-lang\">{}</span><button class=\"copy-code-btn\" type=\"button\" onclick=\"copyCode(this)\">복사</button></div>\n<pre><code{}>",
                     escape_html(&lang_label),
@@ -127,7 +152,7 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
                 out.push_str("</code></pre>\n</div>\n");
             }
             if i < lines.len() {
-                i += 1; // 닫는 ``` 건너뛰기
+                i += 1; // 닫는 fence 건너뛰기
             }
             continue;
         }
@@ -137,7 +162,10 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
             flush_para(&mut out, &mut para);
             if rest.ends_with("$$") && rest.len() >= 2 {
                 let formula = rest[..rest.len() - 2].trim();
-                out.push_str(&format!("<div class=\"math-block\">$${}$$</div>\n", escape_html(formula)));
+                out.push_str(&format!(
+                    "<div class=\"math-block\">$${}$$</div>\n",
+                    escape_html(formula)
+                ));
                 i += 1;
                 continue;
             }
@@ -154,16 +182,29 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
                 i += 1; // 닫는 $$ 건너뛰기
             }
             let formula = math_lines.join("\n");
-            out.push_str(&format!("<div class=\"math-block\">$${}$$</div>\n", escape_html(formula.trim())));
+            out.push_str(&format!(
+                "<div class=\"math-block\">$${}$$</div>\n",
+                escape_html(formula.trim())
+            ));
             continue;
         }
 
         // 토글 / 접기 블록 :::toggle 제목 ... :::
-        if (trimmed.starts_with(":::toggle") || trimmed.starts_with(":::details")) && depth < MAX_QUOTE_DEPTH {
+        if (trimmed.starts_with(":::toggle") || trimmed.starts_with(":::details"))
+            && depth < MAX_QUOTE_DEPTH
+        {
             flush_para(&mut out, &mut para);
-            let prefix_len = if trimmed.starts_with(":::toggle") { 9 } else { 10 };
+            let prefix_len = if trimmed.starts_with(":::toggle") {
+                9
+            } else {
+                10
+            };
             let title = trimmed[prefix_len..].trim();
-            let summary = if title.is_empty() { "상세 정보" } else { title };
+            let summary = if title.is_empty() {
+                "상세 정보"
+            } else {
+                title
+            };
             i += 1;
             let mut block_lines: Vec<&str> = Vec::new();
             while i < lines.len() && lines[i].trim_start() != ":::" {
@@ -197,7 +238,11 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
             out.push_str("<table>\n<thead>\n<tr>");
             for (idx, cell) in split_table_row(header).iter().enumerate() {
                 let align = aligns.get(idx).copied().unwrap_or(Align::None);
-                out.push_str(&format!("<th{}>{}</th>", align_attr(align), inline(cell.trim())));
+                out.push_str(&format!(
+                    "<th{}>{}</th>",
+                    align_attr(align),
+                    inline(cell.trim())
+                ));
             }
             out.push_str("</tr>\n</thead>\n<tbody>\n");
 
@@ -216,7 +261,11 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
                 for idx in 0..col_count {
                     let align = aligns.get(idx).copied().unwrap_or(Align::None);
                     let cell_content = cells.get(idx).map(|s| s.as_str()).unwrap_or("");
-                    out.push_str(&format!("<td{}>{}</td>", align_attr(align), inline(cell_content.trim())));
+                    out.push_str(&format!(
+                        "<td{}>{}</td>",
+                        align_attr(align),
+                        inline(cell_content.trim())
+                    ));
                 }
                 out.push_str("</tr>\n");
                 i += 1;
@@ -237,9 +286,15 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
         // 제목 #
         if let Some(level) = heading_level(trimmed) {
             flush_para(&mut out, &mut para);
-            let text = trimmed[level..].trim();
+            let raw_text = trimmed[level..].trim();
+            let text = strip_closing_heading_hashes(raw_text);
             let slug = unique_slug(&slugify(text), slug_counts);
-            out.push_str(&format!("<h{0} id=\"{2}\">{1}</h{0}>\n", level, inline(text), escape_html(&slug)));
+            out.push_str(&format!(
+                "<h{0} id=\"{2}\">{1}</h{0}>\n",
+                level,
+                inline(text),
+                escape_html(&slug)
+            ));
             i += 1;
             continue;
         }
@@ -258,7 +313,11 @@ fn render_lines(lines: &[&str], depth: usize, slug_counts: &mut HashMap<String, 
                     let body_lines = &inner[1..];
                     let body_rendered = render(&body_lines.join("\n"), depth + 1, slug_counts);
                     let (icon, default_title, class_name) = callout_meta(&kind);
-                    let display_title = if title.is_empty() { default_title } else { title.as_str() };
+                    let display_title = if title.is_empty() {
+                        default_title
+                    } else {
+                        title.as_str()
+                    };
                     out.push_str(&format!(
                         "<div class=\"callout {}\">\n<div class=\"callout-header\"><span class=\"callout-icon\">{}</span><span class=\"callout-title\">{}</span></div>\n<div class=\"callout-body\">\n{}</div>\n</div>\n",
                         class_name,
@@ -344,7 +403,13 @@ fn flush_para(out: &mut String, para: &mut Vec<&str>) {
     para.clear();
 }
 
-fn open_list(out: &mut String, lists: &mut Vec<(usize, bool)>, indent: usize, ordered: bool, start: u32) {
+fn open_list(
+    out: &mut String,
+    lists: &mut Vec<(usize, bool)>,
+    indent: usize,
+    ordered: bool,
+    start: u32,
+) {
     match (ordered, start) {
         (false, _) => out.push_str("<ul>\n"),
         (true, 1) => out.push_str("<ol>\n"),
@@ -355,7 +420,11 @@ fn open_list(out: &mut String, lists: &mut Vec<(usize, bool)>, indent: usize, or
 
 fn close_top_list(out: &mut String, lists: &mut Vec<(usize, bool)>) {
     if let Some((_, ordered)) = lists.pop() {
-        out.push_str(if ordered { "</li>\n</ol>\n" } else { "</li>\n</ul>\n" });
+        out.push_str(if ordered {
+            "</li>\n</ol>\n"
+        } else {
+            "</li>\n</ul>\n"
+        });
     }
 }
 
@@ -376,12 +445,15 @@ fn indent_of(line: &str) -> usize {
 fn is_hr(t: &str) -> bool {
     let t = t.trim_end();
     let first = t.chars().next();
-    t.chars().count() >= 3 && matches!(first, Some('-' | '*' | '_')) && t.chars().all(|c| Some(c) == first)
+    t.chars().count() >= 3
+        && matches!(first, Some('-' | '*' | '_'))
+        && t.chars().all(|c| Some(c) == first)
 }
 
 // 단락/목록 항목을 끊고 새 블록을 시작하는 줄인가
 fn is_block_start(t: &str) -> bool {
     t.starts_with("```")
+        || t.starts_with("~~~")
         || t.starts_with("$$")
         || t.starts_with(":::toggle")
         || t.starts_with(":::details")
@@ -397,6 +469,16 @@ fn heading_level(line: &str) -> Option<usize> {
         Some(count)
     } else {
         None
+    }
+}
+
+fn strip_closing_heading_hashes(s: &str) -> &str {
+    let t = s.trim_end();
+    let without_hash = t.trim_end_matches('#');
+    if without_hash != t && (without_hash.is_empty() || without_hash.ends_with(' ')) {
+        without_hash.trim_end()
+    } else {
+        t
     }
 }
 
@@ -416,7 +498,7 @@ fn slugify(text: &str) -> String {
         if c.is_alphanumeric() {
             slug.push(c.to_ascii_lowercase());
             last_dash = false;
-        } else if (c == ' ' || c == '-' || c == '_') && !last_dash {
+        } else if (c == ' ' || c == '-' || c == '_' || c == '.') && !last_dash {
             slug.push('-');
             last_dash = true;
         }
@@ -468,7 +550,16 @@ fn parse_callout_header(first_line: &str) -> Option<(String, String)> {
         let kind = t[2..end].trim().to_ascii_lowercase();
         if matches!(
             kind.as_str(),
-            "note" | "tip" | "important" | "warning" | "caution" | "info" | "todo" | "success" | "danger" | "quote"
+            "note"
+                | "tip"
+                | "important"
+                | "warning"
+                | "caution"
+                | "info"
+                | "todo"
+                | "success"
+                | "danger"
+                | "quote"
         ) {
             let custom_title = t[end + 1..].trim();
             return Some((kind, custom_title.to_string()));
@@ -541,42 +632,51 @@ fn callout_meta(kind: &str) -> (&'static str, &'static str, &'static str) {
 // 태스크 체크박스: [ ] 또는 [x] / [X]
 fn parse_task_item(rest: &str) -> (String, bool) {
     if let Some(after) = rest.strip_prefix("[ ] ") {
-        (format!("<input type=\"checkbox\" disabled> {}", inline(after.trim_end())), true)
-    } else if let Some(after) = rest.strip_prefix("[x] ").or_else(|| rest.strip_prefix("[X] ")) {
-        (format!("<input type=\"checkbox\" checked disabled> {}", inline(after.trim_end())), true)
+        (
+            format!(
+                "<input type=\"checkbox\" disabled> {}",
+                inline(after.trim_end())
+            ),
+            true,
+        )
+    } else if let Some(after) = rest
+        .strip_prefix("[x] ")
+        .or_else(|| rest.strip_prefix("[X] "))
+    {
+        (
+            format!(
+                "<input type=\"checkbox\" checked disabled> {}",
+                inline(after.trim_end())
+            ),
+            true,
+        )
     } else {
         (inline(rest), false)
     }
 }
 
 // ---------- 인라인 ----------
-// 처리 순서: 코드 스팬 -> 인라인 수식 -> 각주 참조 -> 백슬래시 이스케이프 -> HTML 이스케이프 -> 링크/이미지 -> 강조/형광펜/키캡/윗첨자
+// 처리 순서: 코드 스팬 -> 인라인 수식 -> 각주 참조 -> 백슬래시 이스케이프 -> HTML 이스케이프 -> 이미지 -> 링크 -> 강조/형광펜/키캡/윗첨자
 fn inline(text: &str) -> String {
-    let text = text.replace('\u{1}', "");
+    let text_cow = if text.contains('\u{1}') {
+        std::borrow::Cow::Owned(text.replace('\u{1}', ""))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
+    let text = text_cow.as_ref();
     let mut stash: Vec<String> = Vec::new();
 
-    // 1) 코드 스팬: 짝이 맞는 `...` 만 처리, 짝 없는 ` 는 그대로 둔다
-    let mut s = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while let Some(a) = rest.find('`') {
-        match rest[a + 1..].find('`') {
-            Some(len) => {
-                s.push_str(&rest[..a]);
-                let code = format!("<code>{}</code>", escape_html(&rest[a + 1..a + 1 + len]));
-                s.push_str(&hold(&mut stash, code));
-                rest = &rest[a + len + 2..];
-            }
-            None => break,
-        }
-    }
-    s.push_str(rest);
+    // 1) 코드 스팬: 임의 개수 백틱(`, ``, ``` 등) 지원
+    let s = extract_code_spans(text, &mut stash);
 
     // 2) 인라인 수식: $formula$
     let mut s_math = String::with_capacity(s.len());
     let mut rest_math = s.as_str();
     while let Some(a) = rest_math.find('$') {
         let after = &rest_math[a + 1..];
-        if after.starts_with(|c: char| c.is_whitespace() || c == '$') {
+        if after.starts_with(|c: char| c.is_whitespace() || c == '$')
+            || (a > 0 && rest_math[..a].ends_with(|c: char| c.is_alphanumeric()))
+        {
             s_math.push_str(&rest_math[..=a]);
             rest_math = after;
             continue;
@@ -586,6 +686,11 @@ fn inline(text: &str) -> String {
         while let Some(pos) = after[search_from..].find('$') {
             let actual = search_from + pos;
             if actual > 0 && !after[..actual].ends_with(char::is_whitespace) {
+                let after_close = &after[actual + 1..];
+                if after_close.starts_with(|c: char| c.is_ascii_digit()) {
+                    search_from = actual + 1;
+                    continue;
+                }
                 close_idx = Some(actual);
                 break;
             }
@@ -595,7 +700,10 @@ fn inline(text: &str) -> String {
             let formula = &after[..len];
             if !formula.contains('\n') {
                 s_math.push_str(&rest_math[..a]);
-                let tag = format!("<span class=\"math-inline\">${}$</span>", escape_html(formula));
+                let tag = format!(
+                    "<span class=\"math-inline\">${}$</span>",
+                    escape_html(formula)
+                );
                 s_math.push_str(&hold(&mut stash, tag));
                 rest_math = &after[len + 1..];
                 continue;
@@ -637,28 +745,93 @@ fn inline(text: &str) -> String {
     while let Some(c) = chars.next() {
         match (c, chars.peek().copied()) {
             ('\\', Some(n)) if "\\*_[]()#+-.!|>~=$^".contains(n) => {
-                esc.push_str(&hold(&mut stash, escape_html(&n.to_string())));
+                let mut n_buf = [0u8; 4];
+                let n_str = n.encode_utf8(&mut n_buf);
+                esc.push_str(&hold(&mut stash, escape_html(n_str)));
                 chars.next();
             }
             _ => esc.push(c),
         }
     }
 
-    // 5) 나머지 텍스트 HTML 이스케이프 후 링크/이미지, 서식
-    let s = replace_links(&escape_html(&esc), &mut stash);
-    let s = replace_delim(&s, "***", "<strong><em>", "</em></strong>");
-    let s = replace_delim(&s, "**", "<strong>", "</strong>");
-    let s = replace_delim(&s, "*", "<em>", "</em>");
-    let s = replace_delim(&s, "~~", "<del>", "</del>");
-    let s = replace_delim(&s, "==", "<mark>", "</mark>");
-    let s = replace_delim(&s, "^", "<sup>", "</sup>");
+    // 5) 나머지 텍스트 HTML 이스케이프 후 이미지, 링크, 서식 (단일 소유권 이동으로 중간 재할당 최소화)
+    let s = replace_images(escape_html(&esc), &mut stash);
+    let s = replace_links(s, &mut stash);
+    let s = replace_delim(s, "***", "<strong><em>", "</em></strong>");
+    let s = replace_delim(s, "**", "<strong>", "</strong>");
+    let s = replace_delim(s, "*", "<em>", "</em>");
+    let s = replace_delim(s, "~~", "<del>", "</del>");
+    let s = replace_delim(s, "==", "<mark>", "</mark>");
+    let s = replace_delim(s, "^", "<sup>", "</sup>");
     let s = replace_kbd(&s);
 
     restore(&s, &stash)
 }
 
+// 임의 개수의 백틱으로 감싸진 코드 스팬 추출
+fn extract_code_spans(text: &str, stash: &mut Vec<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            let fence_len = i - start;
+            let mut close_start = None;
+            let mut j = i;
+            while j < bytes.len() {
+                if bytes[j] == b'`' {
+                    let k = j;
+                    while j < bytes.len() && bytes[j] == b'`' {
+                        j += 1;
+                    }
+                    if j - k == fence_len {
+                        close_start = Some((k, j));
+                        break;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+
+            if let Some((k, end)) = close_start {
+                let code_raw = &text[i..k];
+                let code_text = if code_raw.starts_with(' ')
+                    && code_raw.ends_with(' ')
+                    && code_raw.len() >= 2
+                    && code_raw.chars().any(|c| c != ' ')
+                {
+                    &code_raw[1..code_raw.len() - 1]
+                } else {
+                    code_raw
+                };
+                let html = format!("<code>{}</code>", escape_html(code_text));
+                out.push_str(&hold(stash, html));
+                i = end;
+                continue;
+            } else {
+                out.push_str(&text[start..i]);
+                continue;
+            }
+        } else {
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'`' {
+                i += 1;
+            }
+            out.push_str(&text[start..i]);
+        }
+    }
+    out
+}
+
 // 키보드 키캡 서식: [[Ctrl]] 또는 <kbd>Ctrl</kbd>
 fn replace_kbd(s: &str) -> String {
+    if !s.contains("[[") && !s.contains("&lt;kbd&gt;") {
+        return s.to_string();
+    }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find("[[") {
@@ -677,7 +850,12 @@ fn replace_kbd(s: &str) -> String {
         rest = &rest[start + 2..];
     }
     out.push_str(rest);
-    out.replace("&lt;kbd&gt;", "<kbd>").replace("&lt;/kbd&gt;", "</kbd>")
+    if out.contains("&lt;kbd&gt;") {
+        out.replace("&lt;kbd&gt;", "<kbd>")
+            .replace("&lt;/kbd&gt;", "</kbd>")
+    } else {
+        out
+    }
 }
 
 fn hold(stash: &mut Vec<String>, html: String) -> String {
@@ -690,7 +868,10 @@ fn restore(s: &str, stash: &[String]) -> String {
         .enumerate()
         .map(|(n, seg)| {
             if n % 2 == 1 {
-                seg.parse::<usize>().ok().and_then(|k| stash.get(k)).map_or("", |h| h.as_str())
+                seg.parse::<usize>()
+                    .ok()
+                    .and_then(|k| stash.get(k))
+                    .map_or("", |h| h.as_str())
             } else {
                 seg
             }
@@ -699,9 +880,12 @@ fn restore(s: &str, stash: &[String]) -> String {
 }
 
 // 여는 구분자 뒤와 닫는 구분자 앞은 공백이 아니어야 하고, 짝이 없으면 문자 그대로 둔다
-fn replace_delim(s: &str, delim: &str, open: &str, close: &str) -> String {
+fn replace_delim(s: String, delim: &str, open: &str, close: &str) -> String {
+    if !s.contains(delim) {
+        return s;
+    }
     let mut out = String::with_capacity(s.len());
-    let mut rest = s;
+    let mut rest = s.as_str();
     while let Some(a) = rest.find(delim) {
         let after = &rest[a + delim.len()..];
         let opens = after.chars().next().is_some_and(|c| !c.is_whitespace());
@@ -735,10 +919,35 @@ fn find_close(s: &str, delim: &str) -> Option<usize> {
     None
 }
 
-// 안전한 링크 스킴만 허용 (javascript:, data: 등 차단)
+// 안전한 링크 스킴만 허용 (javascript:, data: 등 차단, 내부 앵커 및 로컬 마크다운 파일 허용)
 fn safe_link(url: &str) -> bool {
     let u = url.trim().to_ascii_lowercase();
-    u.starts_with("http://") || u.starts_with("https://") || u.starts_with("mailto:") || u.starts_with('#')
+    u.starts_with("http://")
+        || u.starts_with("https://")
+        || u.starts_with("mailto:")
+        || u.starts_with('#')
+        || is_relative_markdown_path(url)
+}
+
+fn is_relative_markdown_path(url: &str) -> bool {
+    let u = url.trim();
+    if u.is_empty()
+        || u.contains(':')
+        || u.contains('\\')
+        || u.starts_with("//")
+        || u.contains("..")
+    {
+        return false;
+    }
+    let clean = u
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .split('#')
+        .next()
+        .unwrap_or("");
+    let ext = clean.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "md" | "markdown")
 }
 
 fn is_relative_image_path(url: &str) -> bool {
@@ -749,7 +958,13 @@ fn is_relative_image_path(url: &str) -> bool {
     if u.contains("..") {
         return false;
     }
-    let clean = u.split('?').next().unwrap_or("").split('#').next().unwrap_or("");
+    let clean = u
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .split('#')
+        .next()
+        .unwrap_or("");
     let ext = clean.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     matches!(
         ext.as_str(),
@@ -764,8 +979,14 @@ fn safe_image(url: &str) -> bool {
     }
     // data: URL은 래스터 이미지만 허용 (svg+xml 등은 스크립트 표면이 있어 차단)
     if let Some(mime) = u.strip_prefix("data:image/") {
-        let mime = mime.split(|c: char| c == ';' || c == ',' || c.is_whitespace()).next().unwrap_or("");
-        return matches!(mime, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif");
+        let mime = mime
+            .split(|c: char| c == ';' || c == ',' || c.is_whitespace())
+            .next()
+            .unwrap_or("");
+        return matches!(
+            mime,
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif"
+        );
     }
     is_relative_image_path(url)
 }
@@ -783,22 +1004,22 @@ pub fn url_encode(s: &str) -> String {
     out
 }
 
-// [text](url) -> <a>text</a>, ![alt](url) -> <img>. 입력은 이미 HTML 이스케이프된 상태.
-// 상대 이미지 경로는 로컬 서버의 /api/raw?file=... 엔드포인트로 자동 매핑
-fn replace_links(s: &str, stash: &mut Vec<String>) -> String {
+// ![alt](url) -> <img>. 상대 이미지 경로는 로컬 서버의 /api/raw?file=... 엔드포인트로 자동 매핑
+fn replace_images(s: String, stash: &mut Vec<String>) -> String {
+    if !s.contains("![") {
+        return s;
+    }
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        let img = chars[i] == '!' && chars.get(i + 1) == Some(&'[');
-        let open = if img { i + 1 } else { i };
-        if chars[open] == '[' {
-            if let Some(close_br) = find_char(&chars, open + 1, ']') {
+        if chars[i] == '!' && chars.get(i + 1) == Some(&'[') {
+            if let Some(close_br) = find_char(&chars, i + 2, ']') {
                 if chars.get(close_br + 1) == Some(&'(') {
                     if let Some(close_par) = find_close_paren(&chars, close_br + 2) {
-                        let text: String = chars[open + 1..close_br].iter().collect();
+                        let text: String = chars[i + 2..close_br].iter().collect();
                         let url: String = chars[close_br + 2..close_par].iter().collect();
-                        if img && safe_image(&url) {
+                        if safe_image(&url) {
                             let src = if is_relative_image_path(&url) {
                                 let clean = url.trim().trim_start_matches("./");
                                 format!("/api/raw?file={}", url_encode(clean))
@@ -809,8 +1030,48 @@ fn replace_links(s: &str, stash: &mut Vec<String>) -> String {
                             out.push_str(&hold(stash, tag));
                             i = close_par + 1;
                             continue;
-                        } else if !img && safe_link(&url) {
-                            let a = format!("<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">", url.trim());
+                        }
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+// [text](url) -> <a>text</a>. 이미지는 앞서 stash 에 격리되었으므로 링크 내 이미지([![alt](img)](url))도 완벽히 지원됨.
+fn replace_links(s: String, stash: &mut Vec<String>) -> String {
+    if !s.contains('[') {
+        return s;
+    }
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' {
+            if let Some(close_br) = find_char(&chars, i + 1, ']') {
+                if chars.get(close_br + 1) == Some(&'(') {
+                    if let Some(close_par) = find_close_paren(&chars, close_br + 2) {
+                        let text: String = chars[i + 1..close_br].iter().collect();
+                        let url: String = chars[close_br + 2..close_par].iter().collect();
+                        let trimmed_url = url.trim();
+                        if safe_link(trimmed_url) {
+                            let a = if trimmed_url.starts_with('#') {
+                                format!("<a href=\"{}\" class=\"anchor-link\">", trimmed_url)
+                            } else if is_relative_markdown_path(trimmed_url) {
+                                let clean = trimmed_url.trim_start_matches("./");
+                                format!(
+                                    "<a href=\"/?file={}\" class=\"md-link\">",
+                                    url_encode(clean)
+                                )
+                            } else {
+                                format!(
+                                    "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">",
+                                    trimmed_url
+                                )
+                            };
                             out.push_str(&hold(stash, a));
                             out.push_str(&text);
                             out.push_str(&hold(stash, "</a>".to_string()));
@@ -828,7 +1089,11 @@ fn replace_links(s: &str, stash: &mut Vec<String>) -> String {
 }
 
 fn find_char(chars: &[char], start: usize, target: char) -> Option<usize> {
-    chars.iter().skip(start).position(|&c| c == target).map(|p| p + start)
+    chars
+        .iter()
+        .skip(start)
+        .position(|&c| c == target)
+        .map(|p| p + start)
 }
 
 // 괄호 짝을 세어 닫는 ')' 위치를 찾는다 (URL 안의 (..) 허용)
@@ -895,39 +1160,76 @@ fn parse_table_aligns(line: &str) -> Vec<Align> {
         .collect()
 }
 
-// 한 행을 '|' 기준으로 분리 (앞뒤 테두리 파이프 제거, \| 이스케이프 및 코드 스팬 안의 | 보호 지원)
+// 한 행을 '|' 기준으로 분리 (앞뒤 테두리 파이프 제거, \| 이스케이프 및 임의 개수 백틱 코드 스팬 안의 | 보호 지원)
 fn split_table_row(line: &str) -> Vec<String> {
     let t = line.trim();
     let t = t.strip_prefix('|').unwrap_or(t);
-    let t = t.strip_suffix('|').unwrap_or(t);
+    let t = if t.ends_with('|') && !is_escaped_pipe(t) {
+        &t[..t.len() - 1]
+    } else {
+        t
+    };
 
     let mut cells = Vec::new();
     let mut cur = String::new();
-    let mut chars = t.chars().peekable();
-    let mut in_code = false;
-    while let Some(c) = chars.next() {
+    let chars: Vec<char> = t.chars().collect();
+    let mut i = 0;
+    let mut active_fence = 0usize;
+
+    while i < chars.len() {
+        let c = chars[i];
         if c == '`' {
-            in_code = !in_code;
-            cur.push(c);
-        } else if c == '\\' {
-            if chars.peek() == Some(&'|') {
+            let start = i;
+            while i < chars.len() && chars[i] == '`' {
+                i += 1;
+            }
+            let count = i - start;
+            for _ in 0..count {
+                cur.push('`');
+            }
+            if active_fence == 0 {
+                active_fence = count;
+            } else if active_fence == count {
+                active_fence = 0;
+            }
+            continue;
+        } else if c == '\\' && active_fence == 0 {
+            if i + 1 < chars.len() && chars[i + 1] == '|' {
                 cur.push('|');
-                chars.next();
+                i += 2;
                 continue;
             }
             cur.push('\\');
-        } else if c == '|' && !in_code {
+            i += 1;
+            continue;
+        } else if c == '|' && active_fence == 0 {
             cells.push(std::mem::take(&mut cur));
+            i += 1;
+            continue;
         } else {
             cur.push(c);
+            i += 1;
         }
     }
     cells.push(cur);
     cells
 }
 
+fn is_escaped_pipe(s: &str) -> bool {
+    let without_pipe = &s[..s.len().saturating_sub(1)];
+    let slash_count = without_pipe
+        .chars()
+        .rev()
+        .take_while(|&c| c == '\\')
+        .count();
+    slash_count % 2 == 1
+}
+
 fn escape_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    if !s.contains(['&', '<', '>', '"']) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 16);
     for c in s.chars() {
         match c {
             '&' => out.push_str("&amp;"),
@@ -950,9 +1252,18 @@ mod tests {
         let html = to_html(md);
         assert!(html.contains("<table>"), "table 태그 없음: {html}");
         assert!(html.contains("<thead>"), "thead 없음");
-        assert!(html.contains("<th style=\"text-align:left\">이름</th>"), "좌측정렬 th 없음: {html}");
-        assert!(html.contains("<th style=\"text-align:center\">나이</th>"), "가운데정렬 th 없음: {html}");
-        assert!(html.contains("<td style=\"text-align:left\">홍길동</td>"), "td 없음: {html}");
+        assert!(
+            html.contains("<th style=\"text-align:left\">이름</th>"),
+            "좌측정렬 th 없음: {html}"
+        );
+        assert!(
+            html.contains("<th style=\"text-align:center\">나이</th>"),
+            "가운데정렬 th 없음: {html}"
+        );
+        assert!(
+            html.contains("<td style=\"text-align:left\">홍길동</td>"),
+            "td 없음: {html}"
+        );
         assert!(!html.contains("<hr/>"), "구분행이 hr 로 잘못 처리됨");
     }
 
@@ -961,8 +1272,14 @@ mod tests {
         let md = "| 명령어 | 설명 |\n| --- | --- |\n| `a | b` | 파이프 테스트 |\n";
         let html = to_html(md);
         assert!(html.contains("<table>"), "table 태그 없음: {html}");
-        assert!(html.contains("<code>a | b</code>"), "코드 내 파이프 보존 실패: {html}");
-        assert!(html.contains("<td>파이프 테스트</td>"), "열 분리 실패: {html}");
+        assert!(
+            html.contains("<code>a | b</code>"),
+            "코드 내 파이프 보존 실패: {html}"
+        );
+        assert!(
+            html.contains("<td>파이프 테스트</td>"),
+            "열 분리 실패: {html}"
+        );
     }
 
     #[test]
@@ -977,31 +1294,54 @@ mod tests {
         let md = "| A | B |\n|---|---|\n| 1 | 2 |\n# Heading | with pipe\n";
         let html = to_html(md);
         assert!(html.contains("<table>"), "{html}");
-        assert!(html.contains("<h1 id=\"heading-with-pipe\">Heading | with pipe</h1>"), "{html}");
-        assert_eq!(html.matches("<tr>").count(), 2, "헤더 1행 + 본문 1행이어야 함: {html}");
+        assert!(
+            html.contains("<h1 id=\"heading-with-pipe\">Heading | with pipe</h1>"),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<tr>").count(),
+            2,
+            "헤더 1행 + 본문 1행이어야 함: {html}"
+        );
     }
 
     #[test]
     fn table_pads_missing_columns() {
         let md = "| A | B | C |\n|---|---|---|\n| 1 |\n";
         let html = to_html(md);
-        assert!(html.contains("<tr><td>1</td><td></td><td></td></tr>"), "{html}");
+        assert!(
+            html.contains("<tr><td>1</td><td></td><td></td></tr>"),
+            "{html}"
+        );
     }
 
     #[test]
     fn unmatched_delimiters_stay_literal() {
         for md in ["2 * 3 * 4", "a * b", "**bold", "`code", "*x"] {
             let html = to_html(md);
-            assert_eq!(html.matches("<em>").count(), html.matches("</em>").count(), "{md}: {html}");
-            assert_eq!(html.matches("<strong>").count(), html.matches("</strong>").count(), "{md}: {html}");
-            assert_eq!(html.matches("<code>").count(), html.matches("</code>").count(), "{md}: {html}");
+            assert_eq!(
+                html.matches("<em>").count(),
+                html.matches("</em>").count(),
+                "{md}: {html}"
+            );
+            assert_eq!(
+                html.matches("<strong>").count(),
+                html.matches("</strong>").count(),
+                "{md}: {html}"
+            );
+            assert_eq!(
+                html.matches("<code>").count(),
+                html.matches("</code>").count(),
+                "{md}: {html}"
+            );
         }
         assert!(to_html("2 * 3 * 4").contains("2 * 3 * 4"));
     }
 
     #[test]
     fn emphasis_works() {
-        assert!(to_html("*a* **b** ***c***").contains("<em>a</em> <strong>b</strong> <strong><em>c</em></strong>"));
+        assert!(to_html("*a* **b** ***c***")
+            .contains("<em>a</em> <strong>b</strong> <strong><em>c</em></strong>"));
         assert!(to_html("**`x`**").contains("<strong><code>x</code></strong>"));
     }
 
@@ -1016,7 +1356,12 @@ mod tests {
 
     #[test]
     fn dangerous_links_are_blocked() {
-        for md in ["[x](javascript:alert(1))", "[x](JaVaScRiPt:alert(1))", "[x](data:text/html,hi)", "[x]( vbscript:x)"] {
+        for md in [
+            "[x](javascript:alert(1))",
+            "[x](JaVaScRiPt:alert(1))",
+            "[x](data:text/html,hi)",
+            "[x]( vbscript:x)",
+        ] {
             assert!(!to_html(md).contains("<a "), "{md}");
         }
         let ok = to_html("[x](https://a.com/p?q=1&r=2) [y](#h) [z](mailto:a@b.c)");
@@ -1035,7 +1380,9 @@ mod tests {
     #[test]
     fn html_is_escaped_and_images_restricted() {
         assert!(to_html("<script>alert(1)</script>").contains("&lt;script&gt;"));
-        assert!(to_html("![a](https://x/y.png)").contains("<img src=\"https://x/y.png\" alt=\"a\">"));
+        assert!(
+            to_html("![a](https://x/y.png)").contains("<img src=\"https://x/y.png\" alt=\"a\">")
+        );
         assert!(!to_html("![a](javascript:x)").contains("<img"));
         assert!(!to_html("![a](\"onerror=x)").contains("<img"));
     }
@@ -1044,8 +1391,14 @@ mod tests {
     fn local_relative_images_mapped_to_api_raw() {
         let md = "![다이어그램](diagram.png) 및 ![아키텍처](images/arch.svg)";
         let html = to_html(md);
-        assert!(html.contains("<img src=\"/api/raw?file=diagram.png\" alt=\"다이어그램\">"), "{html}");
-        assert!(html.contains("<img src=\"/api/raw?file=images/arch.svg\" alt=\"아키텍처\">"), "{html}");
+        assert!(
+            html.contains("<img src=\"/api/raw?file=diagram.png\" alt=\"다이어그램\">"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<img src=\"/api/raw?file=images/arch.svg\" alt=\"아키텍처\">"),
+            "{html}"
+        );
         // Path traversal 시도 차단
         assert!(!to_html("![탈출](../secret.png)").contains("<img src=\"/api/raw"));
     }
@@ -1054,15 +1407,27 @@ mod tests {
     fn mermaid_diagram_rendering() {
         let md = "```mermaid\ngraph TD\n  A --> B\n```";
         let html = to_html(md);
-        assert!(html.contains("class=\"code-block-wrapper mermaid-wrapper\""), "{html}");
-        assert!(html.contains("<div class=\"mermaid\">\ngraph TD\n  A --&gt; B\n</div>"), "{html}");
+        assert!(
+            html.contains("class=\"code-block-wrapper mermaid-wrapper\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<div class=\"mermaid\">\ngraph TD\n  A --&gt; B\n</div>"),
+            "{html}"
+        );
     }
 
     #[test]
     fn footnotes_work() {
-        let md = "문장입니다[^1] 그리고 다음[^note].\n\n[^1]: 첫 번째 각주\n[^note]: 두 번째 상세 설명";
+        let md =
+            "문장입니다[^1] 그리고 다음[^note].\n\n[^1]: 첫 번째 각주\n[^note]: 두 번째 상세 설명";
         let html = to_html(md);
-        assert!(html.contains("<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">[1]</a></sup>"), "{html}");
+        assert!(
+            html.contains(
+                "<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">[1]</a></sup>"
+            ),
+            "{html}"
+        );
         assert!(html.contains("<li id=\"fn-1\">첫 번째 각주 <a href=\"#fnref-1\" class=\"footnote-backref\">↩</a></li>"), "{html}");
         assert!(html.contains("<li id=\"fn-note\">두 번째 상세 설명 <a href=\"#fnref-note\" class=\"footnote-backref\">↩</a></li>"), "{html}");
     }
@@ -1078,8 +1443,16 @@ mod tests {
     fn nested_lists() {
         let html = to_html("- a\n  - b\n    - c\n- d\n");
         assert_eq!(html.matches("<ul>").count(), 3, "{html}");
-        assert_eq!(html.matches("<ul>").count(), html.matches("</ul>").count(), "{html}");
-        assert_eq!(html.matches("<li>").count(), html.matches("</li>").count(), "{html}");
+        assert_eq!(
+            html.matches("<ul>").count(),
+            html.matches("</ul>").count(),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<li>").count(),
+            html.matches("</li>").count(),
+            "{html}"
+        );
         assert!(html.contains("<li>a<ul>"), "{html}");
         assert!(html.contains("</ul>\n</li>\n<li>d"), "{html}");
     }
@@ -1112,7 +1485,11 @@ mod tests {
     fn blockquote_merges_and_nests() {
         let html = to_html("> a\n> b\n>\n> - x\n> > deep\n");
         assert_eq!(html.matches("<blockquote>").count(), 2, "{html}");
-        assert_eq!(html.matches("<blockquote>").count(), html.matches("</blockquote>").count(), "{html}");
+        assert_eq!(
+            html.matches("<blockquote>").count(),
+            html.matches("</blockquote>").count(),
+            "{html}"
+        );
         assert!(html.contains("<p>a\nb</p>"), "{html}");
         assert!(html.contains("<li>x"), "{html}");
     }
@@ -1134,21 +1511,41 @@ mod tests {
     #[test]
     fn duplicate_headings_get_unique_ids() {
         let html = to_html("# 같은 제목\n\n# 같은 제목\n\n## 같은 제목\n");
-        assert!(html.contains("<h1 id=\"같은-제목\">같은 제목</h1>"), "{html}");
-        assert!(html.contains("<h1 id=\"같은-제목-1\">같은 제목</h1>"), "{html}");
-        assert!(html.contains("<h2 id=\"같은-제목-2\">같은 제목</h2>"), "{html}");
+        assert!(
+            html.contains("<h1 id=\"같은-제목\">같은 제목</h1>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h1 id=\"같은-제목-1\">같은 제목</h1>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"같은-제목-2\">같은 제목</h2>"),
+            "{html}"
+        );
     }
 
     #[test]
     fn data_svg_images_are_blocked_but_raster_data_urls_stay() {
-        assert!(!to_html("![a](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)").contains("<img"), "svg data URL 차단 실패");
-        assert!(!to_html("![a](DATA:IMAGE/SVG+XML;hi)").contains("<img"), "대소문자 우회 차단 실패");
-        assert!(to_html("![a](data:image/png;base64,iVBORw0KGgo=)").contains("<img src=\"data:image/png;base64,iVBORw0KGgo=\""), "png data URL 허용 실패");
+        assert!(
+            !to_html("![a](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)").contains("<img"),
+            "svg data URL 차단 실패"
+        );
+        assert!(
+            !to_html("![a](DATA:IMAGE/SVG+XML;hi)").contains("<img"),
+            "대소문자 우회 차단 실패"
+        );
+        assert!(
+            to_html("![a](data:image/png;base64,iVBORw0KGgo=)")
+                .contains("<img src=\"data:image/png;base64,iVBORw0KGgo=\""),
+            "png data URL 허용 실패"
+        );
     }
 
     #[test]
     fn code_block_is_escaped_and_unclosed_fence_ok() {
-        assert!(to_html("```\n<b>*x*</b>\n```").contains("<pre><code>&lt;b&gt;*x*&lt;/b&gt;\n</code></pre>"));
+        assert!(to_html("```\n<b>*x*</b>\n```")
+            .contains("<pre><code>&lt;b&gt;*x*&lt;/b&gt;\n</code></pre>"));
         let _ = to_html("```\nnever closed");
     }
 
@@ -1165,7 +1562,12 @@ mod tests {
     fn task_list_works() {
         let md = "- [ ] 할 일 1\n- [x] 완료된 일 2\n* [X] 완료된 일 3\n- 일반 항목\n";
         let html = to_html(md);
-        assert!(html.contains("<li class=\"task-list-item\"><input type=\"checkbox\" disabled> 할 일 1</li>"), "{html}");
+        assert!(
+            html.contains(
+                "<li class=\"task-list-item\"><input type=\"checkbox\" disabled> 할 일 1</li>"
+            ),
+            "{html}"
+        );
         assert!(html.contains("<li class=\"task-list-item\"><input type=\"checkbox\" checked disabled> 완료된 일 2</li>"), "{html}");
         assert!(html.contains("<li class=\"task-list-item\"><input type=\"checkbox\" checked disabled> 완료된 일 3</li>"), "{html}");
         assert!(html.contains("<li>일반 항목</li>"), "{html}");
@@ -1189,9 +1591,18 @@ mod tests {
         let md = ":::toggle 상세 정보 펼치기\n내용입니다.\n:::\n\n$$E = mc^2$$\n\n인라인 $a^2 + b^2 = c^2$ 수식";
         let html = to_html(md);
         assert!(html.contains("<details class=\"notion-toggle\">"), "{html}");
-        assert!(html.contains("<summary>상세 정보 펼치기</summary>"), "{html}");
-        assert!(html.contains("<div class=\"math-block\">$$E = mc^2$$</div>"), "{html}");
-        assert!(html.contains("<span class=\"math-inline\">$a^2 + b^2 = c^2$</span>"), "{html}");
+        assert!(
+            html.contains("<summary>상세 정보 펼치기</summary>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<div class=\"math-block\">$$E = mc^2$$</div>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"math-inline\">$a^2 + b^2 = c^2$</span>"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -1207,11 +1618,17 @@ mod tests {
     fn edge_cases_and_unclosed_blocks() {
         let unclosed_math = "$$\n\\alpha + \\beta";
         let html_math = to_html(unclosed_math);
-        assert!(html_math.contains("<div class=\"math-block\">"), "{html_math}");
+        assert!(
+            html_math.contains("<div class=\"math-block\">"),
+            "{html_math}"
+        );
 
         let unclosed_toggle = ":::toggle 닫히지 않은 토글\n내용";
         let html_toggle = to_html(unclosed_toggle);
-        assert!(html_toggle.contains("<details class=\"notion-toggle\">"), "{html_toggle}");
+        assert!(
+            html_toggle.contains("<details class=\"notion-toggle\">"),
+            "{html_toggle}"
+        );
         assert!(html_toggle.contains("</details>"), "{html_toggle}");
 
         let currency = "가격은 $100 이고 다른 것은 $200 입니다.";
@@ -1226,7 +1643,10 @@ mod tests {
 
         let empty_callout = "> [!NOTE]";
         let html_callout = to_html(empty_callout);
-        assert!(html_callout.contains("class=\"callout callout-note\""), "{html_callout}");
+        assert!(
+            html_callout.contains("class=\"callout callout-note\""),
+            "{html_callout}"
+        );
 
         let mut deep_toggle = String::new();
         for _ in 0..100 {
@@ -1238,10 +1658,106 @@ mod tests {
     #[test]
     fn code_language_labels_use_sentence_case() {
         let rust = to_html("```rust\nlet x = 1;\n```");
-        assert!(rust.contains("<span class=\"code-lang\">Rust</span>"), "{rust}");
+        assert!(
+            rust.contains("<span class=\"code-lang\">Rust</span>"),
+            "{rust}"
+        );
         let mermaid = to_html("```mermaid\ngraph TD\n  A --> B\n```");
-        assert!(mermaid.contains("<span class=\"code-lang\">Mermaid diagram</span>"), "{mermaid}");
+        assert!(
+            mermaid.contains("<span class=\"code-lang\">Mermaid diagram</span>"),
+            "{mermaid}"
+        );
         let plain = to_html("```\ntext\n```");
-        assert!(plain.contains("<span class=\"code-lang\">Text</span>"), "{plain}");
+        assert!(
+            plain.contains("<span class=\"code-lang\">Text</span>"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn multi_backtick_code_spans() {
+        let html = to_html("``foo ` bar`` 및 `` ` `` 및 `normal`");
+        assert!(html.contains("<code>foo ` bar</code>"), "{html}");
+        assert!(html.contains("<code>`</code>"), "{html}");
+        assert!(html.contains("<code>normal</code>"), "{html}");
+    }
+
+    #[test]
+    fn table_with_multi_backtick_and_escaped_pipe() {
+        let md = "| 명령어 | 설명 |\n| --- | --- |\n| ``a | b`` | 더블 백틱 파이프 |\n| c \\| d | 이스케이프 파이프 |\n";
+        let html = to_html(md);
+        assert!(html.contains("<code>a | b</code>"), "{html}");
+        assert!(html.contains("<td>더블 백틱 파이프</td>"), "{html}");
+        assert!(html.contains("<td>c | d</td>"), "{html}");
+        assert!(html.contains("<td>이스케이프 파이프</td>"), "{html}");
+    }
+
+    #[test]
+    fn linked_images_and_anchor_links() {
+        let md = "[![배지](badge.png)](https://example.com) 및 [상세](#개요)";
+        let html = to_html(md);
+        // 링크 내 이미지 중첩 확인
+        assert!(html.contains("<a href=\"https://example.com\" target=\"_blank\" rel=\"noopener noreferrer\"><img src=\"/api/raw?file=badge.png\" alt=\"배지\"></a>"), "{html}");
+        // 내부 앵커 링크는 target="_blank" 없이 anchor-link 클래스 부여
+        assert!(
+            html.contains("<a href=\"#개요\" class=\"anchor-link\">상세</a>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn closing_heading_hashes_and_slugs() {
+        let md = "## 1.2 개요 ##\n# 단일 #\n### 닫히지않음###x\n";
+        let html = to_html(md);
+        assert!(html.contains("<h2 id=\"1-2-개요\">1.2 개요</h2>"), "{html}");
+        assert!(html.contains("<h1 id=\"단일\">단일</h1>"), "{html}");
+        assert!(html.contains("닫히지않음###x"), "{html}");
+    }
+
+    #[test]
+    fn tilde_code_block_and_footnotes_in_code() {
+        let md =
+            "~~~python\n# [^1]: 이것은 코드 주석\nprint(1)\n~~~\n\n본문[^1]\n\n[^1]: 실제 각주";
+        let html = to_html(md);
+        assert!(html.contains("<pre><code class=\"language-python\"># [^1]: 이것은 코드 주석\nprint(1)\n</code></pre>"), "{html}");
+        assert!(html.contains("<section class=\"footnotes\">"), "{html}");
+        assert!(html.contains("실제 각주"), "{html}");
+        // 코드 내부의 주석은 각주 본문으로 추출되지 않음
+        assert!(!html.contains("이것은 코드 주석 <a href="), "{html}");
+    }
+
+    #[test]
+    fn relative_markdown_interlinks() {
+        let md = "[다음 챕터](chapter2.md) 및 [가이드](./docs/guide.markdown)";
+        let html = to_html(md);
+        assert!(
+            html.contains("<a href=\"/?file=chapter2.md\" class=\"md-link\">다음 챕터</a>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<a href=\"/?file=docs/guide.markdown\" class=\"md-link\">가이드</a>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn currency_is_not_treated_as_inline_math() {
+        let md = "Prices range from $10 to $20, or $15-$25.";
+        let html = to_html(md);
+        assert!(!html.contains("math-inline"), "{html}");
+        assert!(html.contains("$10 to $20"), "{html}");
+        assert!(html.contains("$15-$25"), "{html}");
+
+        // 실제 수식은 여전히 정상 렌더링
+        let math_md = "Formula $E = mc^2$ and $x + y = z$";
+        let math_html = to_html(math_md);
+        assert!(
+            math_html.contains("<span class=\"math-inline\">$E = mc^2$</span>"),
+            "{math_html}"
+        );
+        assert!(
+            math_html.contains("<span class=\"math-inline\">$x + y = z$</span>"),
+            "{math_html}"
+        );
     }
 }

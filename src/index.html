@@ -271,6 +271,41 @@
     flex-shrink: 0;
   }
 
+  /* Active File Badge */
+  .file-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+    user-select: none;
+    max-width: 220px;
+    flex-shrink: 0;
+  }
+  .file-badge:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-hover);
+  }
+  .file-badge .file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .file-dirty-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #f59e0b;
+    flex-shrink: 0;
+  }
+
   /* Center Segmented View Switcher (Pill Slider) */
   .view-cluster {
     display: flex;
@@ -349,8 +384,9 @@
   #statusbar {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
-    padding: 5px 16px;
+    padding: 4px 16px;
     background: var(--surface);
     border-top: 1px solid var(--border);
     font-size: 12px;
@@ -363,7 +399,456 @@
     flex-shrink: 0;
   }
   #statusbar::-webkit-scrollbar { display: none; }
-  #statusbar .stat-pill { margin-left: auto; }
+  .status-left, .status-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .stat-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    font-size: 11.5px;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: background-color 0.12s ease, color 0.12s ease;
+  }
+  .stat-btn:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+
+  /* Floating In-Editor Search & Replace Bar */
+  .search-bar {
+    position: absolute;
+    top: 48px;
+    right: 16px;
+    z-index: 50;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 7px 8px;
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    backdrop-filter: blur(16px);
+    min-width: 350px;
+    max-width: calc(100% - 32px);
+  }
+  .search-bar.open { display: flex; animation: searchFadeIn 0.15s ease; }
+  @keyframes searchFadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .search-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .search-input-wrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
+  .search-input-wrap input {
+    width: 100%;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 56px 5px 28px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+  .search-input-wrap input:focus {
+    border-color: var(--accent);
+  }
+  .search-input-wrap .search-icon {
+    position: absolute;
+    left: 8px;
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+  .search-match-count {
+    position: absolute;
+    right: 8px;
+    font-size: 11px;
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-faint);
+    pointer-events: none;
+  }
+  .search-opt-btn.active {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  /* Workspace Files Modal */
+  .file-modal { width: 540px; }
+  .workspace-dir-text {
+    font-size: 11.5px;
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-faint);
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-search-wrap input {
+    width: 100%;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+  }
+  .file-search-wrap input:focus { border-color: var(--accent); }
+  .file-list-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .file-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text);
+    font-size: 13px;
+    transition: background 0.1s ease;
+  }
+  .file-item:hover, .file-item.selected {
+    background: var(--surface-hover);
+  }
+  .file-item.active {
+    font-weight: 600;
+    color: var(--accent);
+    background: rgba(var(--accent-rgb), 0.08);
+  }
+  .file-item-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .file-item-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .file-item-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-item-delete {
+    background: transparent;
+    border: none;
+    color: var(--text-faint);
+    padding: 3px 5px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+  }
+  .file-item:hover .btn-item-delete,
+  .file-item.selected .btn-item-delete {
+    opacity: 1;
+  }
+  .btn-item-delete:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.14);
+  }
+  .file-folder-prefix {
+    color: var(--text-faint);
+    font-size: 11px;
+    font-weight: normal;
+    margin-right: 2px;
+  }
+  .file-section-header {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 6px 8px 3px;
+    margin-top: 4px;
+  }
+  .slash-empty-msg {
+    padding: 14px 8px;
+    font-size: 12px;
+    color: var(--text-faint);
+    text-align: center;
+  }
+
+  /* Toast Notification */
+  #toast {
+    position: fixed;
+    bottom: 38px;
+    right: 20px;
+    background: var(--surface-elevated);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 12.5px;
+    font-weight: 500;
+    box-shadow: var(--shadow-lg);
+    z-index: 300;
+    display: none;
+    align-items: center;
+    gap: 8px;
+    animation: toastIn 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  #toast.show { display: flex; }
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .toc-item.active {
+    color: var(--accent);
+    background: rgba(var(--accent-rgb), 0.08);
+    font-weight: 600;
+  }
+
+  /* ---------- Notion Unified Live Canvas ---------- */
+  body.notion-view #preview-container {
+    padding: 36px 32px 140px;
+  }
+  body.notion-view #preview {
+    outline: none;
+    cursor: text;
+  }
+  body.notion-view #preview [data-block] {
+    position: relative;
+    border-radius: 6px;
+    padding: 4px 8px;
+    margin: 3px -8px;
+    outline: none;
+    contain: layout style;
+    transition: background-color 0.1s ease, box-shadow 0.1s ease;
+  }
+  body.notion-view #preview [data-block]:hover {
+    background: rgba(var(--accent-rgb), 0.035);
+  }
+  body.notion-view #preview [data-block].active-block,
+  body.notion-view #preview [data-block]:focus {
+    background: rgba(var(--accent-rgb), 0.06);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  body.notion-view #preview [data-placeholder]:empty:before {
+    content: attr(data-placeholder);
+    color: var(--text-faint);
+    pointer-events: none;
+  }
+  .notion-hint-badge {
+    position: absolute;
+    right: 8px;
+    top: 4px;
+    font-size: 11px;
+    color: var(--text-faint);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    user-select: none;
+    pointer-events: none;
+  }
+  body.notion-view #preview [data-block]:hover .notion-hint-badge {
+    opacity: 1;
+  }
+  .code-block-wrapper.clickable-block,
+  .mermaid-wrapper.clickable-block,
+  .math-block.clickable-block {
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  .code-block-wrapper.clickable-block:hover,
+  .mermaid-wrapper.clickable-block:hover,
+  .math-block.clickable-block:hover {
+    border-color: var(--accent);
+  }
+  .notion-card-edit-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--surface-elevated);
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+    z-index: 10;
+  }
+  body.notion-view .math-block:hover .notion-card-edit-btn,
+  body.notion-view .mermaid-wrapper:hover .notion-card-edit-btn {
+    opacity: 1;
+  }
+  .notion-card-edit-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .notion-search-target {
+    outline: 2.5px solid var(--accent) !important;
+    outline-offset: 3px !important;
+    border-radius: 4px;
+    animation: pulseTarget 1.2s ease infinite alternate;
+  }
+  @keyframes pulseTarget {
+    from { outline-color: var(--accent); }
+    to { outline-color: #38bdf8; }
+  }
+
+  /* Slash Command Menu */
+  .slash-menu {
+    position: fixed;
+    z-index: 250;
+    width: 270px;
+    max-height: 340px;
+    overflow-y: auto;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 6px;
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+    backdrop-filter: blur(16px);
+  }
+  .slash-menu.open { display: flex; animation: searchFadeIn 0.12s ease; }
+  .slash-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 9px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--text);
+    transition: background 0.1s ease, color 0.1s ease;
+  }
+  .slash-item:hover, .slash-item.selected {
+    background: var(--surface-hover);
+    color: var(--accent);
+  }
+  .slash-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: "JetBrains Mono", monospace;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+  .slash-item:hover .slash-icon, .slash-item.selected .slash-icon {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .slash-item-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+  .slash-item-title {
+    font-weight: 500;
+    line-height: 1.25;
+  }
+  .slash-item-desc {
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  /* Floating Selection Formatting Bar */
+  .floating-format-bar {
+    position: fixed;
+    z-index: 240;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-md);
+    padding: 3px;
+    display: none;
+    align-items: center;
+    gap: 2px;
+    backdrop-filter: blur(12px);
+  }
+  .floating-format-bar.open { display: flex; animation: searchFadeIn 0.12s ease; }
+  .floating-format-bar button {
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 4px 7px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    color: var(--text-muted);
+    min-width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .floating-format-bar button:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+
+  /* Inline Source Editor Card (for Math, Mermaid) */
+  .inline-editor-card {
+    position: fixed;
+    z-index: 260;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 12px;
+    width: 440px;
+    max-width: 90vw;
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    backdrop-filter: blur(16px);
+  }
+  .inline-editor-card.open { display: flex; animation: searchFadeIn 0.15s ease; }
+  .inline-editor-card textarea {
+    width: 100%;
+    min-height: 110px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+    padding: 8px 10px;
+    outline: none;
+    resize: vertical;
+  }
+  .inline-editor-card textarea:focus { border-color: var(--accent); }
 
   /* ---------- Modern Floating Toolbar (항상 왼쪽 정렬, 단일행) ---------- */
   .editor-header-bar {
@@ -570,6 +1055,8 @@
     transition: opacity 0.15s;
   }
   #preview a:hover { opacity: 0.8; }
+  #preview a.md-link { text-decoration-style: dashed; }
+  #preview a.anchor-link { text-decoration-style: dotted; }
   #preview img {
     max-width: 100%;
     border-radius: 8px;
@@ -968,7 +1455,10 @@
   /* Print Styles */
   @media print {
     body { background: #fff !important; color: #111 !important; height: auto !important; overflow: visible !important; }
-    header, #statusbar, .divider, .pane:first-child, #tocDrawer, .modal-overlay, .editor-header-bar { display: none !important; }
+    header, #statusbar, .divider, .pane:first-child, #tocDrawer, .modal-overlay, .editor-header-bar,
+    .notion-card-edit-btn, .slash-menu, .floating-format-bar, .inline-editor-card, .copy-code-btn,
+    #searchBar, #toast, .action-btn { display: none !important; }
+    [contenteditable] { outline: none !important; }
     main { display: block !important; overflow: visible !important; }
     #preview-container { padding: 0 !important; overflow: visible !important; }
     #preview { max-width: 100% !important; }
@@ -993,9 +1483,20 @@
 
     <div class="header-divider"></div>
 
+    <div class="file-badge" id="fileBadge" title="클릭하여 파일 이름 변경 (Rename)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+      <span id="fileNameDisplay" class="file-name">untitled.md</span>
+      <span id="fileDirtyDot" class="file-dirty-dot" style="display:none;" title="저장되지 않음"></span>
+    </div>
+
+    <div class="header-divider"></div>
+
     <div class="btn-group" title="파일">
-      <button id="btnOpen" class="ghost btn-icon" title="불러오기 (.md 파일 열기)">
+      <button id="btnFiles" class="ghost btn-icon" title="작업 폴더 파일 탐색기 (Ctrl+O)">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+      </button>
+      <button id="btnOpen" class="ghost btn-icon" title="로컬 파일 열기 (OS 탐색기)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
       </button>
       <input type="file" id="filePicker" accept=".md,.markdown" />
       <button id="btnNew" class="ghost btn-icon" title="새 파일 (Ctrl+N)">
@@ -1009,9 +1510,10 @@
 
   <!-- Center View Controls -->
   <div class="view-cluster">
-    <div class="view-segmented" title="보기 모드 전환 (Alt+1 / Alt+2 / Alt+3)">
+    <div class="view-segmented" title="보기 모드 전환 (Alt+1 노션 / Alt+2 분할 / Alt+3 에디터 / Alt+4 미리보기)">
+      <button id="viewNotion" class="active">노션</button>
+      <button id="viewSplit">분할</button>
       <button id="viewEditor">에디터</button>
-      <button id="viewSplit" class="active">분할</button>
       <button id="viewPreview">미리보기</button>
     </div>
     <button id="btnToggleToc" class="btn-icon ghost" title="목차 열기/닫기 (TOC)">
@@ -1046,6 +1548,19 @@
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
     <span id="menuThemeLabel">라이트 모드로 전환</span>
   </button>
+  <button id="menuWordWrap" type="button" title="자동 줄바꿈 켜기/끄기">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"></line><path d="M3 12h15a3 3 0 1 1 0 6h-4"></path><polyline points="16 16 14 18 16 20"></polyline></svg>
+    <span id="menuWordWrapLabel">줄바꿈: 켬</span>
+  </button>
+  <button id="menuCopyMd" type="button" title="마크다운 원본 클립보드 복사">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+    <span>마크다운 원본 복사</span>
+  </button>
+  <button id="menuCopyHtml" type="button" title="렌더링된 HTML 복사">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+    <span>HTML 코드 복사</span>
+  </button>
+  <div style="height:1px; background:var(--border); margin:4px 0;"></div>
   <button id="menuHelp" type="button" title="도움말 (F1)">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
     <span>도움말</span>
@@ -1117,6 +1632,37 @@
           <span class="mono-glyph">^fn</span>
         </button>
       </div>
+
+      <div class="toolbar-group" title="찾기 및 바꾸기">
+        <button type="button" class="tbtn" id="btnOpenSearch" title="찾기 및 바꾸기 (Ctrl+F / Ctrl+H)">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Floating Search & Replace Bar -->
+    <div id="searchBar" class="search-bar">
+      <div class="search-row">
+        <div class="search-input-wrap">
+          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" id="findInput" placeholder="찾기... (Enter / Shift+Enter)" spellcheck="false" autocomplete="off" />
+          <span id="searchMatchCount" class="search-match-count">0/0</span>
+        </div>
+        <button id="btnFindCase" class="btn-icon ghost search-opt-btn" title="대소문자 구분 (Case Sensitive)">Aa</button>
+        <button id="btnFindPrev" class="btn-icon ghost" title="이전 일치 항목 (Shift+Enter)">▲</button>
+        <button id="btnFindNext" class="btn-icon ghost" title="다음 일치 항목 (Enter)">▼</button>
+        <button id="btnToggleReplace" class="btn-icon ghost" title="바꾸기 펼치기/접기 (Ctrl+H)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+        </button>
+        <button id="btnCloseSearch" class="btn-icon ghost" title="닫기 (Esc)">✕</button>
+      </div>
+      <div class="search-row replace-row" id="replaceRow" style="display:none;">
+        <div class="search-input-wrap">
+          <input type="text" id="replaceInput" placeholder="바꿀 내용..." spellcheck="false" autocomplete="off" />
+        </div>
+        <button id="btnReplaceOne" class="ghost" style="padding: 4px 8px; font-size: 11.5px;">바꾸기</button>
+        <button id="btnReplaceAll" class="ghost" style="padding: 4px 8px; font-size: 11.5px;">모두 바꾸기</button>
+      </div>
     </div>
 
     <textarea id="editor" spellcheck="false" placeholder="# 여기에 마크다운을 작성하세요..."></textarea>
@@ -1147,12 +1693,48 @@
 
 <!-- Bottom Status Bar -->
 <footer id="statusbar">
-  <div class="status-pill" id="statusPill" title="문서 상태">
-    <div class="pulse-dot" id="pulseDot"></div>
-    <span id="status">준비됨</span>
+  <div class="status-left">
+    <div class="status-pill" id="statusPill" title="문서 상태">
+      <div class="pulse-dot" id="pulseDot"></div>
+      <span id="status">준비됨</span>
+    </div>
   </div>
-  <span class="stat-pill" id="stats">0자 · 1줄</span>
+  <div class="status-right">
+    <span class="stat-pill" id="cursorPos">1행 1열</span>
+    <span class="stat-pill" id="selectionCount" style="display:none;">0자 선택됨</span>
+    <span class="stat-pill" id="stats">0자 · 1줄 · ~1분</span>
+    <button id="btnToggleWordWrap" class="stat-btn" title="자동 줄바꿈 켜기/끄기">줄바꿈: 켬</button>
+  </div>
 </footer>
+
+<!-- Workspace Files Modal -->
+<div class="modal-overlay" id="fileListModal">
+  <div class="modal file-modal">
+    <div class="modal-header">
+      <div style="display:flex; align-items:center; gap:8px; font-weight:600; font-size:14px;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+        <span>작업 폴더 파일 탐색기</span>
+      </div>
+      <button id="btnCloseFileList" class="btn-icon ghost" title="닫기 (Esc)">✕</button>
+    </div>
+    <div style="padding: 12px 20px 8px; border-bottom: 1px solid var(--border);">
+      <div id="workspaceDirDisplay" class="workspace-dir-text"></div>
+      <div class="file-search-wrap">
+        <input type="text" id="fileSearchInput" placeholder="파일명으로 필터링... (↑↓ 이동, Enter 열기)" spellcheck="false" autocomplete="off" />
+      </div>
+    </div>
+    <div class="modal-body" style="padding: 8px 12px; max-height: 380px;" id="fileItemsList"></div>
+    <div class="modal-footer" style="justify-content: space-between; align-items: center;">
+      <span style="font-size: 11.5px; color: var(--text-faint);">Tip: 마크다운 상호 링크 [문서](other.md)도 바로 열립니다</span>
+      <div style="display:flex; gap:8px;">
+        <button class="ghost" id="btnModalOpenFile">OS 탐색기에서 열기</button>
+        <button class="primary" id="btnModalNewFile">새 파일 (+)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
 
 <!-- Help Modal -->
 <div class="modal-overlay" id="helpModal">
@@ -1170,12 +1752,15 @@
         <tr><th>단축키</th><th>동작 설명</th></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>S</kbd></td><td>현재 파일 원자적 저장</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>N</kbd></td><td>새 파일 만들기</td></tr>
-        <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd></td><td>선택 영역 굵게 적용</td></tr>
-        <tr><td><kbd>Ctrl</kbd> + <kbd>I</kbd></td><td>선택 영역 기울임 적용</td></tr>
-        <tr><td><kbd>Ctrl</kbd> + <kbd>K</kbd></td><td>링크 삽입</td></tr>
-        <tr><td><kbd>Alt</kbd> + <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></td><td>에디터 / 분할 / 미리보기 모드 전환</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + <kbd>O</kbd></td><td>작업 폴더 파일 탐색기 열기</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd></td><td>본문 검색 (Find)</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + <kbd>H</kbd></td><td>본문 찾기 및 바꾸기 (Find & Replace)</td></tr>
+        <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd> / <kbd>I</kbd> / <kbd>K</kbd></td><td>선택 영역 굵게 / 기울임 / 하이퍼링크</td></tr>
+        <tr><td><kbd>Alt</kbd> + <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> / <kbd>4</kbd></td><td>노션(라이브) / 분할 / 에디터 / 미리보기 전환</td></tr>
+        <tr><td><kbd>/</kbd> (노션 모드)</td><td>블록 삽입 슬래시 명령어 메뉴 열기</td></tr>
         <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd> + <kbd>Tab</kbd></td><td>다중 라인 2칸 들여쓰기 / 내어쓰기</td></tr>
         <tr><td><kbd>Enter</kbd> (목록 중)</td><td>스마트 목록 번호 및 체크박스 자동 이어쓰기</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>모달 창 / 검색창 / 슬래시 메뉴 / 설정 닫기</td></tr>
       </table>
 
       <h4>확장 마크다운 문법</h4>
@@ -1196,16 +1781,177 @@
   </div>
 </div>
 
+<!-- Notion Live Canvas Slash Menu -->
+<div class="slash-menu" id="slashMenu">
+  <div class="slash-item" data-type="p">
+    <div class="slash-icon">¶</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">텍스트</div>
+      <div class="slash-item-desc">일반 문단 작성</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="h1">
+    <div class="slash-icon">H1</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">제목 1</div>
+      <div class="slash-item-desc">가장 큰 섹션 제목 (#)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="h2">
+    <div class="slash-icon">H2</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">제목 2</div>
+      <div class="slash-item-desc">중간 크기 제목 (##)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="h3">
+    <div class="slash-icon">H3</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">제목 3</div>
+      <div class="slash-item-desc">작은 소제목 (###)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="task">
+    <div class="slash-icon">☑</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">할 일 목록</div>
+      <div class="slash-item-desc">인터랙티브 체크박스 (- [ ])</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="bullet">
+    <div class="slash-icon">•</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">글머리 기호 목록</div>
+      <div class="slash-item-desc">원형 불릿 목록 (-)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="number">
+    <div class="slash-icon">1.</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">번호 매기기 목록</div>
+      <div class="slash-item-desc">순서가 있는 번호 목록 (1.)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="quote">
+    <div class="slash-icon">”</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">인용구</div>
+      <div class="slash-item-desc">왼쪽 강조선 인용 블록 (>)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="callout">
+    <div class="slash-icon">💡</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">콜아웃 블록</div>
+      <div class="slash-item-desc">Notion / GitHub Alert 박스</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="code">
+    <div class="slash-icon">&lt;&gt;</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">코드 블록</div>
+      <div class="slash-item-desc">구문 강조 코드 블록 (```)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="math">
+    <div class="slash-icon">fx</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">수학 공식</div>
+      <div class="slash-item-desc">LaTeX KaTeX 수식 ($$)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="mermaid">
+    <div class="slash-icon">◈</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">Mermaid 다이어그램</div>
+      <div class="slash-item-desc">순서도 및 아키텍처 다이어그램</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="table">
+    <div class="slash-icon">▦</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">표 (Table)</div>
+      <div class="slash-item-desc">2x3 마크다운 데이터 표</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="toggle">
+    <div class="slash-icon">▶</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">접기 (토글)</div>
+      <div class="slash-item-desc">상세 내용을 숨기고 펼치는 블록 (:::toggle)</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="image">
+    <div class="slash-icon">🖼️</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">이미지</div>
+      <div class="slash-item-desc">로컬 또는 웹 이미지 삽입 (![설명](경로))</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="footnote">
+    <div class="slash-icon">^fn</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">각주</div>
+      <div class="slash-item-desc">문서 하단 각주 링크 ([^1])</div>
+    </div>
+  </div>
+  <div class="slash-item" data-type="divider">
+    <div class="slash-icon">—</div>
+    <div class="slash-item-text">
+      <div class="slash-item-title">구분선</div>
+      <div class="slash-item-desc">콘텐츠 구분선 (---)</div>
+    </div>
+  </div>
+  <div class="slash-empty-msg" id="slashEmptyMsg" style="display:none;">일치하는 블록 명령어가 없습니다</div>
+</div>
+
+<!-- Notion Floating Selection Formatting Toolbar -->
+<div class="floating-format-bar" id="floatingFormatBar">
+  <button type="button" data-cmd="bold" title="굵게 (Ctrl+B)"><b>B</b></button>
+  <button type="button" data-cmd="italic" title="기울임 (Ctrl+I)"><i>I</i></button>
+  <button type="button" data-cmd="strike" title="취소선"><s>S</s></button>
+  <button type="button" data-cmd="mark" title="형광펜 강조">==</button>
+  <button type="button" data-cmd="code" title="인라인 코드">&lt;&gt;</button>
+  <button type="button" data-cmd="link" title="링크">🔗</button>
+</div>
+
+<!-- Inline Source Editor Card (for Math, Mermaid) -->
+<div class="inline-editor-card" id="inlineEditorCard">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <span style="font-size:13px; font-weight:600;" id="inlineEditorTitle">수식 편집</span>
+    <button type="button" class="btn-icon ghost" id="btnCloseInlineEditor" style="padding:2px 6px;">✕</button>
+  </div>
+  <textarea id="inlineEditorInput" spellcheck="false"></textarea>
+  <div style="display:flex; justify-content:flex-end; gap:6px;">
+    <button type="button" class="ghost" id="btnCancelInlineEditor">취소</button>
+    <button type="button" class="primary" id="btnApplyInlineEditor">적용</button>
+  </div>
+</div>
+
 <script>
 const editor = document.getElementById('editor');
 const preview = document.getElementById('preview');
+const previewContainer = document.getElementById('preview-container');
 const filePicker = document.getElementById('filePicker');
+const fileBadge = document.getElementById('fileBadge');
+const fileNameDisplay = document.getElementById('fileNameDisplay');
+const fileDirtyDot = document.getElementById('fileDirtyDot');
+const btnFiles = document.getElementById('btnFiles');
+const btnOpen = document.getElementById('btnOpen');
+const btnNew = document.getElementById('btnNew');
+const btnSave = document.getElementById('btnSave');
+const btnPrint = document.getElementById('btnPrint');
+const btnExportHtml = document.getElementById('btnExportHtml');
 const statusEl = document.getElementById('status');
 const statsEl = document.getElementById('stats');
+const cursorPosEl = document.getElementById('cursorPos');
+const selectionCountEl = document.getElementById('selectionCount');
+const btnToggleWordWrap = document.getElementById('btnToggleWordWrap');
 const pulseDot = document.getElementById('pulseDot');
 const btnSettings = document.getElementById('btnSettings');
 const settingsMenu = document.getElementById('settingsMenu');
 const menuThemeLabel = document.getElementById('menuThemeLabel');
+const menuWordWrapLabel = document.getElementById('menuWordWrapLabel');
 const hljsTheme = document.getElementById('hljs-theme');
 const dragDivider = document.getElementById('dragDivider');
 const paneEditor = document.getElementById('paneEditor');
@@ -1213,6 +1959,41 @@ const panePreview = document.getElementById('panePreview');
 const tocDrawer = document.getElementById('tocDrawer');
 const tocList = document.getElementById('tocList');
 const helpModal = document.getElementById('helpModal');
+
+// Search elements
+const btnOpenSearch = document.getElementById('btnOpenSearch');
+const searchBar = document.getElementById('searchBar');
+const findInput = document.getElementById('findInput');
+const searchMatchCount = document.getElementById('searchMatchCount');
+const btnFindCase = document.getElementById('btnFindCase');
+const btnFindPrev = document.getElementById('btnFindPrev');
+const btnFindNext = document.getElementById('btnFindNext');
+const btnToggleReplace = document.getElementById('btnToggleReplace');
+const btnCloseSearch = document.getElementById('btnCloseSearch');
+const replaceRow = document.getElementById('replaceRow');
+const replaceInput = document.getElementById('replaceInput');
+const btnReplaceOne = document.getElementById('btnReplaceOne');
+const btnReplaceAll = document.getElementById('btnReplaceAll');
+
+// File List Modal elements
+const fileListModal = document.getElementById('fileListModal');
+const btnCloseFileList = document.getElementById('btnCloseFileList');
+const workspaceDirDisplay = document.getElementById('workspaceDirDisplay');
+const fileSearchInput = document.getElementById('fileSearchInput');
+const fileItemsList = document.getElementById('fileItemsList');
+const btnModalOpenFile = document.getElementById('btnModalOpenFile');
+const btnModalNewFile = document.getElementById('btnModalNewFile');
+
+// Notion Canvas elements
+const viewNotionBtn = document.getElementById('viewNotion');
+const slashMenu = document.getElementById('slashMenu');
+const floatingFormatBar = document.getElementById('floatingFormatBar');
+const inlineEditorCard = document.getElementById('inlineEditorCard');
+const inlineEditorTitle = document.getElementById('inlineEditorTitle');
+const inlineEditorInput = document.getElementById('inlineEditorInput');
+const btnCloseInlineEditor = document.getElementById('btnCloseInlineEditor');
+const btnCancelInlineEditor = document.getElementById('btnCancelInlineEditor');
+const btnApplyInlineEditor = document.getElementById('btnApplyInlineEditor');
 
 let currentFile = '';
 let renderTimer = null;
@@ -1222,7 +2003,20 @@ let dirty = false;
 let isExternalDrop = false;
 let isSyncingLeft = false;
 let isSyncingRight = false;
-let currentViewMode = localStorage.getItem('mdeditor-view-mode') || 'preview';
+let currentViewMode = localStorage.getItem('mdeditor-view-mode') || 'notion';
+
+// ---------- 토스트 알림 ----------
+let toastTimer = null;
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.classList.remove('show');
+  }, 2200);
+}
 
 // ---------- 테마 전환 ----------
 function applyTheme(theme) {
@@ -1276,9 +2070,56 @@ document.getElementById('menuTheme').addEventListener('click', () => {
 const savedTheme = localStorage.getItem('mdeditor-theme') || 'dark';
 applyTheme(savedTheme);
 
+// ---------- 자동 줄바꿈 토글 ----------
+let isWordWrap = localStorage.getItem('mdeditor-wordwrap') !== 'false';
+function applyWordWrap(enabled) {
+  isWordWrap = enabled;
+  localStorage.setItem('mdeditor-wordwrap', enabled ? 'true' : 'false');
+  if (enabled) {
+    editor.style.whiteSpace = 'pre-wrap';
+    editor.style.wordBreak = 'break-word';
+    editor.style.overflowX = 'hidden';
+  } else {
+    editor.style.whiteSpace = 'pre';
+    editor.style.wordBreak = 'normal';
+    editor.style.overflowX = 'auto';
+  }
+  const label = enabled ? '줄바꿈: 켬' : '줄바꿈: 끔';
+  if (btnToggleWordWrap) btnToggleWordWrap.textContent = label;
+  if (menuWordWrapLabel) menuWordWrapLabel.textContent = label;
+}
+if (btnToggleWordWrap) {
+  btnToggleWordWrap.addEventListener('click', () => {
+    applyWordWrap(!isWordWrap);
+    showToast(isWordWrap ? '자동 줄바꿈이 켜졌습니다.' : '자동 줄바꿈이 꺼졌습니다.');
+  });
+}
+document.getElementById('menuWordWrap').addEventListener('click', () => {
+  settingsMenu.classList.remove('open');
+  applyWordWrap(!isWordWrap);
+  showToast(isWordWrap ? '자동 줄바꿈이 켜졌습니다.' : '자동 줄바꿈이 꺼졌습니다.');
+});
+applyWordWrap(isWordWrap);
+
+// ---------- 클립보드 복사 서브메뉴 ----------
+document.getElementById('menuCopyMd').addEventListener('click', () => {
+  settingsMenu.classList.remove('open');
+  navigator.clipboard.writeText(editor.value)
+    .then(() => showToast('✓ 마크다운 원본이 복사되었습니다.'))
+    .catch(() => showToast('복사 실패'));
+});
+document.getElementById('menuCopyHtml').addEventListener('click', () => {
+  settingsMenu.classList.remove('open');
+  navigator.clipboard.writeText(preview.innerHTML)
+    .then(() => showToast('✓ HTML 코드가 복사되었습니다.'))
+    .catch(() => showToast('복사 실패'));
+});
+
 // ---------- 상태 및 통계 ----------
-function updateWindowTitle() {
+function updateFileDisplay() {
   const name = currentFile || '무제 문서';
+  if (fileNameDisplay) fileNameDisplay.textContent = name;
+  if (fileDirtyDot) fileDirtyDot.style.display = dirty ? 'inline-block' : 'none';
   document.title = (dirty ? '● ' : '') + name + ' — MDEditor';
 }
 
@@ -1286,7 +2127,7 @@ function setStatus(msg, isDirty = dirty) {
   dirty = isDirty;
   pulseDot.className = 'pulse-dot' + (dirty ? ' dirty' : '');
   statusEl.textContent = msg;
-  updateWindowTitle();
+  updateFileDisplay();
 }
 
 function updateStats() {
@@ -1298,6 +2139,32 @@ function updateStats() {
   statsEl.textContent = `${chars.toLocaleString()}자 · ${lines.toLocaleString()}줄 · ~${readMinutes}분`;
 }
 
+function updateCursorPos() {
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const text = editor.value;
+  const line = text.slice(0, start).split('\n').length;
+  const lastNl = text.lastIndexOf('\n', start - 1);
+  const col = start - lastNl;
+  if (cursorPosEl) cursorPosEl.textContent = `${line}행 ${col}열`;
+
+  if (selectionCountEl) {
+    if (start !== end) {
+      const selLen = Math.abs(end - start);
+      selectionCountEl.style.display = 'inline';
+      selectionCountEl.textContent = `· ${selLen.toLocaleString()}자 선택됨`;
+    } else {
+      selectionCountEl.style.display = 'none';
+    }
+  }
+}
+editor.addEventListener('keyup', updateCursorPos);
+editor.addEventListener('click', updateCursorPos);
+editor.addEventListener('select', updateCursorPos);
+document.addEventListener('selectionchange', () => {
+  if (document.activeElement === editor) updateCursorPos();
+});
+
 // ---------- 뷰 모드 제어 ----------
 const viewEditorBtn = document.getElementById('viewEditor');
 const viewSplitBtn = document.getElementById('viewSplit');
@@ -1307,21 +2174,36 @@ function setViewMode(mode) {
   currentViewMode = mode;
   localStorage.setItem('mdeditor-view-mode', mode);
   
-  viewEditorBtn.classList.toggle('active', mode === 'editor');
-  viewSplitBtn.classList.toggle('active', mode === 'split');
-  viewPreviewBtn.classList.toggle('active', mode === 'preview');
+  if (viewNotionBtn) viewNotionBtn.classList.toggle('active', mode === 'notion');
+  if (viewSplitBtn) viewSplitBtn.classList.toggle('active', mode === 'split');
+  if (viewEditorBtn) viewEditorBtn.classList.toggle('active', mode === 'editor');
+  if (viewPreviewBtn) viewPreviewBtn.classList.toggle('active', mode === 'preview');
 
-  if (mode === 'editor') {
+  closeSlashMenu();
+  closeInlineEditor();
+  if (floatingFormatBar) floatingFormatBar.classList.remove('open');
+
+  if (mode === 'notion') {
+    document.body.classList.add('notion-view');
+    paneEditor.style.display = 'none';
+    dragDivider.style.display = 'none';
+    panePreview.style.display = 'flex';
+    panePreview.style.flex = '1 1 100%';
+    setupNotionBlocks();
+  } else if (mode === 'editor') {
+    document.body.classList.remove('notion-view');
     paneEditor.style.display = 'flex';
     paneEditor.style.flex = '1 1 100%';
     dragDivider.style.display = 'none';
     panePreview.style.display = 'none';
   } else if (mode === 'preview') {
+    document.body.classList.remove('notion-view');
     paneEditor.style.display = 'none';
     dragDivider.style.display = 'none';
     panePreview.style.display = 'flex';
     panePreview.style.flex = '1 1 100%';
   } else {
+    document.body.classList.remove('notion-view');
     paneEditor.style.display = 'flex';
     dragDivider.style.display = 'block';
     panePreview.style.display = 'flex';
@@ -1335,9 +2217,1115 @@ function setViewMode(mode) {
     }
   }
 }
+if (viewNotionBtn) viewNotionBtn.addEventListener('click', () => setViewMode('notion'));
 viewEditorBtn.addEventListener('click', () => setViewMode('editor'));
 viewSplitBtn.addEventListener('click', () => setViewMode('split'));
 viewPreviewBtn.addEventListener('click', () => setViewMode('preview'));
+
+// ---------- 노션 통합 라이브 캔버스 엔진 (DOM <-> Markdown) ----------
+let previewSyncTimer = null;
+
+function syncFromPreview() {
+  if (currentViewMode !== 'notion') return;
+  clearTimeout(previewSyncTimer);
+  previewSyncTimer = setTimeout(() => {
+    const md = serializePreviewToMarkdown(preview);
+    if (editor.value !== md) {
+      editor.value = md;
+      dirty = true;
+      updateStats();
+      updateFileDisplay();
+      setStatus('편집 중… (노션 모드)', true);
+    }
+  }, 90);
+}
+
+function serializeNodeToMarkdown(node) {
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
+  if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+  const tag = node.tagName.toLowerCase();
+
+  // 내부 툴바 / 보조 버튼 제외
+  if (node.classList.contains('copy-code-btn') || 
+      node.classList.contains('code-lang') || 
+      node.classList.contains('code-block-header') ||
+      node.classList.contains('notion-card-edit-btn')) {
+    return '';
+  }
+
+  // 수학 블록 ($$...$$)
+  if (node.classList.contains('math-block')) {
+    const raw = node.dataset.rawMath || node.textContent.replace(/^\$\$|\$\$$/g, '').trim();
+    return `$$\n${raw}\n$$\n\n`;
+  }
+
+  // Mermaid 다이어그램 블록
+  if (node.classList.contains('mermaid-wrapper')) {
+    const raw = node.dataset.rawMermaid || (node.querySelector('pre code') ? node.querySelector('pre code').textContent : '');
+    return `\`\`\`mermaid\n${raw.trim()}\n\`\`\`\n\n`;
+  }
+
+  // 일반 코드 블록
+  if (node.classList.contains('code-block-wrapper')) {
+    const codeEl = node.querySelector('code');
+    const langMatch = codeEl ? (codeEl.className.match(/language-([a-zA-Z0-9_-]+)/) || []) : [];
+    const lang = langMatch[1] || '';
+    const code = codeEl ? codeEl.innerText : '';
+    return `\`\`\`${lang}\n${code.trimEnd()}\n\`\`\`\n\n`;
+  }
+
+  // 콜아웃 블록 (> [!NOTE] ...)
+  if (node.classList.contains('callout')) {
+    let kind = 'NOTE';
+    if (node.classList.contains('callout-tip')) kind = 'TIP';
+    else if (node.classList.contains('callout-warning')) kind = 'WARNING';
+    else if (node.classList.contains('callout-important')) kind = 'IMPORTANT';
+    else if (node.classList.contains('callout-caution')) kind = 'CAUTION';
+
+    const bodyEl = node.querySelector('.callout-body');
+    const bodyMd = bodyEl ? serializeChildrenToMarkdown(bodyEl).trim() : '';
+    const lines = bodyMd.split('\n');
+    return `> [!${kind}]\n` + lines.map(l => '> ' + l).join('\n') + '\n\n';
+  }
+
+  // 토글 블록 (:::toggle ...)
+  if (node.classList.contains('notion-toggle') || tag === 'details') {
+    const summaryEl = node.querySelector('summary');
+    const summaryText = summaryEl ? summaryEl.textContent.trim() : '상세 정보';
+    const contentEl = node.querySelector('.toggle-content') || node;
+    const innerMd = serializeChildrenToMarkdown(contentEl, summaryEl).trim();
+    return `:::toggle ${summaryText}\n${innerMd}\n:::\n\n`;
+  }
+
+  // 제목 (H1 ~ H6)
+  if (/^h[1-6]$/.test(tag)) {
+    const level = parseInt(tag[1], 10);
+    const hashes = '#'.repeat(level);
+    return `${hashes} ${serializeInlineToMarkdown(node).trim()}\n\n`;
+  }
+
+  // 본문 문단 (P)
+  if (tag === 'p') {
+    const content = serializeInlineToMarkdown(node).trim();
+    if (!content) return '\n';
+    return `${content}\n\n`;
+  }
+
+  // 인용구 (Blockquote)
+  if (tag === 'blockquote') {
+    const inner = serializeChildrenToMarkdown(node).trim();
+    const lines = inner.split('\n');
+    return lines.map(l => '> ' + l).join('\n') + '\n\n';
+  }
+
+  // 구분선 (HR)
+  if (tag === 'hr') {
+    return `---\n\n`;
+  }
+
+  // 비순서 목록 (UL)
+  if (tag === 'ul') {
+    let md = '';
+    for (const li of node.children) {
+      if (li.tagName.toLowerCase() !== 'li') continue;
+      if (li.classList.contains('task-list-item')) {
+        const cb = li.querySelector('input[type="checkbox"]');
+        const checked = cb && cb.checked ? 'x' : ' ';
+        const clone = li.cloneNode(true);
+        const cloneCb = clone.querySelector('input[type="checkbox"]');
+        if (cloneCb) cloneCb.remove();
+        const text = serializeInlineToMarkdown(clone).trim();
+        md += `- [${checked}] ${text}\n`;
+      } else {
+        const text = serializeInlineToMarkdown(li).trim();
+        md += `- ${text}\n`;
+      }
+    }
+    return md + '\n';
+  }
+
+  // 순서 목록 (OL)
+  if (tag === 'ol') {
+    let md = '';
+    let num = 1;
+    for (const li of node.children) {
+      if (li.tagName.toLowerCase() !== 'li') continue;
+      const text = serializeInlineToMarkdown(li).trim();
+      md += `${num++}. ${text}\n`;
+    }
+    return md + '\n';
+  }
+
+  // 표 (Table)
+  if (tag === 'table') {
+    return serializeTableToMarkdown(node) + '\n\n';
+  }
+
+  // 단독 Pre 태그
+  if (tag === 'pre') {
+    const codeEl = node.querySelector('code') || node;
+    return `\`\`\`\n${codeEl.innerText.trimEnd()}\n\`\`\`\n\n`;
+  }
+
+  return serializeChildrenToMarkdown(node);
+}
+
+function serializeChildrenToMarkdown(container, excludeNode = null) {
+  let md = '';
+  for (const child of container.childNodes) {
+    if (child === excludeNode) continue;
+    md += serializeNodeToMarkdown(child);
+  }
+  return md;
+}
+
+function serializeTableToMarkdown(table) {
+  const headers = [];
+  const alignments = [];
+  const ths = table.querySelectorAll('thead th');
+  ths.forEach(th => {
+    headers.push(serializeInlineToMarkdown(th).trim() || ' ');
+    const align = th.getAttribute('align') || th.style.textAlign || '';
+    if (align === 'center') alignments.push(':---:');
+    else if (align === 'right') alignments.push('---:');
+    else alignments.push(':---');
+  });
+
+  if (headers.length === 0) {
+    const firstRowCells = table.querySelectorAll('tr:first-child th, tr:first-child td');
+    firstRowCells.forEach(c => {
+      headers.push(serializeInlineToMarkdown(c).trim() || ' ');
+      alignments.push(':---');
+    });
+  }
+
+  const rows = [];
+  const trs = table.querySelectorAll('tbody tr');
+  trs.forEach(tr => {
+    const row = [];
+    tr.querySelectorAll('td').forEach(td => {
+      row.push(serializeInlineToMarkdown(td).trim().replace(/\|/g, '\\|') || ' ');
+    });
+    if (row.length > 0) rows.push(row);
+  });
+
+  let out = '| ' + headers.join(' | ') + ' |\n';
+  out += '| ' + alignments.join(' | ') + ' |\n';
+  rows.forEach(r => {
+    out += '| ' + r.join(' | ') + ' |\n';
+  });
+  return out;
+}
+
+function serializeInlineToMarkdown(node) {
+  let md = '';
+  for (const child of node.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      md += child.nodeValue;
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      const tag = child.tagName.toLowerCase();
+      if (child.classList.contains('copy-code-btn') || child.type === 'checkbox' || child.classList.contains('notion-card-edit-btn')) {
+        continue;
+      }
+      if (tag === 'strong' || tag === 'b') {
+        md += `**${serializeInlineToMarkdown(child)}**`;
+      } else if (tag === 'em' || tag === 'i') {
+        md += `*${serializeInlineToMarkdown(child)}*`;
+      } else if (tag === 'del' || tag === 's') {
+        md += `~~${serializeInlineToMarkdown(child)}~~`;
+      } else if (tag === 'mark') {
+        md += `==${serializeInlineToMarkdown(child)}==`;
+      } else if (tag === 'code') {
+        md += `\`${child.textContent}\``;
+      } else if (tag === 'kbd') {
+        md += `[[${child.textContent}]]`;
+      } else if (tag === 'a') {
+        let href = child.getAttribute('href') || '';
+        if (href.startsWith('/?file=')) {
+          try {
+            href = decodeURIComponent(href.slice(7));
+          } catch (_) {}
+        }
+        md += `[${serializeInlineToMarkdown(child)}](${href})`;
+      } else if (tag === 'img') {
+        const alt = child.getAttribute('alt') || '';
+        let src = child.getAttribute('src') || '';
+        if (src.startsWith('/api/raw?file=')) {
+          try {
+            src = decodeURIComponent(src.slice(14));
+          } catch (_) {}
+        }
+        md += `![${alt}](${src})`;
+      } else if (tag === 'br') {
+        md += '\n';
+      } else if (child.classList.contains('katex') || child.classList.contains('math-inline')) {
+        const raw = child.dataset.rawMath || child.textContent;
+        md += `$${raw}$`;
+      } else {
+        md += serializeInlineToMarkdown(child);
+      }
+    }
+  }
+  return md;
+}
+
+function serializePreviewToMarkdown(previewEl) {
+  let md = '';
+  for (const child of previewEl.children) {
+    md += serializeNodeToMarkdown(child);
+  }
+  return md.trimEnd() + '\n';
+}
+
+function tryMarkdownAutoTransform(block) {
+  if (block.tagName.toLowerCase() !== 'p') return false;
+  const rawText = block.textContent.replace(/\u00A0/g, ' ');
+
+  if (rawText.startsWith('###### ')) {
+    const el = document.createElement('h6');
+    const rem = rawText.slice(7);
+    if (rem) el.textContent = rem;
+    else el.innerHTML = '<br>';
+    block.replaceWith(el);
+    setupNotionBlocks();
+    focusBlock(el);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('##### ')) {
+    const el = document.createElement('h5');
+    const rem = rawText.slice(6);
+    if (rem) el.textContent = rem;
+    else el.innerHTML = '<br>';
+    block.replaceWith(el);
+    setupNotionBlocks();
+    focusBlock(el);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('#### ')) {
+    const el = document.createElement('h4');
+    const rem = rawText.slice(5);
+    if (rem) el.textContent = rem;
+    else el.innerHTML = '<br>';
+    block.replaceWith(el);
+    setupNotionBlocks();
+    focusBlock(el);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('### ')) {
+    const el = document.createElement('h3');
+    const rem = rawText.slice(4);
+    if (rem) el.textContent = rem;
+    else el.innerHTML = '<br>';
+    block.replaceWith(el);
+    setupNotionBlocks();
+    focusBlock(el);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('## ')) {
+    const el = document.createElement('h2');
+    const rem = rawText.slice(3);
+    if (rem) el.textContent = rem;
+    else el.innerHTML = '<br>';
+    block.replaceWith(el);
+    setupNotionBlocks();
+    focusBlock(el);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('# ')) {
+    const el = document.createElement('h1');
+    const rem = rawText.slice(2);
+    if (rem) el.textContent = rem;
+    else el.innerHTML = '<br>';
+    block.replaceWith(el);
+    setupNotionBlocks();
+    focusBlock(el);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('> ')) {
+    const bq = document.createElement('blockquote');
+    const p = document.createElement('p');
+    const rem = rawText.slice(2);
+    if (rem) p.textContent = rem;
+    else p.innerHTML = '<br>';
+    bq.appendChild(p);
+    block.replaceWith(bq);
+    setupNotionBlocks();
+    focusBlock(p);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('- ') || rawText.startsWith('* ')) {
+    const ul = document.createElement('ul');
+    const li = document.createElement('li');
+    const rem = rawText.slice(2);
+    if (rem) li.textContent = rem;
+    else li.innerHTML = '<br>';
+    ul.appendChild(li);
+    block.replaceWith(ul);
+    setupNotionBlocks();
+    focusBlock(li);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('1. ')) {
+    const ol = document.createElement('ol');
+    const li = document.createElement('li');
+    const rem = rawText.slice(3);
+    if (rem) li.textContent = rem;
+    else li.innerHTML = '<br>';
+    ol.appendChild(li);
+    block.replaceWith(ol);
+    setupNotionBlocks();
+    focusBlock(li);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('[] ') || rawText.startsWith('[ ] ')) {
+    const ul = document.createElement('ul');
+    ul.className = 'task-list';
+    const li = document.createElement('li');
+    li.className = 'task-list-item';
+    const rem = rawText.startsWith('[] ') ? rawText.slice(3) : rawText.slice(4);
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    li.appendChild(cb);
+    li.appendChild(document.createTextNode(' ' + rem));
+    ul.appendChild(li);
+    block.replaceWith(ul);
+    setupNotionBlocks();
+    focusBlock(li);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('[x] ') || rawText.startsWith('[X] ')) {
+    const ul = document.createElement('ul');
+    ul.className = 'task-list';
+    const li = document.createElement('li');
+    li.className = 'task-list-item checked';
+    const rem = rawText.slice(4);
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    li.appendChild(cb);
+    li.appendChild(document.createTextNode(' ' + rem));
+    ul.appendChild(li);
+    block.replaceWith(ul);
+    setupNotionBlocks();
+    focusBlock(li);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText === '---' || rawText === '***' || rawText === '___') {
+    const hr = document.createElement('hr');
+    const p = document.createElement('p');
+    p.innerHTML = '<br>';
+    block.replaceWith(hr);
+    hr.after(p);
+    setupNotionBlocks();
+    focusBlock(p);
+    syncFromPreview();
+    return true;
+  }
+  if (rawText.startsWith('```')) {
+    const lang = rawText.slice(3).trim();
+    if (lang.toLowerCase() === 'mermaid') {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper mermaid-wrapper';
+      wrapper.dataset.rawMermaid = 'graph TD\n  A[시작] --> B[완료]';
+      wrapper.innerHTML = `
+        <div class="code-block-header"><span class="code-lang">Mermaid</span><button class="copy-code-btn" type="button" onclick="copyCode(this)">복사</button></div>
+        <div class="mermaid">graph TD\n  A[시작] --> B[완료]</div>
+        <pre style="display:none"><code class="language-mermaid">graph TD\n  A[시작] --> B[완료]</code></pre>
+      `;
+      block.replaceWith(wrapper);
+    } else {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper';
+      const langLabel = lang ? lang : 'Text';
+      const codeClass = lang ? ` class="language-${lang}"` : '';
+      wrapper.innerHTML = `
+        <div class="code-block-header"><span class="code-lang">${langLabel}</span><button class="copy-code-btn" type="button" onclick="copyCode(this)">복사</button></div>
+        <pre><code${codeClass}>// 코드를 작성하세요</code></pre>
+      `;
+      block.replaceWith(wrapper);
+    }
+    setupNotionBlocks();
+    syncFromPreview();
+    return true;
+  }
+  return false;
+}
+
+function setupNotionBlocks() {
+  if (currentViewMode !== 'notion') return;
+  document.body.classList.add('notion-view');
+
+  const editableSelectors = 'h1, h2, h3, h4, h5, h6, p, blockquote > p, .callout-body > p, td, th, li';
+  preview.querySelectorAll(editableSelectors).forEach(block => {
+    if (block.dataset.blockReady) return;
+    block.dataset.blockReady = 'true';
+    block.setAttribute('data-block', 'true');
+    block.setAttribute('contenteditable', 'true');
+    block.setAttribute('spellcheck', 'false');
+
+    if (block.tagName.toLowerCase() === 'p') {
+      block.setAttribute('data-placeholder', "텍스트를 입력하거나 '/'를 눌러 명령을 실행하세요...");
+    }
+
+    if (block.tagName.toLowerCase() === 'li' && block.classList.contains('task-list-item')) {
+      const cb = block.querySelector('input[type="checkbox"]');
+      if (cb) {
+        cb.setAttribute('contenteditable', 'false');
+        cb.onchange = () => {
+          block.classList.toggle('checked', cb.checked);
+          syncFromPreview();
+        };
+      }
+    }
+
+    block.oninput = () => {
+      if (tryMarkdownAutoTransform(block)) return;
+      const text = block.textContent.trim();
+      if (text.startsWith('/')) {
+        const query = text.slice(1).trim().toLowerCase();
+        openSlashMenu(block, query);
+      } else {
+        closeSlashMenu();
+      }
+      syncFromPreview();
+    };
+
+    block.onkeydown = (e) => {
+      handleNotionBlockKeydown(e, block);
+    };
+  });
+
+  // 수식 및 Mermaid 다이어그램 전용 호버 편집 버튼 부착
+  preview.querySelectorAll('.math-block').forEach(el => {
+    if (el.querySelector('.notion-card-edit-btn')) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'notion-card-edit-btn';
+    btn.textContent = '✎ 수식 수정';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      openInlineEditor('LaTeX 수식 편집', el.dataset.rawMath || '', (newVal) => {
+        el.dataset.rawMath = newVal;
+        syncFromPreview();
+        render();
+      }, el);
+    };
+    el.appendChild(btn);
+  });
+
+  preview.querySelectorAll('.mermaid-wrapper').forEach(el => {
+    if (el.querySelector('.notion-card-edit-btn')) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'notion-card-edit-btn';
+    btn.textContent = '✎ 다이어그램 수정';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      openInlineEditor('Mermaid 다이어그램 편집', el.dataset.rawMermaid || '', (newVal) => {
+        el.dataset.rawMermaid = newVal;
+        syncFromPreview();
+        render();
+      }, el);
+    };
+    el.appendChild(btn);
+  });
+}
+
+// ---------- 슬래시 (/) 명령어 메뉴 제어 ----------
+let activeSlashBlock = null;
+let activeSlashIndex = 0;
+
+function openSlashMenu(targetBlock, query = '') {
+  if (!slashMenu) return;
+  activeSlashBlock = targetBlock;
+  const rect = targetBlock.getBoundingClientRect();
+
+  slashMenu.style.top = (rect.bottom + 6) + 'px';
+  slashMenu.style.left = Math.max(16, rect.left) + 'px';
+  slashMenu.classList.add('open');
+
+  let visibleCount = 0;
+  const items = slashMenu.querySelectorAll('.slash-item');
+  items.forEach(item => {
+    const title = (item.querySelector('.slash-item-title')?.textContent || '').toLowerCase();
+    const desc = (item.querySelector('.slash-item-desc')?.textContent || '').toLowerCase();
+    const type = (item.getAttribute('data-type') || '').toLowerCase();
+    const matches = !query || title.includes(query) || desc.includes(query) || type.includes(query);
+    item.style.display = matches ? 'flex' : 'none';
+    item.classList.remove('selected');
+    if (matches) visibleCount++;
+  });
+
+  const emptyMsg = document.getElementById('slashEmptyMsg');
+  if (emptyMsg) emptyMsg.style.display = visibleCount === 0 ? 'block' : 'none';
+
+  const visibleItems = Array.from(slashMenu.querySelectorAll('.slash-item')).filter(it => it.style.display !== 'none');
+  if (visibleItems.length > 0) {
+    activeSlashIndex = 0;
+    visibleItems[0].classList.add('selected');
+  } else {
+    activeSlashIndex = -1;
+  }
+}
+
+function closeSlashMenu() {
+  if (slashMenu) slashMenu.classList.remove('open');
+  activeSlashBlock = null;
+}
+
+if (slashMenu) {
+  slashMenu.querySelectorAll('.slash-item').forEach((item, idx) => {
+    item.onmouseenter = () => {
+      slashMenu.querySelectorAll('.slash-item').forEach(it => it.classList.remove('selected'));
+      item.classList.add('selected');
+      const visible = Array.from(slashMenu.querySelectorAll('.slash-item')).filter(it => it.style.display !== 'none');
+      activeSlashIndex = visible.indexOf(item);
+    };
+    item.onclick = () => {
+      const type = item.getAttribute('data-type');
+      applySlashCommand(type);
+    };
+  });
+}
+
+function applySlashCommand(type) {
+  if (!activeSlashBlock) return;
+  const block = activeSlashBlock;
+  closeSlashMenu();
+
+  let newElement = null;
+  switch (type) {
+    case 'h1':
+      newElement = document.createElement('h1');
+      newElement.innerHTML = '<br>';
+      break;
+    case 'h2':
+      newElement = document.createElement('h2');
+      newElement.innerHTML = '<br>';
+      break;
+    case 'h3':
+      newElement = document.createElement('h3');
+      newElement.innerHTML = '<br>';
+      break;
+    case 'task': {
+      const ul = document.createElement('ul');
+      ul.className = 'task-list';
+      const li = document.createElement('li');
+      li.className = 'task-list-item';
+      li.innerHTML = '<input type="checkbox"> 새 할 일';
+      ul.appendChild(li);
+      newElement = ul;
+      break;
+    }
+    case 'bullet': {
+      const ul = document.createElement('ul');
+      const li = document.createElement('li');
+      li.innerHTML = '목록 항목';
+      ul.appendChild(li);
+      newElement = ul;
+      break;
+    }
+    case 'number': {
+      const ol = document.createElement('ol');
+      const li = document.createElement('li');
+      li.innerHTML = '번호 항목';
+      ol.appendChild(li);
+      newElement = ol;
+      break;
+    }
+    case 'quote': {
+      const bq = document.createElement('blockquote');
+      const p = document.createElement('p');
+      p.innerHTML = '인용구 내용';
+      bq.appendChild(p);
+      newElement = bq;
+      break;
+    }
+    case 'callout': {
+      const callout = document.createElement('div');
+      callout.className = 'callout callout-note';
+      callout.innerHTML = `
+        <div class="callout-header"><span class="callout-icon">💡</span><span class="callout-title">참고</span></div>
+        <div class="callout-body"><p>콜아웃 내용을 작성하세요.</p></div>
+      `;
+      newElement = callout;
+      break;
+    }
+    case 'code': {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper';
+      wrapper.innerHTML = `
+        <div class="code-block-header"><span class="code-lang">Text</span><button class="copy-code-btn" type="button" onclick="copyCode(this)">복사</button></div>
+        <pre><code>// 코드를 작성하세요</code></pre>
+      `;
+      newElement = wrapper;
+      break;
+    }
+    case 'math': {
+      const math = document.createElement('div');
+      math.className = 'math-block';
+      math.dataset.rawMath = 'E = mc^2';
+      math.textContent = '$$E = mc^2$$';
+      newElement = math;
+      break;
+    }
+    case 'mermaid': {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'code-block-wrapper mermaid-wrapper';
+      wrapper.dataset.rawMermaid = 'graph TD\n  A[시작] --> B[완료]';
+      wrapper.innerHTML = `
+        <div class="code-block-header"><span class="code-lang">Mermaid</span><button class="copy-code-btn" type="button" onclick="copyCode(this)">복사</button></div>
+        <div class="mermaid">graph TD\n  A[시작] --> B[완료]</div>
+        <pre style="display:none"><code class="language-mermaid">graph TD\n  A[시작] --> B[완료]</code></pre>
+      `;
+      newElement = wrapper;
+      break;
+    }
+    case 'table': {
+      const table = document.createElement('table');
+      table.innerHTML = `
+        <thead><tr><th>항목</th><th>설명</th></tr></thead>
+        <tbody><tr><td>1</td><td>내용</td></tr></tbody>
+      `;
+      newElement = table;
+      break;
+    }
+    case 'toggle': {
+      const details = document.createElement('details');
+      details.className = 'notion-toggle';
+      details.innerHTML = `
+        <summary>접기 제목</summary>
+        <div class="toggle-content"><p>상세 내용을 작성하세요.</p></div>
+      `;
+      newElement = details;
+      break;
+    }
+    case 'image': {
+      const src = prompt('이미지 파일 경로 또는 URL (예: images/photo.png 또는 https://...):', 'image.png');
+      if (!src) return;
+      const alt = prompt('이미지 설명 (대체 텍스트):', '이미지') || '이미지';
+      const p = document.createElement('p');
+      p.innerHTML = `<img src="${src.startsWith('http') || src.startsWith('/') ? src : '/api/raw?file=' + encodeURIComponent(src)}" alt="${alt}">`;
+      newElement = p;
+      break;
+    }
+    case 'footnote': {
+      const p = document.createElement('p');
+      p.innerHTML = '문장에 각주를 추가합니다[^1]<br><br>[^1]: 여기에 각주 내용을 작성하세요';
+      newElement = p;
+      break;
+    }
+    case 'divider': {
+      newElement = document.createElement('hr');
+      break;
+    }
+    default:
+      newElement = document.createElement('p');
+      newElement.innerHTML = '<br>';
+      break;
+  }
+
+  if (block.parentNode) {
+    block.parentNode.replaceChild(newElement, block);
+  }
+  syncFromPreview();
+  render();
+}
+
+function handleNotionBlockKeydown(e, block) {
+  if (slashMenu && slashMenu.classList.contains('open')) {
+    const visibleItems = Array.from(slashMenu.querySelectorAll('.slash-item')).filter(it => it.style.display !== 'none');
+    if (e.key === 'ArrowDown' && visibleItems.length > 0) {
+      e.preventDefault();
+      visibleItems[activeSlashIndex]?.classList.remove('selected');
+      activeSlashIndex = (activeSlashIndex + 1) % visibleItems.length;
+      visibleItems[activeSlashIndex]?.classList.add('selected');
+      visibleItems[activeSlashIndex]?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    if (e.key === 'ArrowUp' && visibleItems.length > 0) {
+      e.preventDefault();
+      visibleItems[activeSlashIndex]?.classList.remove('selected');
+      activeSlashIndex = (activeSlashIndex - 1 + visibleItems.length) % visibleItems.length;
+      visibleItems[activeSlashIndex]?.classList.add('selected');
+      visibleItems[activeSlashIndex]?.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    if (e.key === 'Enter') {
+      if (visibleItems.length > 0 && activeSlashIndex >= 0 && visibleItems[activeSlashIndex]) {
+        e.preventDefault();
+        visibleItems[activeSlashIndex].click();
+        return;
+      }
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSlashMenu();
+      return;
+    }
+  }
+
+  // Headings: Enter creates a new paragraph below
+  if (e.key === 'Enter' && !e.shiftKey) {
+    const tag = block.tagName.toLowerCase();
+    if (/^h[1-6]$/.test(tag)) {
+      e.preventDefault();
+      const p = document.createElement('p');
+      p.innerHTML = '<br>';
+      block.after(p);
+      setupNotionBlocks();
+      focusBlock(p);
+      syncFromPreview();
+      return;
+    }
+  }
+
+  // Lists: Enter, Tab, Shift+Tab handling
+  if (block.tagName.toLowerCase() === 'li') {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      const parentList = block.parentElement;
+      const cleanText = block.textContent.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+
+      // Empty list item: break out into paragraph
+      if (!cleanText || (block.classList.contains('task-list-item') && cleanText.length === 0)) {
+        const p = document.createElement('p');
+        p.innerHTML = '<br>';
+        if (block.nextElementSibling) {
+          const nextList = parentList.cloneNode(false);
+          while (block.nextSibling) {
+            nextList.appendChild(block.nextSibling);
+          }
+          parentList.after(p);
+          p.after(nextList);
+        } else {
+          parentList.after(p);
+        }
+        block.remove();
+        if (parentList.children.length === 0) parentList.remove();
+        setupNotionBlocks();
+        focusBlock(p);
+        syncFromPreview();
+        return;
+      }
+
+      // Next list item
+      const newLi = document.createElement('li');
+      if (block.classList.contains('task-list-item')) {
+        newLi.className = 'task-list-item';
+        newLi.innerHTML = '<input type="checkbox"> ';
+      } else {
+        newLi.innerHTML = '<br>';
+      }
+      block.after(newLi);
+      setupNotionBlocks();
+      focusBlock(newLi);
+      syncFromPreview();
+      return;
+    }
+
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      if (!e.shiftKey) {
+        const prev = block.previousElementSibling;
+        if (prev) {
+          let subList = prev.querySelector('ul, ol');
+          if (!subList) {
+            subList = document.createElement(block.parentElement.tagName.toLowerCase());
+            prev.appendChild(subList);
+          }
+          subList.appendChild(block);
+          setupNotionBlocks();
+          focusBlock(block);
+          syncFromPreview();
+        }
+      } else {
+        const parentList = block.parentElement;
+        const grandParentLi = parentList?.parentElement;
+        if (grandParentLi && grandParentLi.tagName.toLowerCase() === 'li') {
+          grandParentLi.after(block);
+          if (parentList.children.length === 0) parentList.remove();
+          setupNotionBlocks();
+          focusBlock(block);
+          syncFromPreview();
+        }
+      }
+      return;
+    }
+  }
+
+  // Table: Tab, Shift+Tab, Enter
+  const cellTag = block.tagName.toLowerCase();
+  if (cellTag === 'td' || cellTag === 'th') {
+    const tr = block.closest('tr');
+    const table = block.closest('table');
+    if (tr && table) {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const cells = Array.from(table.querySelectorAll('th, td'));
+        const idx = cells.indexOf(block);
+        if (!e.shiftKey) {
+          if (idx !== -1 && idx < cells.length - 1) {
+            focusBlock(cells[idx + 1]);
+          } else if (idx === cells.length - 1) {
+            let tbody = table.querySelector('tbody');
+            if (!tbody) {
+              tbody = document.createElement('tbody');
+              table.appendChild(tbody);
+            }
+            const colCount = tr.cells.length;
+            const newTr = document.createElement('tr');
+            for (let c = 0; c < colCount; c++) {
+              const td = document.createElement('td');
+              td.innerHTML = '<br>';
+              newTr.appendChild(td);
+            }
+            tbody.appendChild(newTr);
+            setupNotionBlocks();
+            focusBlock(newTr.cells[0]);
+            syncFromPreview();
+          }
+        } else {
+          if (idx > 0) {
+            focusBlock(cells[idx - 1]);
+          }
+        }
+        return;
+      }
+
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const colIndex = Array.from(tr.cells).indexOf(block);
+        const nextTr = tr.nextElementSibling;
+        if (nextTr && nextTr.cells[colIndex]) {
+          focusBlock(nextTr.cells[colIndex]);
+        } else if (tr.parentElement.tagName.toLowerCase() === 'thead') {
+          const tbody = table.querySelector('tbody');
+          if (tbody && tbody.rows.length > 0 && tbody.rows[0].cells[colIndex]) {
+            focusBlock(tbody.rows[0].cells[colIndex]);
+          } else {
+            let tb = tbody;
+            if (!tb) {
+              tb = document.createElement('tbody');
+              table.appendChild(tb);
+            }
+            const colCount = tr.cells.length;
+            const newTr = document.createElement('tr');
+            for (let c = 0; c < colCount; c++) {
+              const td = document.createElement('td');
+              td.innerHTML = '<br>';
+              newTr.appendChild(td);
+            }
+            tb.appendChild(newTr);
+            setupNotionBlocks();
+            focusBlock(newTr.cells[colIndex] || newTr.cells[0]);
+            syncFromPreview();
+          }
+        } else {
+          let tbody = table.querySelector('tbody') || tr.parentElement;
+          const colCount = tr.cells.length;
+          const newTr = document.createElement('tr');
+          for (let c = 0; c < colCount; c++) {
+            const td = document.createElement('td');
+            td.innerHTML = '<br>';
+            newTr.appendChild(td);
+          }
+          tbody.appendChild(newTr);
+          setupNotionBlocks();
+          focusBlock(newTr.cells[colIndex] || newTr.cells[0]);
+          syncFromPreview();
+        }
+        return;
+      }
+    }
+  }
+
+  // Backspace on empty block removes it and focuses previous block
+  if (e.key === 'Backspace') {
+    const text = block.textContent.trim();
+    if (!text || text === '/') {
+      const tag = block.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(tag) || tag === 'blockquote') {
+        e.preventDefault();
+        const p = document.createElement('p');
+        p.innerHTML = '<br>';
+        block.replaceWith(p);
+        setupNotionBlocks();
+        focusBlock(p);
+        syncFromPreview();
+        return;
+      }
+      if (tag === 'li' || tag === 'p') {
+        const prev = block.previousElementSibling;
+        if (prev) {
+          e.preventDefault();
+          block.remove();
+          setupNotionBlocks();
+          focusBlock(prev);
+          syncFromPreview();
+          return;
+        }
+      }
+    }
+  }
+}
+
+function focusBlock(el) {
+  if (!el) return;
+  el.focus();
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch (_) {}
+}
+
+// Notion 모드 클린 텍스트 붙여넣기 인터셉트
+preview.addEventListener('paste', (e) => {
+  if (currentViewMode !== 'notion') return;
+  e.preventDefault();
+  const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+  if (!text) return;
+
+  const sel = window.getSelection();
+  const targetEl = sel && sel.rangeCount ? sel.getRangeAt(0).startContainer.parentElement : null;
+  const inTableCell = targetEl?.closest('td, th');
+  const inCode = targetEl?.closest('pre, code');
+
+  if (inTableCell || inCode || !text.includes('\n')) {
+    document.execCommand('insertText', false, text);
+    syncFromPreview();
+    return;
+  }
+
+  const lines = text.split(/\r?\n/);
+  const currentBlock = targetEl?.closest('[data-block="true"]') || preview.firstElementChild;
+  document.execCommand('insertText', false, lines[0]);
+
+  let insertAfterEl = currentBlock || preview;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const p = document.createElement('p');
+    if (line) p.textContent = line;
+    else p.innerHTML = '<br>';
+    insertAfterEl.after(p);
+    insertAfterEl = p;
+  }
+  setupNotionBlocks();
+  focusBlock(insertAfterEl);
+  syncFromPreview();
+});
+
+// ---------- 플로팅 선택 영역 서식 툴바 제어 ----------
+document.addEventListener('selectionchange', () => {
+  if (currentViewMode !== 'notion' || !floatingFormatBar) return;
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) {
+    floatingFormatBar.classList.remove('open');
+    return;
+  }
+  const range = sel.getRangeAt(0);
+  if (!preview.contains(range.commonAncestorContainer)) {
+    floatingFormatBar.classList.remove('open');
+    return;
+  }
+  const rect = range.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) {
+    floatingFormatBar.classList.remove('open');
+    return;
+  }
+  floatingFormatBar.style.top = Math.max(10, rect.top - 46) + 'px';
+  floatingFormatBar.style.left = Math.max(10, rect.left + rect.width / 2 - floatingFormatBar.offsetWidth / 2) + 'px';
+  floatingFormatBar.classList.add('open');
+});
+
+if (floatingFormatBar) {
+  floatingFormatBar.querySelectorAll('button[data-cmd]').forEach(btn => {
+    btn.onmousedown = (e) => {
+      e.preventDefault();
+      const cmd = btn.getAttribute('data-cmd');
+      switch (cmd) {
+        case 'bold': document.execCommand('bold'); break;
+        case 'italic': document.execCommand('italic'); break;
+        case 'strike': document.execCommand('strikeThrough'); break;
+        case 'mark': {
+          const sel = window.getSelection();
+          if (sel.rangeCount) {
+            const range = sel.getRangeAt(0);
+            const mark = document.createElement('mark');
+            mark.appendChild(range.extractContents());
+            range.insertNode(mark);
+          }
+          break;
+        }
+        case 'code': {
+          const sel = window.getSelection();
+          if (sel.rangeCount) {
+            const range = sel.getRangeAt(0);
+            const code = document.createElement('code');
+            code.appendChild(range.extractContents());
+            range.insertNode(code);
+          }
+          break;
+        }
+        case 'link': {
+          const url = prompt('링크 URL (https://...):', 'https://');
+          if (url) document.execCommand('createLink', false, url);
+          break;
+        }
+      }
+      syncFromPreview();
+    };
+  });
+}
+
+// ---------- 인라인 카드 소스 에디터 (수식 / Mermaid) ----------
+let onApplyInlineEditorCallback = null;
+
+function openInlineEditor(title, initialValue, onApply, targetEl) {
+  if (!inlineEditorCard) return;
+  inlineEditorTitle.textContent = title;
+  inlineEditorInput.value = initialValue;
+  onApplyInlineEditorCallback = onApply;
+
+  const rect = targetEl.getBoundingClientRect();
+  inlineEditorCard.style.top = Math.max(70, Math.min(window.innerHeight - 260, rect.top + 20)) + 'px';
+  inlineEditorCard.style.left = Math.max(20, Math.min(window.innerWidth - 380, rect.left + 20)) + 'px';
+  inlineEditorCard.classList.add('open');
+  inlineEditorInput.focus();
+}
+
+function closeInlineEditor() {
+  if (inlineEditorCard) inlineEditorCard.classList.remove('open');
+  onApplyInlineEditorCallback = null;
+}
+
+if (btnCloseInlineEditor) btnCloseInlineEditor.onclick = closeInlineEditor;
+if (btnCancelInlineEditor) btnCancelInlineEditor.onclick = closeInlineEditor;
+if (btnApplyInlineEditor) {
+  btnApplyInlineEditor.onclick = () => {
+    if (onApplyInlineEditorCallback) {
+      onApplyInlineEditorCallback(inlineEditorInput.value);
+    }
+    closeInlineEditor();
+  };
+}
+
 setViewMode(currentViewMode);
 
 // ---------- 분할 드래그 리사이저 ----------
@@ -1378,8 +3366,7 @@ dragDivider.addEventListener('dblclick', () => {
   setStatus('화면 분할 50:50 초기화');
 });
 
-// ---------- 스크롤 동기화 ----------
-const previewContainer = document.getElementById('preview-container');
+// ---------- 스크롤 동기화 & TOC Scroll Spy ----------
 editor.addEventListener('scroll', () => {
   if (isSyncingLeft) { isSyncingLeft = false; return; }
   isSyncingRight = true;
@@ -1392,15 +3379,38 @@ editor.addEventListener('scroll', () => {
 });
 
 previewContainer.addEventListener('scroll', () => {
-  if (isSyncingRight) { isSyncingRight = false; return; }
-  isSyncingLeft = true;
-  const maxLeft = editor.scrollHeight - editor.clientHeight;
-  const maxRight = previewContainer.scrollHeight - previewContainer.clientHeight;
-  if (maxLeft > 0 && maxRight > 0) {
-    const ratio = previewContainer.scrollTop / maxRight;
-    editor.scrollTop = ratio * maxLeft;
+  if (isSyncingRight) { isSyncingRight = false; }
+  else {
+    isSyncingLeft = true;
+    const maxLeft = editor.scrollHeight - editor.clientHeight;
+    const maxRight = previewContainer.scrollHeight - previewContainer.clientHeight;
+    if (maxLeft > 0 && maxRight > 0) {
+      const ratio = previewContainer.scrollTop / maxRight;
+      editor.scrollTop = ratio * maxLeft;
+    }
   }
+  syncTocActiveHeading();
 });
+
+function syncTocActiveHeading() {
+  if (!tocDrawer.classList.contains('open')) return;
+  const headings = Array.from(preview.querySelectorAll('h1, h2, h3'));
+  if (headings.length === 0) return;
+  const containerTop = previewContainer.getBoundingClientRect().top;
+  let activeHeading = headings[0];
+  for (const h of headings) {
+    const rect = h.getBoundingClientRect();
+    if (rect.top - containerTop <= 60) {
+      activeHeading = h;
+    } else {
+      break;
+    }
+  }
+  const id = activeHeading.id;
+  tocList.querySelectorAll('.toc-item').forEach(item => {
+    item.classList.toggle('active', item.getAttribute('href') === '#' + id);
+  });
+}
 
 // ---------- 코드 블록 복사 ----------
 window.copyCode = function(btn) {
@@ -1418,16 +3428,47 @@ window.copyCode = function(btn) {
   }).catch(() => { setStatus('복사 실패'); });
 };
 
-// ---------- 체크박스 연동 ----------
+// ---------- 체크박스 및 링크 연동 ----------
 preview.addEventListener('click', (e) => {
   const target = e.target;
-  if (target && target.tagName === 'INPUT' && target.type === 'checkbox') {
+  if (!target) return;
+
+  // 1) 체크박스 동기화
+  if (target.tagName === 'INPUT' && target.type === 'checkbox') {
     const li = target.closest('li.task-list-item');
     if (!li) return;
     const allCheckboxes = Array.from(preview.querySelectorAll('li.task-list-item input[type="checkbox"]'));
     const index = allCheckboxes.indexOf(target);
     if (index !== -1) {
       toggleEditorTask(index);
+    }
+    return;
+  }
+
+  // 2) 내부 앵커 및 마크다운 파일 상호 링크 인터셉트
+  const a = target.closest('a');
+  if (a) {
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#')) {
+      e.preventDefault();
+      const id = decodeURIComponent(href.slice(1));
+      const el = preview.querySelector(`[id="${CSS.escape(id)}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      return;
+    }
+    if (href.startsWith('/?file=')) {
+      e.preventDefault();
+      try {
+        const u = new URL(href, window.location.origin);
+        const fileParam = u.searchParams.get('file');
+        if (fileParam && confirmDiscard()) {
+          openFile(fileParam);
+          window.history.pushState({}, '', href);
+        }
+      } catch (_) {}
+      return;
     }
   }
 });
@@ -1481,10 +3522,12 @@ function updateToc() {
     });
     tocList.appendChild(a);
   });
+  syncTocActiveHeading();
 }
 
 document.getElementById('btnToggleToc').addEventListener('click', () => {
   tocDrawer.classList.toggle('open');
+  if (tocDrawer.classList.contains('open')) syncTocActiveHeading();
 });
 document.getElementById('btnCloseToc').addEventListener('click', () => {
   tocDrawer.classList.remove('open');
@@ -1505,10 +3548,11 @@ function insertSnippet(before, after = '', defaultText = '') {
   }
   dirty = true;
   updateStats();
+  updateCursorPos();
   scheduleRender();
 }
 
-document.querySelectorAll('.editor-header-bar .tbtn').forEach(btn => {
+document.querySelectorAll('.editor-header-bar .tbtn[data-tool]').forEach(btn => {
   btn.addEventListener('click', () => {
     const tool = btn.getAttribute('data-tool');
     switch (tool) {
@@ -1536,8 +3580,59 @@ document.querySelectorAll('.editor-header-bar .tbtn').forEach(btn => {
   });
 });
 
-// ---------- 스마트 Enter 및 단축키 ----------
+// ---------- 스마트 키보드 (들여쓰기/내어쓰기, Enter, 자동 괄호) ----------
 editor.addEventListener('keydown', (e) => {
+  // 1) Tab / Shift+Tab 들여쓰기 & 내어쓰기
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    const val = editor.value;
+
+    if (start === end && !e.shiftKey) {
+      editor.setRangeText('  ', start, end, 'end');
+      editor.dispatchEvent(new Event('input'));
+      updateCursorPos();
+      return;
+    }
+
+    const lineStart = val.lastIndexOf('\n', start - 1) + 1;
+    let lineEnd = val.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = val.length;
+
+    const lines = val.slice(lineStart, lineEnd).split('\n');
+    let newStart = start;
+    let newEnd = end;
+
+    if (!e.shiftKey) {
+      const indented = lines.map((line, idx) => {
+        newEnd += 2;
+        if (idx === 0) newStart += 2;
+        return '  ' + line;
+      }).join('\n');
+      editor.setRangeText(indented, lineStart, lineEnd, 'select');
+      editor.setSelectionRange(newStart, newEnd);
+    } else {
+      let totalRemoved = 0;
+      const unindented = lines.map((line, idx) => {
+        let remove = 0;
+        if (line.startsWith('  ')) remove = 2;
+        else if (line.startsWith(' ') || line.startsWith('\t')) remove = 1;
+
+        if (idx === 0) newStart = Math.max(lineStart, newStart - remove);
+        totalRemoved += remove;
+        return line.slice(remove);
+      }).join('\n');
+      newEnd = Math.max(newStart, end - totalRemoved);
+      editor.setRangeText(unindented, lineStart, lineEnd, 'select');
+      editor.setSelectionRange(newStart, newEnd);
+    }
+    editor.dispatchEvent(new Event('input'));
+    updateCursorPos();
+    return;
+  }
+
+  // 2) 스마트 Enter (목록 번호 및 체크박스 이어쓰기)
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     const start = editor.selectionStart;
     const val = editor.value;
@@ -1553,6 +3648,7 @@ editor.addEventListener('keydown', (e) => {
         editor.setRangeText('\n' + taskMatch[1].replace(/\[[xX]\]/, '[ ] '), start, start, 'end');
       }
       editor.dispatchEvent(new Event('input'));
+      updateCursorPos();
       return;
     }
 
@@ -1565,6 +3661,7 @@ editor.addEventListener('keydown', (e) => {
         editor.setRangeText('\n' + unorderMatch[1], start, start, 'end');
       }
       editor.dispatchEvent(new Event('input'));
+      updateCursorPos();
       return;
     }
 
@@ -1578,28 +3675,580 @@ editor.addEventListener('keydown', (e) => {
         editor.setRangeText('\n' + orderMatch[1] + nextNum + orderMatch[3], start, start, 'end');
       }
       editor.dispatchEvent(new Event('input'));
+      updateCursorPos();
       return;
     }
   }
 
+  // 3) 자동 괄호/따옴표 닫기 & 스킵
   const pairs = { '(': ')', '[': ']', '{': '}', '"': '"', '`': '`', '*': '*' };
-  if (pairs[e.key]) {
+  const closePairs = { ')': '(', ']': '[', '}': '{', '"': '"', '`': '`' };
+
+  if (pairs[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
+    const val = editor.value;
+
     if (start !== end) {
       e.preventDefault();
       const open = e.key;
       const close = pairs[e.key];
-      const sel = editor.value.slice(start, end);
+      const sel = val.slice(start, end);
       editor.setRangeText(open + sel + close, start, end, 'select');
       editor.dispatchEvent(new Event('input'));
+      updateCursorPos();
+      return;
+    } else {
+      const nextChar = val[start] || '';
+      if (!nextChar || /\s|[)\]},;.]/.test(nextChar)) {
+        e.preventDefault();
+        const open = e.key;
+        const close = pairs[e.key];
+        editor.setRangeText(open + close, start, start, 'end');
+        editor.setSelectionRange(start + 1, start + 1);
+        editor.dispatchEvent(new Event('input'));
+        updateCursorPos();
+        return;
+      }
     }
   }
 
+  if (closePairs[e.key] && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    if (start === end && editor.value[start] === e.key) {
+      e.preventDefault();
+      editor.setSelectionRange(start + 1, start + 1);
+      updateCursorPos();
+      return;
+    }
+  }
+
+  // 4) 빈 괄호 쌍 한 번에 백스페이스 삭제
+  if (e.key === 'Backspace' && !e.isComposing) {
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    if (start === end && start > 0) {
+      const prevChar = editor.value[start - 1];
+      const nextChar = editor.value[start];
+      if (pairs[prevChar] === nextChar) {
+        e.preventDefault();
+        editor.setRangeText('', start - 1, start + 1, 'end');
+        editor.setSelectionRange(start - 1, start - 1);
+        editor.dispatchEvent(new Event('input'));
+        updateCursorPos();
+        return;
+      }
+    }
+  }
+
+  // 5) Ctrl 서식 단축키
   if (e.ctrlKey || e.metaKey) {
     if (e.key.toLowerCase() === 'b') { e.preventDefault(); insertSnippet('**', '**', '굵은 텍스트'); }
     if (e.key.toLowerCase() === 'i') { e.preventDefault(); insertSnippet('*', '*', '기울임 텍스트'); }
     if (e.key.toLowerCase() === 'k') { e.preventDefault(); insertSnippet('[', '](https://)', '링크 텍스트'); }
+  }
+});
+
+// ---------- 에디터 본문 찾기 및 바꾸기 (Find & Replace) ----------
+let searchMatches = [];
+let currentMatchIndex = -1;
+let isCaseSensitive = false;
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+let notionSearchMatches = [];
+
+function findMatchesInPreview(query, caseSensitive) {
+  if (!query) return [];
+  const matches = [];
+  const walker = document.createTreeWalker(preview, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      if (!node.parentElement) return NodeFilter.FILTER_REJECT;
+      if (node.parentElement.closest('.notion-card-edit-btn, .slash-menu, .floating-format-bar, .inline-editor-card, pre code.language-mermaid')) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+
+  let node;
+  const q = caseSensitive ? query : query.toLowerCase();
+  while ((node = walker.nextNode())) {
+    const text = caseSensitive ? node.nodeValue : node.nodeValue.toLowerCase();
+    let pos = 0;
+    while ((pos = text.indexOf(q, pos)) !== -1) {
+      matches.push({ node, start: pos, end: pos + query.length });
+      pos += query.length;
+    }
+  }
+  return matches;
+}
+
+function performSearch(jump = true) {
+  const query = findInput.value;
+  searchMatches = [];
+  notionSearchMatches = [];
+  currentMatchIndex = -1;
+
+  preview.querySelectorAll('.notion-search-target').forEach(el => el.classList.remove('notion-search-target'));
+
+  if (!query) {
+    searchMatchCount.textContent = '0/0';
+    return;
+  }
+
+  if (currentViewMode === 'notion') {
+    notionSearchMatches = findMatchesInPreview(query, isCaseSensitive);
+    if (notionSearchMatches.length > 0) {
+      if (jump) {
+        goToMatch(0);
+      } else {
+        currentMatchIndex = 0;
+        searchMatchCount.textContent = `1/${notionSearchMatches.length}`;
+      }
+    } else {
+      searchMatchCount.textContent = '0/0';
+    }
+    return;
+  }
+
+  const text = editor.value;
+  const q = isCaseSensitive ? query : query.toLowerCase();
+  const src = isCaseSensitive ? text : text.toLowerCase();
+  let pos = 0;
+  while ((pos = src.indexOf(q, pos)) !== -1) {
+    searchMatches.push({ start: pos, end: pos + query.length });
+    pos += query.length;
+  }
+  if (searchMatches.length > 0) {
+    const cursor = editor.selectionStart;
+    let idx = searchMatches.findIndex(m => m.start >= cursor);
+    if (idx === -1) idx = 0;
+    if (jump) goToMatch(idx);
+    else {
+      currentMatchIndex = idx;
+      searchMatchCount.textContent = `${idx + 1}/${searchMatches.length}`;
+    }
+  } else {
+    searchMatchCount.textContent = '0/0';
+  }
+}
+
+function goToMatch(index) {
+  if (currentViewMode === 'notion') {
+    if (notionSearchMatches.length === 0) return;
+    currentMatchIndex = (index + notionSearchMatches.length) % notionSearchMatches.length;
+    searchMatchCount.textContent = `${currentMatchIndex + 1}/${notionSearchMatches.length}`;
+    const m = notionSearchMatches[currentMatchIndex];
+    if (!m.node.parentElement) return;
+
+    try {
+      const range = document.createRange();
+      range.setStart(m.node, m.start);
+      range.setEnd(m.node, m.end);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (_) {}
+
+    preview.querySelectorAll('.notion-search-target').forEach(el => el.classList.remove('notion-search-target'));
+    const parentBlock = m.node.parentElement.closest('[data-block="true"], .notion-block, li, tr, p, h1, h2, h3, h4, h5, h6, blockquote') || m.node.parentElement;
+    if (parentBlock) {
+      parentBlock.classList.add('notion-search-target');
+      parentBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    return;
+  }
+
+  if (searchMatches.length === 0) return;
+  currentMatchIndex = (index + searchMatches.length) % searchMatches.length;
+  searchMatchCount.textContent = `${currentMatchIndex + 1}/${searchMatches.length}`;
+  const m = searchMatches[currentMatchIndex];
+  editor.focus();
+  editor.setSelectionRange(m.start, m.end);
+  updateCursorPos();
+
+  // 스크롤 이동
+  const lineNum = editor.value.slice(0, m.start).split('\n').length;
+  const targetScroll = Math.max(0, (lineNum - 4) * 24);
+  editor.scrollTop = targetScroll;
+}
+
+function openSearch(withReplace = false) {
+  searchBar.classList.add('open');
+  replaceRow.style.display = withReplace ? 'flex' : 'none';
+  let sel = '';
+  if (currentViewMode === 'notion') {
+    sel = (window.getSelection ? window.getSelection().toString() : '').trim();
+  } else {
+    sel = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+  }
+  if (sel && !sel.includes('\n') && sel.length < 80) {
+    findInput.value = sel;
+  }
+  findInput.focus();
+  findInput.select();
+  performSearch();
+}
+
+function closeSearch() {
+  searchBar.classList.remove('open');
+  preview.querySelectorAll('.notion-search-target').forEach(el => el.classList.remove('notion-search-target'));
+  if (currentViewMode !== 'notion') {
+    editor.focus();
+  }
+}
+
+btnOpenSearch.addEventListener('click', () => {
+  if (searchBar.classList.contains('open')) closeSearch();
+  else openSearch();
+});
+btnCloseSearch.addEventListener('click', closeSearch);
+
+btnToggleReplace.addEventListener('click', () => {
+  const isHidden = replaceRow.style.display === 'none';
+  replaceRow.style.display = isHidden ? 'flex' : 'none';
+  if (isHidden) replaceInput.focus();
+});
+
+btnFindCase.addEventListener('click', () => {
+  isCaseSensitive = !isCaseSensitive;
+  btnFindCase.classList.toggle('active', isCaseSensitive);
+  performSearch();
+});
+
+findInput.addEventListener('input', () => performSearch());
+findInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    if (e.shiftKey) goToMatch(currentMatchIndex - 1);
+    else goToMatch(currentMatchIndex + 1);
+  } else if (e.key === 'Escape') {
+    closeSearch();
+  }
+});
+
+replaceInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    replaceCurrent();
+  } else if (e.key === 'Escape') {
+    closeSearch();
+  }
+});
+
+btnFindNext.addEventListener('click', () => goToMatch(currentMatchIndex + 1));
+btnFindPrev.addEventListener('click', () => goToMatch(currentMatchIndex - 1));
+
+function replaceCurrent() {
+  const rep = replaceInput.value;
+
+  if (currentViewMode === 'notion') {
+    if (currentMatchIndex < 0 || notionSearchMatches.length === 0) return;
+    const m = notionSearchMatches[currentMatchIndex];
+    if (m.node && m.node.parentElement) {
+      const orig = m.node.nodeValue;
+      m.node.nodeValue = orig.slice(0, m.start) + rep + orig.slice(m.end);
+      syncFromPreview();
+      performSearch();
+    }
+    return;
+  }
+
+  if (currentMatchIndex < 0 || searchMatches.length === 0) return;
+  const m = searchMatches[currentMatchIndex];
+  editor.setRangeText(rep, m.start, m.end, 'end');
+  dirty = true;
+  updateStats();
+  scheduleRender();
+  performSearch();
+}
+btnReplaceOne.addEventListener('click', replaceCurrent);
+
+function replaceAll() {
+  const query = findInput.value;
+  if (!query) return;
+  const rep = replaceInput.value;
+
+  if (currentViewMode === 'notion') {
+    const matches = findMatchesInPreview(query, isCaseSensitive);
+    if (matches.length === 0) return;
+    const total = matches.length;
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const m = matches[i];
+      if (m.node) {
+        const orig = m.node.nodeValue;
+        m.node.nodeValue = orig.slice(0, m.start) + rep + orig.slice(m.end);
+      }
+    }
+    syncFromPreview();
+    performSearch(false);
+    showToast(`${total}개 항목이 모두 변경되었습니다.`);
+    return;
+  }
+
+  if (searchMatches.length === 0) return;
+  const total = searchMatches.length;
+  const regex = new RegExp(escapeRegex(query), isCaseSensitive ? 'g' : 'gi');
+  editor.value = editor.value.replace(regex, rep);
+  dirty = true;
+  updateStats();
+  scheduleRender();
+  performSearch(false);
+  showToast(`${total}개 항목이 모두 변경되었습니다.`);
+}
+btnReplaceAll.addEventListener('click', replaceAll);
+
+// ---------- 작업 폴더 파일 탐색기 모달 (Quick Open) ----------
+let workspaceFiles = [];
+let selectedFileIndex = 0;
+
+async function openFileListModal() {
+  fileListModal.classList.add('open');
+  fileSearchInput.value = '';
+  fileSearchInput.focus();
+  try {
+    const infoRes = await fetch('/api/info').then(r => r.json()).catch(() => ({}));
+    if (infoRes.root) {
+      workspaceDirDisplay.textContent = '현재 폴더: ' + infoRes.root;
+    }
+    const listRes = await fetch('/api/list').then(r => r.json()).catch(() => ({ files: [] }));
+    workspaceFiles = listRes.files || [];
+    renderFileList();
+  } catch (_) {
+    fileItemsList.innerHTML = '<div style="color:var(--text-faint); padding:10px;">파일 목록을 불러오지 못했습니다.</div>';
+  }
+}
+
+function closeFileListModal() {
+  fileListModal.classList.remove('open');
+  editor.focus();
+}
+
+// 최근 파일 히스토리 관리
+function getRecentFiles() {
+  try {
+    return JSON.parse(localStorage.getItem('mdeditor-recent-files') || '[]');
+  } catch (_) { return []; }
+}
+function addRecentFile(file) {
+  if (!file) return;
+  const recent = [file, ...getRecentFiles().filter(f => f !== file)].slice(0, 8);
+  localStorage.setItem('mdeditor-recent-files', JSON.stringify(recent));
+}
+function removeRecentFile(file) {
+  const recent = getRecentFiles().filter(f => f !== file);
+  localStorage.setItem('mdeditor-recent-files', JSON.stringify(recent));
+}
+
+function createFileItemElement(file) {
+  const div = document.createElement('div');
+  div.className = 'file-item' + (file === currentFile ? ' active' : '');
+  
+  const lastSlash = file.lastIndexOf('/');
+  const folder = lastSlash !== -1 ? file.slice(0, lastSlash + 1) : '';
+  const base = lastSlash !== -1 ? file.slice(lastSlash + 1) : file;
+
+  div.innerHTML = `
+    <div class="file-item-left">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+      <div>
+        ${folder ? `<span class="file-folder-prefix">${folder}</span>` : ''}
+        <span class="file-item-name">${base}</span>
+      </div>
+    </div>
+    <div class="file-item-right">
+      ${file === currentFile ? '<span style="font-size:11px; color:var(--accent); font-weight:600;">현재</span>' : ''}
+      <button type="button" class="btn-item-delete" title="파일 삭제">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+      </button>
+    </div>
+  `;
+
+  div.addEventListener('click', async () => {
+    if (confirmDiscard()) {
+      closeFileListModal();
+      await openFile(file);
+      window.history.pushState({}, '', '/?file=' + encodeURIComponent(file));
+    }
+  });
+
+  const delBtn = div.querySelector('.btn-item-delete');
+  delBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm(`정말 '${file}' 파일을 영구 삭제할까요?\n(휴지통에서 복구할 수 없습니다)`)) return;
+    try {
+      const res = await fetch('/api/delete?file=' + encodeURIComponent(file), { method: 'POST' });
+      if (res.ok) {
+        showToast('✓ 삭제되었습니다: ' + file);
+        removeRecentFile(file);
+        if (file === currentFile) {
+          currentFile = '';
+          editor.value = '';
+          dirty = false;
+          updateFileDisplay();
+          render();
+        }
+        await openFileListModal();
+      } else {
+        const err = await errorOf(res);
+        showToast('삭제 실패: ' + err);
+      }
+    } catch (_) {
+      showToast('삭제 실패');
+    }
+  });
+
+  return div;
+}
+
+function renderFileList() {
+  const filter = fileSearchInput.value.trim().toLowerCase();
+  fileItemsList.innerHTML = '';
+
+  const group = document.createElement('div');
+  group.className = 'file-list-group';
+
+  if (!filter) {
+    const recent = getRecentFiles().filter(f => workspaceFiles.includes(f));
+    if (recent.length > 0) {
+      const header = document.createElement('div');
+      header.className = 'file-section-header';
+      header.textContent = '최근 편집한 파일';
+      group.appendChild(header);
+
+      recent.forEach((file) => {
+        group.appendChild(createFileItemElement(file));
+      });
+
+      const allHeader = document.createElement('div');
+      allHeader.className = 'file-section-header';
+      allHeader.textContent = `모든 파일 (${workspaceFiles.length})`;
+      group.appendChild(allHeader);
+    }
+
+    workspaceFiles.forEach((file) => {
+      group.appendChild(createFileItemElement(file));
+    });
+  } else {
+    const filtered = workspaceFiles.filter(f => f.toLowerCase().includes(filter));
+    filtered.forEach((file) => {
+      group.appendChild(createFileItemElement(file));
+    });
+
+    if (filtered.length === 0) {
+      const emptyDiv = document.createElement('div');
+      emptyDiv.style.cssText = 'color:var(--text-faint); padding:16px 10px; text-align:center; font-size:12.5px;';
+      emptyDiv.textContent = `'${filter}' 일치하는 마크다운 파일이 없습니다.`;
+      group.appendChild(emptyDiv);
+
+      const createBtn = document.createElement('div');
+      createBtn.className = 'file-item';
+      createBtn.style.color = 'var(--accent)';
+      createBtn.innerHTML = `
+        <div class="file-item-left">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          <span>새 파일로 생성: <b>${normName(filter)}</b></span>
+        </div>
+      `;
+      createBtn.onclick = async () => {
+        const newName = normName(filter);
+        closeFileListModal();
+        currentFile = newName;
+        editor.value = '';
+        dirty = true;
+        updateFileDisplay();
+        render();
+        await save();
+        showToast('새 파일 생성됨: ' + newName);
+      };
+      group.appendChild(createBtn);
+    }
+  }
+
+  fileItemsList.appendChild(group);
+
+  const items = fileItemsList.querySelectorAll('.file-item');
+  selectedFileIndex = 0;
+  if (items.length > 0) {
+    items[0].classList.add('selected');
+  }
+}
+
+fileSearchInput.addEventListener('input', renderFileList);
+fileSearchInput.addEventListener('keydown', (e) => {
+  const items = fileItemsList.querySelectorAll('.file-item');
+  if (items.length === 0) return;
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    items[selectedFileIndex].classList.remove('selected');
+    selectedFileIndex = (selectedFileIndex + 1) % items.length;
+    items[selectedFileIndex].classList.add('selected');
+    items[selectedFileIndex].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    items[selectedFileIndex].classList.remove('selected');
+    selectedFileIndex = (selectedFileIndex - 1 + items.length) % items.length;
+    items[selectedFileIndex].classList.add('selected');
+    items[selectedFileIndex].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    items[selectedFileIndex].click();
+  } else if (e.key === 'Escape') {
+    closeFileListModal();
+  }
+});
+
+btnFiles.addEventListener('click', openFileListModal);
+btnCloseFileList.addEventListener('click', closeFileListModal);
+fileListModal.addEventListener('click', (e) => {
+  if (e.target === fileListModal) closeFileListModal();
+});
+btnModalOpenFile.addEventListener('click', () => {
+  closeFileListModal();
+  filePicker.click();
+});
+btnModalNewFile.addEventListener('click', () => {
+  closeFileListModal();
+  btnNew.click();
+});
+
+// ---------- 파일명 배지 클릭하여 이름 변경 (Rename) ----------
+fileBadge.addEventListener('click', async () => {
+  const cur = currentFile || 'untitled.md';
+  const newName = prompt('파일 이름 변경 (.md):', cur);
+  if (!newName || !newName.trim() || newName.trim() === cur) return;
+  const target = normName(newName);
+  if (target === currentFile) return;
+
+  if (!currentFile || isExternalDrop) {
+    currentFile = target;
+    isExternalDrop = false;
+    dirty = true;
+    setStatus('새 파일명 지정: ' + target, true);
+    updateFileDisplay();
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/rename?from=${encodeURIComponent(currentFile)}&to=${encodeURIComponent(target)}`, { method: 'POST' });
+    if (res.ok) {
+      const old = currentFile;
+      currentFile = target;
+      window.history.replaceState({}, '', '/?file=' + encodeURIComponent(target));
+      updateFileDisplay();
+      setStatus('이름 변경됨: ' + target, dirty);
+      showToast(`이름 변경됨: ${old} → ${target}`);
+    } else {
+      const err = await errorOf(res);
+      setStatus('이름 변경 실패: ' + err, dirty);
+      showToast('이름 변경 실패: ' + err);
+    }
+  } catch (e) {
+    setStatus('이름 변경 실패', dirty);
   }
 });
 
@@ -1615,6 +4264,15 @@ async function render() {
     if (!res.ok) { setStatus('렌더 오류', dirty); return; }
     
     preview.innerHTML = data.html;
+
+    // 수식 및 Mermaid 원본 코드 보존 (라이브러리 변환 전)
+    preview.querySelectorAll('.math-block').forEach(el => {
+      el.dataset.rawMath = el.textContent.replace(/^\$\$|\$\$$/g, '').trim();
+    });
+    preview.querySelectorAll('.mermaid-wrapper').forEach(el => {
+      const codeEl = el.querySelector('pre code.language-mermaid') || el.querySelector('.mermaid');
+      if (codeEl) el.dataset.rawMermaid = codeEl.textContent.trim();
+    });
 
     preview.querySelectorAll('li.task-list-item').forEach(li => {
       const cb = li.querySelector('input[type="checkbox"]');
@@ -1653,6 +4311,10 @@ async function render() {
     }
 
     updateToc();
+
+    if (currentViewMode === 'notion') {
+      setupNotionBlocks();
+    }
   } catch (e) { if (e && e.name === 'AbortError') return; setStatus('렌더 오류', dirty); }
 }
 
@@ -1665,15 +4327,24 @@ function scheduleRender() {
 editor.addEventListener('input', () => {
   dirty = true;
   updateStats();
+  updateCursorPos();
   scheduleRender();
 });
 
-// 미저장 경고 및 프로세스 자동 종료
+// 탭 식별자 및 세션 핑 관리
+const tabId = Math.random().toString(36).slice(2, 10);
+function sendHeartbeat() {
+  fetch('/api/ping?tab=' + encodeURIComponent(tabId), { method: 'POST' }).catch(() => {});
+}
+sendHeartbeat();
+setInterval(sendHeartbeat, 4000);
+
+// 미저장 경고 및 프로세스 자동 종료 (다중 탭/창 고려)
 window.addEventListener('beforeunload', (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ''; }
 });
 window.addEventListener('pagehide', () => {
-  navigator.sendBeacon('/api/exit');
+  navigator.sendBeacon('/api/exit?tab=' + encodeURIComponent(tabId));
 });
 
 // ---------- 파일 작업 (불러오기 / 새 파일 / 저장) ----------
@@ -1706,9 +4377,12 @@ async function openFile(file) {
     const data = await res.json();
     editor.value = data.content;
     currentFile = file;
+    addRecentFile(file);
     isExternalDrop = false;
     dirty = false;
+    updateFileDisplay();
     updateStats();
+    updateCursorPos();
     render();
     setStatus('열림: ' + file, false);
     return true;
@@ -1728,18 +4402,21 @@ function loadLocalFile(file) {
     isExternalDrop = true;
     dirty = true;
     filePicker.value = '';
+    updateFileDisplay();
     updateStats();
+    updateCursorPos();
     render();
     setStatus('불러옴: ' + file.name, true);
+    showToast('불러옴: ' + file.name);
   };
   reader.readAsText(file);
 }
 
-document.getElementById('btnOpen').addEventListener('click', () => filePicker.click());
+btnOpen.addEventListener('click', () => filePicker.click());
 filePicker.addEventListener('change', () => loadLocalFile(filePicker.files[0]));
 
 // 새 파일
-document.getElementById('btnNew').addEventListener('click', async () => {
+btnNew.addEventListener('click', async () => {
   if (!confirmDiscard()) return;
   const name = prompt('새 파일 이름 (.md):', 'untitled.md');
   if (!name || !name.trim()) return;
@@ -1749,13 +4426,19 @@ document.getElementById('btnNew').addEventListener('click', async () => {
   isExternalDrop = false;
   editor.value = '';
   dirty = false;
+  updateFileDisplay();
   updateStats();
+  updateCursorPos();
   render();
   setStatus('새 파일: ' + file, false);
 });
 
 // 저장
 async function save() {
+  if (currentViewMode === 'notion') {
+    clearTimeout(previewSyncTimer);
+    editor.value = serializePreviewToMarkdown(preview);
+  }
   if (!currentFile) {
     const name = prompt('저장할 파일 이름 (.md):', 'untitled.md');
     if (!name || !name.trim()) return;
@@ -1771,21 +4454,39 @@ async function save() {
     if (res.ok) {
       dirty = false;
       isExternalDrop = false;
+      updateFileDisplay();
       setStatus('저장됨', false);
+      showToast('✓ 저장되었습니다: ' + currentFile);
     } else {
       setStatus('저장 실패: ' + await errorOf(res), dirty);
+      showToast('저장 실패: ' + await errorOf(res));
     }
   } catch (e) { setStatus('저장 실패', dirty); }
 }
-document.getElementById('btnSave').addEventListener('click', save);
+btnSave.addEventListener('click', save);
 
 // PDF 인쇄
-document.getElementById('btnPrint').addEventListener('click', () => { window.print(); });
+btnPrint.addEventListener('click', () => { window.print(); });
 
 // HTML 다운로드
-document.getElementById('btnExportHtml').addEventListener('click', () => {
+btnExportHtml.addEventListener('click', () => {
   const clone = preview.cloneNode(true);
-  clone.querySelectorAll('.copy-code-btn').forEach(b => b.remove());
+  clone.querySelectorAll('.copy-code-btn, .notion-card-edit-btn, .slash-menu, .floating-format-bar, .inline-editor-card').forEach(b => b.remove());
+  clone.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
+  clone.querySelectorAll('[data-block-ready]').forEach(el => el.removeAttribute('data-block-ready'));
+  clone.querySelectorAll('.notion-block-active, .notion-search-target').forEach(el => el.classList.remove('notion-block-active', 'notion-search-target'));
+  clone.querySelectorAll('img[src]').forEach(img => {
+    const src = img.getAttribute('src') || '';
+    if (src.startsWith('/api/raw?file=')) {
+      img.setAttribute('src', decodeURIComponent(src.slice(14)));
+    }
+  });
+  clone.querySelectorAll('a[href]').forEach(a => {
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('/?file=')) {
+      a.setAttribute('href', decodeURIComponent(href.slice(7)));
+    }
+  });
   clone.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.setAttribute('disabled', ''));
   const htmlContent = `<!DOCTYPE html>
 <html lang="ko">
@@ -1819,6 +4520,7 @@ ${clone.innerHTML}
   a.click();
   URL.revokeObjectURL(a.href);
   setStatus('HTML 내보내기 완료');
+  showToast('✓ HTML 파일로 내보냈습니다.');
 });
 
 // 도움말 모달
@@ -1836,22 +4538,28 @@ helpModal.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey || e.metaKey) {
     if (e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
-    if (e.key.toLowerCase() === 'n') { e.preventDefault(); document.getElementById('btnNew').click(); }
+    if (e.key.toLowerCase() === 'n') { e.preventDefault(); btnNew.click(); }
+    if (e.key.toLowerCase() === 'o') { e.preventDefault(); openFileListModal(); }
+    if (e.key.toLowerCase() === 'f') { e.preventDefault(); openSearch(false); }
+    if (e.key.toLowerCase() === 'h') { e.preventDefault(); openSearch(true); }
   }
   if (e.altKey) {
-    if (e.key === '1') { e.preventDefault(); setViewMode('editor'); }
+    if (e.key === '1') { e.preventDefault(); setViewMode('notion'); }
     if (e.key === '2') { e.preventDefault(); setViewMode('split'); }
-    if (e.key === '3') { e.preventDefault(); setViewMode('preview'); }
+    if (e.key === '3') { e.preventDefault(); setViewMode('editor'); }
+    if (e.key === '4') { e.preventDefault(); setViewMode('preview'); }
   }
   if (e.key === 'F1') {
     e.preventDefault();
     helpModal.classList.toggle('open');
   }
-  if (e.key === 'Escape' && helpModal.classList.contains('open')) {
-    helpModal.classList.remove('open');
-  }
   if (e.key === 'Escape') {
-    settingsMenu.classList.remove('open');
+    if (helpModal.classList.contains('open')) helpModal.classList.remove('open');
+    if (fileListModal.classList.contains('open')) closeFileListModal();
+    if (searchBar.classList.contains('open')) closeSearch();
+    if (settingsMenu.classList.contains('open')) settingsMenu.classList.remove('open');
+    closeSlashMenu();
+    closeInlineEditor();
   }
 });
 
@@ -1868,19 +4576,27 @@ window.addEventListener('drop', (e) => {
       currentFile = file.name;
       isExternalDrop = true;
       dirty = true;
+      updateFileDisplay();
       updateStats();
+      updateCursorPos();
       render();
       setStatus('외부 파일 로드: ' + file.name, true);
+      showToast('외부 파일 로드: ' + file.name);
     };
     reader.readAsText(file);
   }
 });
 
 // 웰컴 데모 문서
-const WELCOME_DOC = `# MDEditor
+const WELCOME_DOC = `# Notion 스타일 통합 라이브 캔버스 에디터
 
-폴더 하나를 작업실 삼아 Markdown을 쓰고 바로 보는 로컬 에디터입니다.
-왼쪽에 쓰고 오른쪽에서 확인합니다.
+탭이나 분할 화면을 나누지 않고, **한 화면에서 직접 타이핑하며 실시간 서식**을 볼 수 있습니다.
+
+- **인플레이스 편집**: 본문의 텍스트, 제목, 목록을 클릭하여 즉시 편집할 수 있습니다.
+- **슬래시 명령어**: 빈 줄에서 \`/\`를 입력하면 H1, H2, 할 일, 콜아웃, 수식, 다이어그램 등 블록 메뉴가 팝업됩니다.
+- **선택 툴바**: 텍스트를 드래그하면 굵게, 기울임, 형광펜, 코드, 링크 퀵바가 뜹니다.
+- **원클릭 체크박스**: 아래 할 일 목록을 클릭하여 상태를 바로 전환할 수 있습니다.
+- **클래식 분할 뷰 지원**: 상단 중앙에서 [분할] 또는 [에디터] 버튼(단축키 \`Alt+1 ~ 4\`)으로 언제든 자유롭게 전환 가능합니다.
 
 ---
 
@@ -1902,7 +4618,7 @@ const WELCOME_DOC = `# MDEditor
 \`\`\`mermaid
 graph TD
   A[마크다운 작성] --> B{실시간 렌더링}
-  B --> C[실시간 미리보기]
+  B --> C[노션 라이브 캔버스]
   B --> D[PDF 인쇄]
   B --> E[HTML 내보내기]
 \`\`\`
@@ -1932,7 +4648,7 @@ $$e^{i\pi} + 1 = 0$$
 
 \`\`\`rust
 fn main() {
-    println!("Hello, MDEditor!");
+    println!("Hello, Notion Live Canvas!");
 }
 \`\`\`
 
@@ -1940,11 +4656,11 @@ fn main() {
 
 ### 할 일 목록
 
-미리보기에서 체크하면 원본 텍스트도 함께 바뀝니다.
+화면에서 바로 체크하면 원본 마크다운 상태와 양방향 동기화됩니다.
 
 - [x] MDEditor 실행하기
-- [ ] 첫 문서 작성하기
-- [ ] 단축키 익히기
+- [x] 노션 원스크린 라이브 편집 경험하기
+- [ ] 슬래시(/) 메뉴로 새 블록 삽입해보기
 
 ---
 
@@ -1959,7 +4675,9 @@ fn main() {
   const target = new URLSearchParams(window.location.search).get('file');
   if (target && await openFile(target)) return;
   editor.value = WELCOME_DOC;
+  updateFileDisplay();
   updateStats();
+  updateCursorPos();
   render();
 })();
 </script>
