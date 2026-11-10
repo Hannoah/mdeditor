@@ -3,6 +3,22 @@
 세션 작업 내역을 일자별로 정리한 로그입니다.
 검증 수치는 실행 당시 실측값이며, `target/` 빌드 산출물은 기록 대상에서 제외합니다.
 
+## 2026-11-10 — 블록 측면 인셋 라인 및 배경 박스 제거, 노션 표준 타이포그래피 정제
+
+### 1. 포커스 시 블록 측면 인셋 라인 및 배경 박스 효과 제거 (`src/index.html`)
+- 블록 포커스 시 좌측에 표시되던 3px 인셋 세로선(`box-shadow: inset 3px 0 0 var(--accent);`) 및 배경색 틴트(`background: rgba(var(--accent-rgb), 0.06);`)를 전면 제거.
+- 블록 호버 시 배경색 깜빡임(`background: rgba(var(--accent-rgb), 0.035);`) 및 불필요한 음수 마진/패딩(`margin: 3px -8px; padding: 4px 8px;`) 제거.
+- 우측 상단 호버 힌트 배지(`.notion-hint-badge`) 및 코드 블록 포커스 액센트 테두리 링 제거.
+- 실제 노션과 동일하게 문서 캔버스가 깔끔한 종이처럼 작동하며, 텍스트 입력 시 어떠한 인위적인 테두리나 박스 없이 커서만 자연스럽게 깜빡이도록 개선.
+- 빈 문단에만 노션 규격의 텍스트 플레이스홀더(`p[data-placeholder]:empty::before`)가 부드럽게 노출되도록 정리.
+
+### 2. 검증 및 배포 결과
+- `cargo fmt --check`: 클린 통과.
+- `cargo clippy -- -D warnings`: 무경고 무에러 통과.
+- `cargo test`: 51개 단위 테스트 전체 통과 (51 passed, 0 failed in 0.04s).
+- `cargo build --release`: **668,160 바이트 (~652 KB)**.
+- `install.ps1`: 로컬 Windows 데스크톱 배포 완료 (SHA256 해시 일치 확인).
+
 ## 2026-11-10 — 노션 라이브 캔버스 단일 전용 뷰 개편 (노션 뷰 단일화)
 
 ### 1. 상단 뷰 전환 세그먼트 제거 및 중앙 액션 간소화 (`src/index.html`)

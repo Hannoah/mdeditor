@@ -614,51 +614,19 @@
     min-height: calc(100vh - 200px);
   }
   body.notion-view #preview [data-block] {
-    position: relative;
-    border-radius: 6px;
-    padding: 4px 8px;
-    margin: 3px -8px;
     outline: none;
-    contain: layout style;
-    transition: background-color 0.1s ease, box-shadow 0.1s ease;
+    position: relative;
   }
-  body.notion-view #preview [data-block]:hover {
-    background: rgba(var(--accent-rgb), 0.035);
-  }
-  body.notion-view #preview [data-block].active-block,
   body.notion-view #preview [data-block]:focus {
-    background: rgba(var(--accent-rgb), 0.06);
-    box-shadow: inset 3px 0 0 var(--accent);
+    outline: none;
   }
-  body.notion-view #preview [data-placeholder]:empty:before {
+  body.notion-view #preview p[data-placeholder]:empty::before,
+  body.notion-view #preview p[data-placeholder]:has(> br:only-child)::before {
     content: attr(data-placeholder);
     color: var(--text-faint);
     pointer-events: none;
-  }
-  .notion-hint-badge {
-    position: absolute;
-    right: 8px;
-    top: 4px;
-    font-size: 11px;
-    color: var(--text-faint);
-    opacity: 0;
-    transition: opacity 0.15s ease;
-    user-select: none;
-    pointer-events: none;
-  }
-  body.notion-view #preview [data-block]:hover .notion-hint-badge {
-    opacity: 1;
-  }
-  .code-block-wrapper.clickable-block,
-  .mermaid-wrapper.clickable-block,
-  .math-block.clickable-block {
-    cursor: pointer;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
-  }
-  .code-block-wrapper.clickable-block:hover,
-  .mermaid-wrapper.clickable-block:hover,
-  .math-block.clickable-block:hover {
-    border-color: var(--accent);
+    float: left;
+    height: 0;
   }
   .notion-card-edit-btn {
     position: absolute;
@@ -1087,11 +1055,10 @@
   }
   .code-lang:hover {
     background: var(--hover-overlay);
-    color: var(--accent);
+    color: var(--text);
   }
   .code-block-wrapper:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
+    outline: none;
   }
   #preview pre code[contenteditable="true"] {
     outline: none;
