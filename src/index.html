@@ -306,35 +306,12 @@
     flex-shrink: 0;
   }
 
-  /* Center Segmented View Switcher (Pill Slider) */
+  /* Center View Controls */
   .view-cluster {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
-  }
-  .view-segmented {
-    display: flex;
-    background: var(--surface-elevated);
-    padding: 3px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    gap: 2px;
-  }
-  .view-segmented button {
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    font-size: 12px;
-    font-weight: 500;
-    padding: 4px 10px;
-    border-radius: 6px;
-  }
-  .view-segmented button.active {
-    background: var(--surface);
-    color: var(--text);
-    font-weight: 600;
-    box-shadow: var(--shadow-sm);
   }
 
   /* Right Tools & Status */
@@ -904,7 +881,7 @@
     background: var(--surface-hover);
     color: var(--text);
   }
-  .tbtn:focus-visible, .btn-icon:focus-visible, .view-segmented button:focus-visible {
+  .tbtn:focus-visible, .btn-icon:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
@@ -1483,7 +1460,7 @@
   }
 </style>
 </head>
-<body>
+<body class="notion-view">
 
 <!-- Header -->
 <header>
@@ -1526,16 +1503,13 @@
     </div>
   </div>
 
-  <!-- Center View Controls -->
+  <!-- Center Quick Actions -->
   <div class="view-cluster">
-    <div class="view-segmented" title="보기 모드 전환 (Alt+1 노션 / Alt+2 분할 / Alt+3 에디터 / Alt+4 미리보기)">
-      <button id="viewNotion" class="active">노션</button>
-      <button id="viewSplit">분할</button>
-      <button id="viewEditor">에디터</button>
-      <button id="viewPreview">미리보기</button>
-    </div>
-    <button id="btnToggleToc" class="btn-icon ghost" title="목차 열기/닫기 (TOC)">
+    <button id="btnToggleToc" class="btn-icon ghost" title="문서 목차 (TOC) 열기/닫기">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+    </button>
+    <button id="btnHeaderSearch" class="btn-icon ghost" title="본문 찾기 및 바꾸기 (Ctrl+F / Ctrl+H)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
     </button>
   </div>
 
@@ -1586,110 +1560,35 @@
 </div>
 
 <main>
-  <!-- Left Editor Pane -->
-  <div class="pane" id="paneEditor">
-    <!-- Slim Toolbar Island -->
-    <div class="editor-header-bar">
-      <div class="toolbar-group" title="텍스트 서식">
-        <button type="button" class="tbtn" data-tool="bold" title="굵게 (Ctrl+B)"><b>B</b></button>
-        <button type="button" class="tbtn" data-tool="italic" title="기울임 (Ctrl+I)"><i>I</i></button>
-        <button type="button" class="tbtn" data-tool="strike" title="취소선 (~~텍스트~~)"><s>S</s></button>
-        <button type="button" class="tbtn" data-tool="mark" title="형광펜 (==텍스트==)">
-          <svg viewBox="0 0 24 24"><path d="m9 11-6 6v3h3l6-6"></path><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="code" title="인라인 코드 (`코드`)">
-          <svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
-        </button>
-      </div>
+  <!-- Background hidden editor for headless state synchronization & saving -->
+  <textarea id="editor" spellcheck="false" style="display:none;"></textarea>
 
-      <div class="toolbar-group" title="제목">
-        <button type="button" class="tbtn" data-tool="h1" title="제목 1 (# 제목)">H1</button>
-        <button type="button" class="tbtn" data-tool="h2" title="제목 2 (## 제목)">H2</button>
-        <button type="button" class="tbtn" data-tool="h3" title="제목 3 (### 제목)">H3</button>
+  <!-- Floating Search & Replace Bar -->
+  <div id="searchBar" class="search-bar">
+    <div class="search-row">
+      <div class="search-input-wrap">
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" id="findInput" placeholder="찾기... (Enter / Shift+Enter)" spellcheck="false" autocomplete="off" />
+        <span id="searchMatchCount" class="search-match-count">0/0</span>
       </div>
-
-      <div class="toolbar-group" title="블록">
-        <button type="button" class="tbtn" data-tool="quote" title="인용구 (> 내용)">
-          <svg viewBox="0 0 24 24"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"></path><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="callout" title="콜아웃 블록 (> [!NOTE])">
-          <svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"></path><path d="M9 21h6"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="toggle" title="토글 접기 블록 (:::toggle)">
-          <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="task" title="할 일 체크박스 (- [ ])">
-          <svg viewBox="0 0 24 24"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="hr" title="구분선 (---)">
-          <svg viewBox="0 0 24 24"><line x1="3" y1="12" x2="21" y2="12"></line></svg>
-        </button>
-      </div>
-
-      <div class="toolbar-group" title="코드 및 수식">
-        <button type="button" class="tbtn" data-tool="codeblock" title="코드 블록 (```언어)">
-          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="m9 10-2 2 2 2"></path><path d="m15 10 2 2-2 2"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="math" title="LaTeX 수식 ($$ 수식 $$)"><span class="mono-glyph">fx</span></button>
-        <button type="button" class="tbtn" data-tool="mermaid" title="Mermaid 다이어그램">
-          <svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><line x1="20" y1="4" x2="20" y2="20"></line><line x1="6" y1="9" x2="6" y2="15"></line></svg>
-        </button>
-      </div>
-
-      <div class="toolbar-group" title="삽입">
-        <button type="button" class="tbtn" data-tool="table" title="표 삽입 (| 헤더 |)">
-          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="12" y1="3" x2="12" y2="21"></line></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="link" title="링크 (Ctrl+K)">
-          <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="image" title="로컬 이미지 삽입">
-          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>
-        </button>
-        <button type="button" class="tbtn" data-tool="footnote" title="각주 ([^1])">
-          <span class="mono-glyph">^fn</span>
-        </button>
-      </div>
-
-      <div class="toolbar-group" title="찾기 및 바꾸기">
-        <button type="button" class="tbtn" id="btnOpenSearch" title="찾기 및 바꾸기 (Ctrl+F / Ctrl+H)">
-          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-        </button>
-      </div>
+      <button id="btnFindCase" class="btn-icon ghost search-opt-btn" title="대소문자 구분 (Case Sensitive)">Aa</button>
+      <button id="btnFindPrev" class="btn-icon ghost" title="이전 일치 항목 (Shift+Enter)">▲</button>
+      <button id="btnFindNext" class="btn-icon ghost" title="다음 일치 항목 (Enter)">▼</button>
+      <button id="btnToggleReplace" class="btn-icon ghost" title="바꾸기 펼치기/접기 (Ctrl+H)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
+      </button>
+      <button id="btnCloseSearch" class="btn-icon ghost" title="닫기 (Esc)">✕</button>
     </div>
-
-    <!-- Floating Search & Replace Bar -->
-    <div id="searchBar" class="search-bar">
-      <div class="search-row">
-        <div class="search-input-wrap">
-          <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-          <input type="text" id="findInput" placeholder="찾기... (Enter / Shift+Enter)" spellcheck="false" autocomplete="off" />
-          <span id="searchMatchCount" class="search-match-count">0/0</span>
-        </div>
-        <button id="btnFindCase" class="btn-icon ghost search-opt-btn" title="대소문자 구분 (Case Sensitive)">Aa</button>
-        <button id="btnFindPrev" class="btn-icon ghost" title="이전 일치 항목 (Shift+Enter)">▲</button>
-        <button id="btnFindNext" class="btn-icon ghost" title="다음 일치 항목 (Enter)">▼</button>
-        <button id="btnToggleReplace" class="btn-icon ghost" title="바꾸기 펼치기/접기 (Ctrl+H)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>
-        </button>
-        <button id="btnCloseSearch" class="btn-icon ghost" title="닫기 (Esc)">✕</button>
+    <div class="search-row replace-row" id="replaceRow" style="display:none;">
+      <div class="search-input-wrap">
+        <input type="text" id="replaceInput" placeholder="바꿀 내용..." spellcheck="false" autocomplete="off" />
       </div>
-      <div class="search-row replace-row" id="replaceRow" style="display:none;">
-        <div class="search-input-wrap">
-          <input type="text" id="replaceInput" placeholder="바꿀 내용..." spellcheck="false" autocomplete="off" />
-        </div>
-        <button id="btnReplaceOne" class="ghost" style="padding: 4px 8px; font-size: 11.5px;">바꾸기</button>
-        <button id="btnReplaceAll" class="ghost" style="padding: 4px 8px; font-size: 11.5px;">모두 바꾸기</button>
-      </div>
+      <button id="btnReplaceOne" class="ghost" style="padding: 4px 8px; font-size: 11.5px;">바꾸기</button>
+      <button id="btnReplaceAll" class="ghost" style="padding: 4px 8px; font-size: 11.5px;">모두 바꾸기</button>
     </div>
-
-    <textarea id="editor" spellcheck="false" placeholder="# 여기에 마크다운을 작성하세요..."></textarea>
   </div>
 
-  <!-- Draggable Divider -->
-  <div class="divider" id="dragDivider" title="드래그하여 분할 조절 (더블 클릭: 50:50 초기화)"></div>
-
-  <!-- Right Preview Pane -->
+  <!-- Notion Live Canvas Pane -->
   <div class="pane" id="panePreview">
     <div id="preview-container">
       <div id="preview"></div>
@@ -1718,10 +1617,8 @@
     </div>
   </div>
   <div class="status-right">
-    <span class="stat-pill" id="cursorPos">1행 1열</span>
     <span class="stat-pill" id="selectionCount" style="display:none;">0자 선택됨</span>
     <span class="stat-pill" id="stats">0자 · 1줄 · ~1분</span>
-    <button id="btnToggleWordWrap" class="stat-btn" title="자동 줄바꿈 켜기/끄기">줄바꿈: 켬</button>
   </div>
 </footer>
 
@@ -1774,9 +1671,10 @@
         <tr><td><kbd>Ctrl</kbd> + <kbd>F</kbd></td><td>본문 검색 (Find)</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>H</kbd></td><td>본문 찾기 및 바꾸기 (Find & Replace)</td></tr>
         <tr><td><kbd>Ctrl</kbd> + <kbd>B</kbd> / <kbd>I</kbd> / <kbd>K</kbd></td><td>선택 영역 굵게 / 기울임 / 하이퍼링크</td></tr>
-        <tr><td><kbd>Alt</kbd> + <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> / <kbd>4</kbd></td><td>노션(라이브) / 분할 / 에디터 / 미리보기 전환</td></tr>
-        <tr><td><kbd>/</kbd> (노션 모드)</td><td>블록 삽입 슬래시 명령어 메뉴 열기</td></tr>
-        <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd> + <kbd>Tab</kbd></td><td>다중 라인 2칸 들여쓰기 / 내어쓰기</td></tr>
+        <tr><td><kbd>/</kbd></td><td>블록 삽입 슬래시(/) 명령어 메뉴 열기</td></tr>
+        <tr><td>마우스 드래그</td><td>플로팅 서식 툴바 (굵게, 기울임, 취소선, 형광펜, 코드, 키캡, 링크 등)</td></tr>
+        <tr><td>언어 배지 클릭</td><td>코드 블록 프로그래밍 언어 실시간 변경</td></tr>
+        <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd> + <kbd>Tab</kbd></td><td>목록 및 테이블 셀 이동 / 들여쓰기</td></tr>
         <tr><td><kbd>Enter</kbd> (목록 중)</td><td>스마트 목록 번호 및 체크박스 자동 이어쓰기</td></tr>
         <tr><td><kbd>Esc</kbd></td><td>모달 창 / 검색창 / 슬래시 메뉴 / 설정 닫기</td></tr>
       </table>
@@ -1981,7 +1879,7 @@ const tocList = document.getElementById('tocList');
 const helpModal = document.getElementById('helpModal');
 
 // Search elements
-const btnOpenSearch = document.getElementById('btnOpenSearch');
+const btnHeaderSearch = document.getElementById('btnHeaderSearch');
 const searchBar = document.getElementById('searchBar');
 const findInput = document.getElementById('findInput');
 const searchMatchCount = document.getElementById('searchMatchCount');
@@ -2005,7 +1903,6 @@ const btnModalOpenFile = document.getElementById('btnModalOpenFile');
 const btnModalNewFile = document.getElementById('btnModalNewFile');
 
 // Notion Canvas elements
-const viewNotionBtn = document.getElementById('viewNotion');
 const slashMenu = document.getElementById('slashMenu');
 const floatingFormatBar = document.getElementById('floatingFormatBar');
 const inlineEditorCard = document.getElementById('inlineEditorCard');
@@ -2023,7 +1920,7 @@ let dirty = false;
 let isExternalDrop = false;
 let isSyncingLeft = false;
 let isSyncingRight = false;
-let currentViewMode = localStorage.getItem('mdeditor-view-mode') || 'notion';
+const currentViewMode = 'notion';
 
 // ---------- 토스트 알림 ----------
 let toastTimer = null;
@@ -2185,62 +2082,11 @@ document.addEventListener('selectionchange', () => {
   if (document.activeElement === editor) updateCursorPos();
 });
 
-// ---------- 뷰 모드 제어 ----------
-const viewEditorBtn = document.getElementById('viewEditor');
-const viewSplitBtn = document.getElementById('viewSplit');
-const viewPreviewBtn = document.getElementById('viewPreview');
-
-function setViewMode(mode) {
-  currentViewMode = mode;
-  localStorage.setItem('mdeditor-view-mode', mode);
-  
-  if (viewNotionBtn) viewNotionBtn.classList.toggle('active', mode === 'notion');
-  if (viewSplitBtn) viewSplitBtn.classList.toggle('active', mode === 'split');
-  if (viewEditorBtn) viewEditorBtn.classList.toggle('active', mode === 'editor');
-  if (viewPreviewBtn) viewPreviewBtn.classList.toggle('active', mode === 'preview');
-
-  closeSlashMenu();
-  closeInlineEditor();
-  if (floatingFormatBar) floatingFormatBar.classList.remove('open');
-
-  if (mode === 'notion') {
-    document.body.classList.add('notion-view');
-    paneEditor.style.display = 'none';
-    dragDivider.style.display = 'none';
-    panePreview.style.display = 'flex';
-    panePreview.style.flex = '1 1 100%';
-    setupNotionBlocks();
-  } else if (mode === 'editor') {
-    document.body.classList.remove('notion-view');
-    paneEditor.style.display = 'flex';
-    paneEditor.style.flex = '1 1 100%';
-    dragDivider.style.display = 'none';
-    panePreview.style.display = 'none';
-  } else if (mode === 'preview') {
-    document.body.classList.remove('notion-view');
-    paneEditor.style.display = 'none';
-    dragDivider.style.display = 'none';
-    panePreview.style.display = 'flex';
-    panePreview.style.flex = '1 1 100%';
-  } else {
-    document.body.classList.remove('notion-view');
-    paneEditor.style.display = 'flex';
-    dragDivider.style.display = 'block';
-    panePreview.style.display = 'flex';
-    const savedRatio = localStorage.getItem('mdeditor-split-ratio');
-    if (savedRatio) {
-      paneEditor.style.flex = `0 0 ${savedRatio}%`;
-      panePreview.style.flex = `1 1 0%`;
-    } else {
-      paneEditor.style.flex = '1 1 0%';
-      panePreview.style.flex = '1 1 0%';
-    }
-  }
+// ---------- 노션 통합 라이브 캔버스 전용 모드 ----------
+function setViewMode() {
+  document.body.classList.add('notion-view');
+  setupNotionBlocks();
 }
-if (viewNotionBtn) viewNotionBtn.addEventListener('click', () => setViewMode('notion'));
-viewEditorBtn.addEventListener('click', () => setViewMode('editor'));
-viewSplitBtn.addEventListener('click', () => setViewMode('split'));
-viewPreviewBtn.addEventListener('click', () => setViewMode('preview'));
 
 // ---------- 노션 통합 라이브 캔버스 엔진 (DOM <-> Markdown) ----------
 let previewSyncTimer = null;
@@ -3488,69 +3334,9 @@ if (btnApplyInlineEditor) {
   };
 }
 
-setViewMode(currentViewMode);
-
-// ---------- 분할 드래그 리사이저 ----------
-let isDragging = false;
-dragDivider.addEventListener('mousedown', (e) => {
-  e.preventDefault();
-  isDragging = true;
-  document.body.classList.add('resizing');
-  dragDivider.classList.add('active');
-});
-
-window.addEventListener('mousemove', (e) => {
-  if (!isDragging) return;
-  const containerWidth = paneEditor.parentElement.clientWidth;
-  if (containerWidth <= 0) return;
-  const offset = e.clientX - paneEditor.parentElement.getBoundingClientRect().left;
-  const minWidth = 200;
-  if (offset >= minWidth && offset <= containerWidth - minWidth) {
-    const percentage = (offset / containerWidth) * 100;
-    paneEditor.style.flex = `0 0 ${percentage}%`;
-    panePreview.style.flex = `1 1 0%`;
-    localStorage.setItem('mdeditor-split-ratio', percentage.toFixed(2));
-  }
-});
-
-window.addEventListener('mouseup', () => {
-  if (isDragging) {
-    isDragging = false;
-    document.body.classList.remove('resizing');
-    dragDivider.classList.remove('active');
-  }
-});
-
-dragDivider.addEventListener('dblclick', () => {
-  paneEditor.style.flex = '1 1 0%';
-  panePreview.style.flex = '1 1 0%';
-  localStorage.removeItem('mdeditor-split-ratio');
-  setStatus('화면 분할 50:50 초기화');
-});
-
-// ---------- 스크롤 동기화 & TOC Scroll Spy ----------
-editor.addEventListener('scroll', () => {
-  if (isSyncingLeft) { isSyncingLeft = false; return; }
-  isSyncingRight = true;
-  const maxLeft = editor.scrollHeight - editor.clientHeight;
-  const maxRight = previewContainer.scrollHeight - previewContainer.clientHeight;
-  if (maxLeft > 0 && maxRight > 0) {
-    const ratio = editor.scrollTop / maxLeft;
-    previewContainer.scrollTop = ratio * maxRight;
-  }
-});
+setViewMode();
 
 previewContainer.addEventListener('scroll', () => {
-  if (isSyncingRight) { isSyncingRight = false; }
-  else {
-    isSyncingLeft = true;
-    const maxLeft = editor.scrollHeight - editor.clientHeight;
-    const maxRight = previewContainer.scrollHeight - previewContainer.clientHeight;
-    if (maxLeft > 0 && maxRight > 0) {
-      const ratio = previewContainer.scrollTop / maxRight;
-      editor.scrollTop = ratio * maxLeft;
-    }
-  }
   syncTocActiveHeading();
 });
 
@@ -4082,10 +3868,12 @@ function closeSearch() {
   }
 }
 
-btnOpenSearch.addEventListener('click', () => {
-  if (searchBar.classList.contains('open')) closeSearch();
-  else openSearch();
-});
+if (btnHeaderSearch) {
+  btnHeaderSearch.addEventListener('click', () => {
+    if (searchBar.classList.contains('open')) closeSearch();
+    else openSearch();
+  });
+}
 btnCloseSearch.addEventListener('click', closeSearch);
 
 btnToggleReplace.addEventListener('click', () => {
@@ -4726,21 +4514,13 @@ document.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'f') { e.preventDefault(); openSearch(false); }
     if (e.key.toLowerCase() === 'h') { e.preventDefault(); openSearch(true); }
     if (e.key.toLowerCase() === 'k') {
-      if (currentViewMode === 'notion') {
-        e.preventDefault();
-        const url = prompt('링크 URL (https://...):', 'https://');
-        if (url) {
-          document.execCommand('createLink', false, url);
-          syncFromPreview();
-        }
+      e.preventDefault();
+      const url = prompt('링크 URL (https://...):', 'https://');
+      if (url) {
+        document.execCommand('createLink', false, url);
+        syncFromPreview();
       }
     }
-  }
-  if (e.altKey) {
-    if (e.key === '1') { e.preventDefault(); setViewMode('notion'); }
-    if (e.key === '2') { e.preventDefault(); setViewMode('split'); }
-    if (e.key === '3') { e.preventDefault(); setViewMode('editor'); }
-    if (e.key === '4') { e.preventDefault(); setViewMode('preview'); }
   }
   if (e.key === 'F1') {
     e.preventDefault();
@@ -4789,7 +4569,7 @@ const WELCOME_DOC = `# Notion 스타일 통합 라이브 캔버스 에디터
 - **슬래시 명령어**: 빈 줄에서 \`/\`를 입력하면 H1, H2, 할 일, 콜아웃, 수식, 다이어그램 등 블록 메뉴가 팝업됩니다.
 - **선택 툴바**: 텍스트를 드래그하면 굵게, 기울임, 형광펜, 코드, 링크 퀵바가 뜹니다.
 - **원클릭 체크박스**: 아래 할 일 목록을 클릭하여 상태를 바로 전환할 수 있습니다.
-- **클래식 분할 뷰 지원**: 상단 중앙에서 [분할] 또는 [에디터] 버튼(단축키 \`Alt+1 ~ 4\`)으로 언제든 자유롭게 전환 가능합니다.
+- **코드 블록 인플레이스 편집**: 코드 블록 내부를 직접 타이핑하고 언어 배지를 클릭하여 실시간으로 언어를 변경할 수 있습니다.
 
 ---
 
