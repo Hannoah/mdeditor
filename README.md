@@ -2,7 +2,7 @@
 
 **Rust로 만든 순수 로컬 Markdown 편집기 — 브라우저·웹뷰·로컬 서버 없이 네이티브 창 하나로 동작합니다.**
 
-![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~7MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-51%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~7MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-12%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
@@ -95,15 +95,17 @@ cargo run --release -- memo.md      # 파일 열기 (상위 폴더가 작업 폴
 ## 🏗️ 구조
 
 ```
-src/main.rs        네이티브 앱 (UI, 편집 연산, 파일 I/O, 미리보기 연결)
-src/markdown.rs    Markdown → HTML 변환기 (HTML 내보내기에 사용)
+src/main.rs        네이티브 앱 전체 (UI, 편집 연산, 파일 I/O, 미리보기, HTML 내보내기)
 installer/         std 전용 단일 파일 설치 프로그램 (mdeditor.exe 내장)
+install.ps1        설치 (소스 빌드 / 포터블 zip / 설치 파일 공용), uninstall.ps1 제거
+package.ps1        배포 빌드: 테스트 → 릴리즈 → 설치 파일 → zip → SHA256
 ```
 
 | 의존성 | 용도 |
 |---|---|
 | `eframe` (glow) | 네이티브 창, OpenGL 렌더링, 클립보드, 설정 저장 |
 | `egui_commonmark` | 미리보기 렌더링 (pulldown-cmark) |
+| `pulldown-cmark` | HTML 내보내기 (미리보기와 같은 파서) |
 | `egui_extras` + `image` | 로컬 이미지 로딩, 앱 아이콘, PNG 인코딩 |
 | `rfd` | 운영체제 기본 폴더/파일 대화상자 |
 
@@ -112,7 +114,7 @@ installer/         std 전용 단일 파일 설치 프로그램 (mdeditor.exe �
 ## 🧪 테스트
 
 ```bash
-cargo test                                    # 51개
+cargo test                                    # 12개
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

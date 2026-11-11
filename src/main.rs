@@ -9,7 +9,6 @@ use eframe::egui;
 use egui::text::{CCursor, CCursorRange};
 use egui::{Key, Modifiers};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
-mod markdown;
 
 const AUTO_SAVE_DELAY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 5000; // ponytail: 거대한 폴더(예: 사용자 홈) 스캔 상한
@@ -586,7 +585,23 @@ fn apply_preview_change(text: &mut String, before: &str, after: &str) -> bool {
     true
 }
 
+// 미리보기와 같은 파서(pulldown-cmark)·같은 전처리를 써서 화면과 내보낸 결과가 일치한다
 fn export_html(title: &str, md: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let opts = Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_DEFINITION_LIST
+        | Options::ENABLE_MATH
+        | Options::ENABLE_GFM;
+    let src = preprocess(md);
+    let mut body = String::new();
+    html::push_html(&mut body, Parser::new_ext(&src, opts));
+    let title = title
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     format!(
         r#"<!DOCTYPE html>
 <html lang="ko">
@@ -602,18 +617,18 @@ fn export_html(title: &str, md: &str) -> String {
   th {{ background: #f8fafc; font-weight: 600; }}
   pre {{ background: #f1f5f9; padding: 16px 20px; border-radius: 8px; overflow-x: auto; }}
   code {{ font-family: Consolas, monospace; }}
-  blockquote {{ border-left: 3px solid #0284c7; margin: 16px 0; padding: 6px 16px; background: #f0f9ff; }}
-  .callout {{ padding: 14px 18px; margin: 16px 0; border-radius: 8px; border: 1px solid #e2e8f0; }}
-  mark {{ background: #fef08a; }}
+  blockquote {{ border-left: 3px solid #94a3b8; margin: 16px 0; padding: 6px 16px; background: #f8fafc; }}
+  .markdown-alert-note, .markdown-alert-tip {{ border-color: #0284c7; background: #f0f9ff; }}
+  .markdown-alert-important {{ border-color: #7c3aed; background: #f5f3ff; }}
+  .markdown-alert-warning, .markdown-alert-caution {{ border-color: #d97706; background: #fffbeb; }}
+  ul:has(> li > input[type=checkbox]) {{ list-style: none; padding-left: 8px; }}
 </style>
 </head>
 <body>
-{}
+{body}
 </body>
 </html>
-"#,
-        // 공유 렌더러는 로컬 이미지를 레거시 서버 경로(/api/raw?file=)로 바꾼다 → 문서 기준 상대 경로로 되돌림
-        markdown::to_html(md).replace("src=\"/api/raw?file=", "src=\"")
+"#
     )
 }
 
@@ -922,6 +937,22 @@ impl App {
         egui::Id::unique(("editor", name))
     }
 
+    // 저장 안 된 문서는 이름 앞에 ● 표시
+    fn label(&self, name: &str) -> String {
+        if self.docs.get(name).is_some_and(Doc::dirty) {
+            format!("● {name}")
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn ask_rename(&mut self, name: &str) {
+        self.dialog = Some(Dialog::Rename {
+            from: name.to_string(),
+            to: name.to_string(),
+        });
+    }
+
     fn cursor(&self, ctx: &egui::Context) -> Sel {
         let Some(name) = &self.current else {
             return (0, 0);
@@ -1170,10 +1201,7 @@ impl App {
         }
         if k(Modifiers::NONE, Key::F2) {
             if let Some(n) = self.current.clone() {
-                self.dialog = Some(Dialog::Rename {
-                    to: n.clone(),
-                    from: n,
-                });
+                self.ask_rename(&n);
             }
         }
         for (key, view) in [
@@ -1196,7 +1224,6 @@ impl App {
         if !ctx.memory(|m| m.has_focus(Self::editor_id(&name))) {
             return;
         }
-        let k = |m, key| ctx.input_mut(|i| i.consume_key(m, key));
         if k(cmd, Key::B) {
             self.run_tool(ctx, &Tool::Wrap("**", "**", "굵게"));
         }
@@ -1357,8 +1384,7 @@ impl eframe::App for App {
 impl App {
     fn title_bar(&self, ctx: &egui::Context) {
         let title = match &self.current {
-            Some(n) if self.docs.get(n).is_some_and(Doc::dirty) => format!("● {n} — MDEditor"),
-            Some(n) => format!("{n} — MDEditor"),
+            Some(n) => format!("{} — MDEditor", self.label(n)),
             None => "MDEditor".into(),
         };
         // ponytail: 매 프레임 전송하지만 winit이 같은 제목은 무시한다
@@ -1366,7 +1392,6 @@ impl App {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
             if ui
                 .button("📂 폴더")
@@ -1390,24 +1415,15 @@ impl App {
             }
             ui.separator();
             if let Some(name) = self.current.clone() {
-                let dirty = self.docs.get(&name).is_some_and(Doc::dirty);
-                let label = if dirty {
-                    format!("● {name}")
-                } else {
-                    name.clone()
-                };
                 if ui
                     .add(
-                        egui::Label::new(egui::RichText::new(label).strong())
+                        egui::Label::new(egui::RichText::new(self.label(&name)).strong())
                             .sense(egui::Sense::click()),
                     )
                     .on_hover_text("클릭해서 이름 변경 (F2)")
                     .clicked()
                 {
-                    self.dialog = Some(Dialog::Rename {
-                        to: name.clone(),
-                        from: name,
-                    });
+                    self.ask_rename(&name);
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1446,7 +1462,6 @@ impl App {
                     .on_hover_text("Alt+1");
             });
         });
-        let _ = ctx;
     }
 
     fn export(&mut self) {
@@ -1554,22 +1569,13 @@ impl App {
             }
             for name in shown {
                 let selected = self.current.as_deref() == Some(name.as_str());
-                let dirty = self.docs.get(&name).is_some_and(Doc::dirty);
-                let label = if dirty {
-                    format!("● {name}")
-                } else {
-                    name.clone()
-                };
-                let r = ui.selectable_label(selected, label);
+                let r = ui.selectable_label(selected, self.label(&name));
                 if r.clicked() {
                     self.open_file(&name);
                 }
                 r.context_menu(|ui| {
                     if ui.button("이름 변경").clicked() {
-                        self.dialog = Some(Dialog::Rename {
-                            to: name.clone(),
-                            from: name.clone(),
-                        });
+                        self.ask_rename(&name);
                         ui.close();
                     }
                     if ui.button("삭제").clicked() {
@@ -1642,7 +1648,7 @@ impl App {
     }
 
     fn find_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let count = self
+        let matches = self
             .current
             .as_ref()
             .and_then(|n| self.docs.get(n))
@@ -1665,8 +1671,8 @@ impl App {
             }
             ui.toggle_value(&mut self.find.case, "Aa")
                 .on_hover_text("대소문자 구분");
-            let idx = count.iter().position(|&m| m == sel).map_or(0, |i| i + 1);
-            ui.label(format!("{idx}/{}", count.len()));
+            let idx = matches.iter().position(|&m| m == sel).map_or(0, |i| i + 1);
+            ui.label(format!("{idx}/{}", matches.len()));
             if ui.small_button("◀").clicked() {
                 self.find_step(ctx, false);
             }
@@ -1789,7 +1795,7 @@ impl App {
         let Some(mut dialog) = self.dialog.take() else {
             return;
         };
-        let mut close = false;
+        let (mut close, mut cancel) = (false, false);
         let mut error: Option<String> = None;
         let modal = egui::Modal::new(egui::Id::unique("dialog")).show(ctx, |ui| {
             ui.set_min_width(360.0);
@@ -1873,10 +1879,7 @@ impl App {
                             close = true;
                         }
                         if ui.button("취소").clicked() {
-                            if let Dialog::Unsaved(after) = &mut dialog {
-                                *after = After::Switch(PathBuf::new(), None); // 표시: 취소
-                            }
-                            close = true;
+                            cancel = true;
                         }
                     });
                 }
@@ -1917,26 +1920,14 @@ impl App {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
         });
-        if modal.should_close() {
-            close = true;
-            if let Dialog::Unsaved(after) = &mut dialog {
-                *after = After::Switch(PathBuf::new(), None);
-            }
-        }
-        if error.is_some() {
-            self.status = error.unwrap_or_default();
+        cancel |= modal.should_close();
+        if let Some(e) = error {
+            self.status = e;
             self.dialog = Some(dialog);
-            return;
-        }
-        if !close {
+        } else if !close && !cancel {
             self.dialog = Some(dialog);
-            return;
-        }
-        if let Dialog::Unsaved(after) = dialog {
-            // 빈 경로 Switch는 '취소' 표시
-            if !matches!(&after, After::Switch(p, _) if p.as_os_str().is_empty()) {
-                self.finish(after);
-            }
+        } else if let (false, Dialog::Unsaved(after)) = (cancel, dialog) {
+            self.finish(after); // 취소면 닫기/폴더 전환을 하지 않고 대화상자만 닫는다
         }
     }
 }
@@ -2108,9 +2099,15 @@ mod tests {
     }
 
     #[test]
-    fn exported_html_uses_relative_image_paths() {
-        let html = export_html("t", "![a](images/p.png)");
+    fn exported_html_matches_preview_syntax() {
+        let html = export_html(
+            "a<b",
+            "![a](images/p.png)\n\n==형광== [[Ctrl]]\n\n- [x] 끝\n\n> [!NOTE]\n> 메모",
+        );
         assert!(html.contains("src=\"images/p.png\""), "{html}");
-        assert!(!html.contains("/api/raw"));
+        assert!(html.contains("<title>a&lt;b"));
+        assert!(html.contains("<strong>형광</strong> <code>Ctrl</code>"));
+        assert!(html.contains("checked"));
+        assert!(html.contains("markdown-alert-note"));
     }
 }

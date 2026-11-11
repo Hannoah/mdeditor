@@ -1,11 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// MDEditor Production Single-File Windows Installer
-// Copyright (c) 2026 MDEditor Team. All rights reserved.
-// 제로 의존성(std) 기반 단일 실행 파일(.exe) 독립 인스톨러
+// MDEditor 단일 파일 설치 프로그램 (std + Win32 MessageBox만 사용)
+// mdeditor.exe·아이콘·제거 스크립트를 내장하고, 시스템 등록은 내장 install.ps1에 맡긴다.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const MDEDITOR_EXE: &[u8] = include_bytes!("../../target/release/mdeditor.exe");
@@ -13,6 +12,7 @@ const APP_ICO: &[u8] = include_bytes!("../../app.ico");
 const UNINSTALL_BAT: &[u8] = include_bytes!("../../uninstall.bat");
 const UNINSTALL_PS1: &[u8] = include_bytes!("../../uninstall.ps1");
 const INSTALL_PS1: &[u8] = include_bytes!("../../install.ps1");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(windows)]
 mod win32 {
@@ -67,15 +67,17 @@ fn main() {
 
     #[cfg(windows)]
     if !silent {
-        let prompt = "MDEditor v0.2.0을 이 컴퓨터에 설치하시겠습니까?\n\n\
+        let prompt = format!(
+            "MDEditor v{VERSION}을 이 컴퓨터에 설치하시겠습니까?\n\n\
                       • 설치 위치: %LOCALAPPDATA%\\Programs\\mdeditor\n\
                       • .md 및 .markdown 파일 기본 연결\n\
                       • Windows 탐색기 'MDEditor로 이 폴더 열기' 등록\n\
                       • 시작 메뉴 및 바탕화면 바로가기 생성\n\
-                      • Windows 설정 '설치된 앱' 등록 (제어판 1-클릭 제거 지원)";
+                      • Windows 설정 '설치된 앱' 등록 (제어판 1-클릭 제거 지원)"
+        );
         let res = win32::message_box(
             "MDEditor 설치 마법사",
-            prompt,
+            &prompt,
             win32::MB_YESNO | win32::MB_ICONQUESTION,
         );
         if res != win32::IDYES {
@@ -117,10 +119,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 3. 임베디드 파일 복사
-    let write_file = |path: &Path, bytes: &[u8]| -> std::io::Result<()> { fs::write(path, bytes) };
-
-    if let Err(e) = write_file(&target_exe, MDEDITOR_EXE) {
+    // 3. 내장 파일 복사
+    if let Err(e) = fs::write(&target_exe, MDEDITOR_EXE) {
         #[cfg(windows)]
         if !silent {
             win32::message_box(
@@ -132,38 +132,45 @@ fn main() {
         std::process::exit(1);
     }
 
-    let _ = write_file(&install_dir.join("app.ico"), APP_ICO);
-    let _ = write_file(&install_dir.join("uninstall.bat"), UNINSTALL_BAT);
-    let _ = write_file(&install_dir.join("uninstall.ps1"), UNINSTALL_PS1);
+    let _ = fs::write(install_dir.join("app.ico"), APP_ICO);
+    let _ = fs::write(install_dir.join("uninstall.bat"), UNINSTALL_BAT);
+    let _ = fs::write(install_dir.join("uninstall.ps1"), UNINSTALL_PS1);
 
-    // 4. Windows 레지스트리 및 바로가기 등록 (임베디드 install.ps1 스크립트 실행)
+    // 4. 파일 연결·바로가기·설치된 앱 등록 (내장 install.ps1, 방금 복사한 exe를 원본으로 지정)
     let temp_script =
         std::env::temp_dir().join(format!("mdeditor-setup-{}.ps1", std::process::id()));
-    if write_file(&temp_script, INSTALL_PS1).is_ok() {
-        let _ = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                &temp_script.to_string_lossy(),
-                "-Quiet",
-            ])
-            .output();
-        let _ = fs::remove_file(&temp_script);
+    let registered = fs::write(&temp_script, INSTALL_PS1).is_ok()
+        && Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&temp_script)
+            .args(["-Quiet", "-SourceExe"])
+            .arg(&target_exe)
+            .output()
+            .is_ok_and(|o| o.status.success());
+    let _ = fs::remove_file(&temp_script);
+    #[cfg(windows)]
+    if !registered && !silent {
+        win32::message_box(
+            "MDEditor 설치 경고",
+            "프로그램은 설치되었지만 파일 연결·바로가기 등록에 실패했습니다.\n\
+             설치 폴더의 mdeditor.exe는 직접 실행할 수 있습니다.",
+            win32::MB_ICONERROR,
+        );
     }
 
     // 5. 완료 알림 및 실행 안내
     #[cfg(windows)]
     if !silent {
-        let success_msg = "✨ MDEditor v0.2.0 설치가 성공적으로 완료되었습니다!\n\n\
+        let success_msg = format!(
+            "✨ MDEditor v{VERSION} 설치가 성공적으로 완료되었습니다!\n\n\
                            • .md 파일을 더블클릭하면 MDEditor로 열립니다.\n\
                            • 폴더 우클릭 -> 'MDEditor로 이 폴더 열기'를 지원합니다.\n\
                            • 언제든 Windows 설정의 '설치된 앱'에서 제거할 수 있습니다.\n\n\
-                           지금 MDEditor를 실행하시겠습니까?";
+                           지금 MDEditor를 실행하시겠습니까?"
+        );
         let res = win32::message_box(
             "MDEditor 설치 완료",
-            success_msg,
+            &success_msg,
             win32::MB_YESNO | win32::MB_ICONINFORMATION,
         );
         if res == win32::IDYES {

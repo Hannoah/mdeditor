@@ -12,6 +12,8 @@ egui_extras = { version = "0.37", features = ["image", "file"] }
 egui_commonmark = "0.26"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 rfd = "0.18"
+# HTML 내보내기 (egui_commonmark가 이미 쓰는 파서, html 기능만 추가)
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 [[bin]]
 name = "mdeditor"

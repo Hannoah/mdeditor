@@ -5,7 +5,8 @@
 param(
     [switch]$Quiet,
     [switch]$NoDesktopShortcut,
-    [switch]$RunAfterInstall
+    [switch]$RunAfterInstall,
+    [string]$SourceExe   # 단일 설치 파일이 이미 풀어 둔 exe 경로를 넘긴다
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -16,7 +17,7 @@ if (-not $Quiet) {
 $AppName = "MDEditor"
 $AppVersion = "0.2.0"
 $AppPublisher = "MDEditor Team"
-$AppDescription = "초경량 무의존성 Markdown 데스크톱 편집기 & 미리보기"
+$AppDescription = "Rust 네이티브 Markdown 편집기 & 미리보기"
 
 function Write-Step {
     param([string]$Step, [string]$Message)
@@ -65,7 +66,6 @@ if (-not $Quiet) {
 
 $scriptDir = $PSScriptRoot
 if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
-$releaseExe = Join-Path $scriptDir "target\release\mdeditor.exe"
 $installDir = Join-Path $env:LOCALAPPDATA "Programs\mdeditor"
 $targetExe = Join-Path $installDir "mdeditor.exe"
 $targetIco = Join-Path $installDir "app.ico"
@@ -80,17 +80,28 @@ if ($running) {
 }
 Write-Success "프로세스 상태 정상"
 
-# 2. 릴리즈 바이너리 확인 및 필요 시 자동 빌드
+# 2. 설치할 바이너리 결정: 설치 파일이 넘긴 경로 > 포터블 zip의 mdeditor.exe > 소스에서 릴리즈 빌드
 Write-Step "2/6" "릴리즈 바이너리 준비"
-if (-not (Test-Path $releaseExe)) {
-    Write-WarningMsg "빌드된 바이너리가 없습니다. Cargo로 릴리즈 빌드를 진행합니다..."
+$portableExe = Join-Path $scriptDir "mdeditor.exe"
+if ($SourceExe) {
+    $releaseExe = $SourceExe
+} elseif (Test-Path $portableExe) {
+    $releaseExe = $portableExe
+} else {
+    # 오래된 바이너리가 설치되지 않도록 항상 빌드 (변경이 없으면 즉시 끝난다)
+    $releaseExe = Join-Path $scriptDir "target\release\mdeditor.exe"
     Push-Location $scriptDir
     cargo build --release
+    $buildOk = $LASTEXITCODE -eq 0
     Pop-Location
-    if (-not (Test-Path $releaseExe)) {
+    if (-not $buildOk) {
         Write-ErrorMsg "바이너리 빌드에 실패했습니다. Rust(https://rustup.rs) 설치 상태를 확인하세요."
         exit 1
     }
+}
+if (-not (Test-Path $releaseExe)) {
+    Write-ErrorMsg "설치할 mdeditor.exe를 찾을 수 없습니다: $releaseExe"
+    exit 1
 }
 $binarySizeKb = [Math]::Round((Get-Item $releaseExe).Length / 1KB, 1)
 Write-Success "바이너리 준비 완료 ($releaseExe, $binarySizeKb KB)"
@@ -102,7 +113,9 @@ if (-not (Test-Path $installDir)) {
 }
 
 try {
-    Copy-Item -Path $releaseExe -Destination $targetExe -Force
+    if ((Resolve-Path $releaseExe).Path -ne $targetExe) {
+        Copy-Item -Path $releaseExe -Destination $targetExe -Force
+    }
     Write-Success "mdeditor.exe 복사 완료"
 
     $sourceIco = Join-Path $scriptDir "app.ico"

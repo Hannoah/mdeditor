@@ -132,6 +132,8 @@ if (Test-Path $installDir) {
         Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
         Write-Success "설치 디렉토리 삭제 완료"
     }
+    # 앱 설정(마지막 폴더·보기·창 크기). 문서 파일은 건드리지 않는다.
+    Remove-Item -Path (Join-Path $env:APPDATA "mdeditor") -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # 셸 캐시 갱신

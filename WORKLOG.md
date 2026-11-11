@@ -1,10 +1,26 @@
 # MDEditor 작업 기록
 
+## 2026-11-11 — 레거시 정리 및 설치 파일 수정
+
+### 1. 레거시 제거
+- 웹 시절 자체 변환기 `src/markdown.rs`(1,763줄, `/api/raw` 서버 경로 매핑 포함) 삭제. HTML 내보내기는 미리보기와 같은 `pulldown-cmark` + 같은 전처리로 생성 → 화면과 결과 일치(GitHub 알림 클래스, 체크박스, 형광펜·키캡 동일 처리).
+- 오래된 v0.1.0(웹 버전) 산출물이 남아 있던 `dist/`를 비우고 네이티브 v0.2.0으로 재생성.
+
+### 2. 설치 버그 수정
+- 단일 설치 파일이 내장 `install.ps1`을 임시 폴더에서 실행하면 `target\release\mdeditor.exe`를 찾다가 종료 → 파일 연결·바로가기·설치된 앱 등록이 전혀 안 되던 문제. `-SourceExe` 인자로 방금 복사한 exe를 넘기고, 등록 실패 시 경고 창 표시.
+- 포터블 zip의 `install.bat`도 같은 이유로 실패하던 문제: 스크립트 옆 `mdeditor.exe`를 우선 사용.
+- 소스에서 `install.bat` 실행 시 항상 `cargo build --release` → 예전 바이너리가 설치되지 않음.
+- 제거 시 앱 설정(`%APPDATA%\mdeditor`)도 삭제. 설치 프로그램 버전 문구는 `CARGO_PKG_VERSION`에서 가져옴.
+
+### 3. 코드 정리 (`src/main.rs`)
+- 미저장 확인 대화상자의 '빈 경로 = 취소' 표식을 `cancel` 플래그로 교체, 이름 변경·● 표시 중복 코드를 `ask_rename`/`label`로 통합, 쓰지 않는 변수·중복 클로저 제거.
+- `cargo test` 12개 통과, clippy·fmt 클린.
+
 ## 2026-11-11 — 네이티브 앱을 기본 mdeditor.exe로 전환 (웹 기반 실행 종료)
 
 ### 1. 바이너리 구성 변경
 - `mdeditor` = 네이티브 앱(`src/main.rs`, eframe/egui). 설치·패키징 스크립트는 파일명이 같아 수정 없이 네이티브 앱을 배포.
-- 이전 웹 서버 버전(`src/main.rs` HTTP 서버 + `src/index.html` UI)과 `src/lib.rs`를 삭제. `markdown` 모듈은 `main.rs`에서 `mod markdown;`으로 직접 사용. `native` 피처 제거, eframe 필수 의존성화.
+- 이전 웹 서버 버전(`src/main.rs` HTTP 서버 + `src/index.html` UI)과 `src/lib.rs`를 삭제. `native` 피처 제거, eframe 필수 의존성화.
 - 렌더러를 wgpu → glow로 교체: 릴리즈 9.4 MB → 7.0 MB, 실행 메모리 384 MB → 150 MB (동일 화면 실측).
 - 버전 0.2.0 (Cargo.toml, installer, install.ps1, package.ps1).
 
