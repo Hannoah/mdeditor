@@ -15,7 +15,7 @@ if (-not $Quiet) {
 }
 
 $AppName = "MDEditor"
-$AppVersion = "0.2.0"
+$AppVersion = "0.3.0"
 $AppPublisher = "MDEditor Team"
 $AppDescription = "Rust 네이티브 Markdown 편집기 & 미리보기"
 
