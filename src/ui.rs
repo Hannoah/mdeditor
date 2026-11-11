@@ -20,6 +20,13 @@ impl eframe::App for App {
                 self.dialog = Some(Dialog::Unsaved(After::Close));
             }
         }
+        if ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::WindowFocused(true)))
+        }) {
+            self.sync_from_disk();
+        }
         self.handle_drops(&ctx);
         let pasted: Vec<_> = ctx.input(|i| {
             i.events
@@ -38,6 +45,8 @@ impl eframe::App for App {
         self.title_bar(&ctx);
 
         let p = theme::pal(self.dark);
+        // 패널 구분선 자리(1px)는 아무도 칠하지 않는다 → 배경을 먼저 깔아야 선이 은은하게 보인다
+        ui.painter().rect_filled(ui.max_rect(), 0.0, p.bg);
         egui::Panel::top("header")
             .frame(
                 Frame::new()
@@ -161,7 +170,7 @@ fn row(
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-fn primary(ui: &mut egui::Ui, p: &Pal, text: &str) -> egui::Response {
+pub(crate) fn primary(ui: &mut egui::Ui, p: &Pal, text: &str) -> egui::Response {
     ui.add(
         egui::Button::new(
             RichText::new(text)
@@ -176,7 +185,12 @@ fn primary(ui: &mut egui::Ui, p: &Pal, text: &str) -> egui::Response {
     )
 }
 
-fn ghost(ui: &mut egui::Ui, p: &Pal, text: &str, color: Option<Color32>) -> egui::Response {
+pub(crate) fn ghost(
+    ui: &mut egui::Ui,
+    p: &Pal,
+    text: &str,
+    color: Option<Color32>,
+) -> egui::Response {
     let c = color.unwrap_or(p.text);
     let border = color.map_or(p.border, |c| c.gamma_multiply(0.35));
     ui.add(
@@ -387,17 +401,20 @@ struct EditorOut {
     changed: Option<String>,
     fmt: Option<Fmt>,
     slash: Option<usize>,
+    interacted: bool,
 }
 
 impl App {
-    fn title_bar(&self, ctx: &egui::Context) {
+    fn title_bar(&mut self, ctx: &egui::Context) {
         let title = match &self.current {
             Some(n) if self.docs.get(n).is_some_and(Doc::dirty) => format!("● {n} — MDEditor"),
             Some(n) => format!("{n} — MDEditor"),
             None => "MDEditor".into(),
         };
-        // ponytail: 매 프레임 전송하지만 winit이 같은 제목은 무시한다
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        if title != self.last_title {
+            self.last_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
     }
 
     // ---------- 상단 바 (웹: 항상 왼쪽 정렬된 한 줄) ----------
@@ -481,7 +498,7 @@ impl App {
             )
             .clicked()
             {
-                self.open_find(false);
+                self.open_find(&ctx, false);
             }
             if icon_btn(ui, p, theme::IMAGE, "이미지 삽입 (Ctrl+Shift+I)").clicked() {
                 self.dialog = Some(Dialog::Image {
@@ -567,6 +584,16 @@ impl App {
             self.guarded(After::Close);
             ui.close();
         }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(concat!("MDEditor v", env!("CARGO_PKG_VERSION")))
+                    .size(11.0)
+                    .color(p.faint),
+            );
+        });
+        ui.add_space(2.0);
     }
 
     // ---------- 하단 상태바 ----------
@@ -591,8 +618,8 @@ impl App {
                 return;
             };
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                let chars = char_len(&doc.text);
-                let lines = doc.text.split('\n').count();
+                let chars = doc.chars;
+                let lines = doc.lines;
                 ui.label(
                     RichText::new(format!(
                         "{chars}자 · {lines}줄 · ~{}분",
@@ -603,7 +630,7 @@ impl App {
                     .color(p.faint),
                 );
                 let (a, b) = self.cursor(ui.ctx());
-                if b > a && self.active.is_some() {
+                if b > a && (self.active.is_some() || self.block_sel.is_some()) {
                     ui.label(
                         RichText::new(format!("{}자 선택됨", b - a))
                             .family(FontFamily::Monospace)
@@ -624,6 +651,9 @@ impl App {
         };
         let shown = Duration::from_millis(2500);
         let Some(left) = shown.checked_sub(t.elapsed()) else {
+            // 지나간 알림은 비운다 → 같은 알림(예: 연속 Ctrl+S)도 다시 뜬다
+            self.status.clear();
+            self.toast.0.clear();
             return;
         };
         ctx.request_repaint_after(left);
@@ -667,8 +697,7 @@ impl App {
         let Some(doc) = self.doc() else {
             return;
         };
-        let text = doc.text.clone();
-        let items = outline(&text);
+        let items = doc.outline.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
             Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -679,8 +708,7 @@ impl App {
                             .color(p.faint),
                     );
                 }
-                for (level, title, _, ci) in items {
-                    let b = byte_idx(&text, ci);
+                for (level, title, _, _, b) in items {
                     let active = self.toc_active == Some(b);
                     let indent = match level {
                         1 => 0.0,
@@ -714,20 +742,17 @@ impl App {
         let ctx = ui.ctx().clone();
         let area = ui.max_rect();
         let Some(name) = self.current.clone() else {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    RichText::new("폴더 아이콘(Ctrl+O)으로 문서를 열거나 + 로 새 파일을 만드세요.\n.md 파일이나 폴더를 창에 끌어다 놓아도 됩니다.")
-                        .size(14.0)
-                        .color(p.faint),
-                );
-            });
+            self.welcome(ui, p);
             return;
         };
+        if self.block_heights.len() > 20_000 {
+            self.block_heights.clear(); // 오래 편집하면 쌓이는 높이 캐시 상한
+        }
         if let Some(sel) = self.pending_sel.take() {
             self.place_cursor(&ctx, &name, sel);
         }
         let text = self.docs[&name].text.clone();
-        let blocks = split_blocks(&text);
+        let blocks = self.docs[&name].blocks.clone();
         let active = self.active_block();
         if let Some(r) = &active {
             self.active = Some(r.start);
@@ -775,7 +800,10 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_width(w);
                         canvas_style(ui, body, p);
-                        let view_top = ui.clip_rect().top();
+                        let clip = ui.clip_rect();
+                        let view_top = clip.top();
+                        let mut block_rects: Vec<(Range<usize>, Rect)> =
+                            Vec::with_capacity(items.len());
                         for (r, is_active) in &items {
                             if *is_active {
                                 let out =
@@ -785,21 +813,57 @@ impl App {
                                 }
                                 fmt = fmt.or(out.fmt);
                                 slash = slash.or(out.slash);
+                                consumed |= out.interacted;
                                 if clicked && ui.rect_contains_pointer(out.rect) {
                                     consumed = true;
                                 }
-                            } else {
-                                let out =
-                                    self.render_block(ui, p, &text, r.clone(), body, w, &scheme);
                                 let full_row = Rect::from_x_y_ranges(
                                     ui.max_rect().x_range(),
                                     out.rect.y_range(),
                                 );
-                                if let Some(s) = out.changed {
-                                    change = Some((r.clone(), s));
-                                    consumed = true;
-                                }
-                                consumed |= out.consumed;
+                                block_rects.push((r.clone(), full_row));
+                            } else {
+                                let h_key = egui::Id::unique((
+                                    &text[r.clone()],
+                                    w.to_bits(),
+                                    body.to_bits(),
+                                ));
+                                let cursor_y = ui.cursor().top();
+                                let cached_h = self.block_heights.get(&h_key).copied();
+                                let margin = 600.0;
+                                let offscreen = self.scroll_to != Some(r.start)
+                                    && cached_h.is_some_and(|h| {
+                                        cursor_y + h < clip.top() - margin
+                                            || cursor_y > clip.bottom() + margin
+                                    });
+                                let block_rect = if offscreen {
+                                    let h = cached_h.unwrap_or(body * 1.65);
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                                    rect
+                                } else {
+                                    let out = self.render_block(
+                                        ui,
+                                        p,
+                                        &text,
+                                        r.clone(),
+                                        body,
+                                        w,
+                                        &scheme,
+                                    );
+                                    self.block_heights.insert(h_key, out.rect.height());
+                                    if let Some(s) = out.changed {
+                                        change = Some((r.clone(), s));
+                                        consumed = true;
+                                    }
+                                    consumed |= out.consumed;
+                                    out.rect
+                                };
+                                let full_row = Rect::from_x_y_ranges(
+                                    ui.max_rect().x_range(),
+                                    block_rect.y_range(),
+                                );
+                                block_rects.push((r.clone(), full_row));
                                 if clicked && !consumed && ui.rect_contains_pointer(full_row) {
                                     go_to = Some((r.start, r.end));
                                     consumed = true;
@@ -808,17 +872,103 @@ impl App {
                                     ctx.set_cursor_icon(CursorIcon::Text);
                                 }
                                 if heading_level(text[r.clone()].trim_start()).is_some()
-                                    && out.rect.top() <= view_top + 80.0
+                                    && block_rect.top() <= view_top + 80.0
                                 {
                                     toc_active = Some(r.start);
                                 }
                                 if self.scroll_to == Some(r.start) {
-                                    ui.scroll_to_rect(out.rect, Some(Align::TOP));
+                                    ui.scroll_to_rect(block_rect, Some(Align::TOP));
                                     self.scroll_to = None;
                                 }
                             }
                             ui.add_space(4.0);
                         }
+
+                        // 마우스 드래그: 단일 블록 텍스트 선택 또는 다중 블록 범위 선택
+                        let (drag_active, origin_opt, pos_opt) = ctx.input(|i| {
+                            let active = (i.pointer.primary_down() || i.pointer.primary_released())
+                                && i.pointer.is_decidedly_dragging();
+                            (active, i.pointer.press_origin(), i.pointer.interact_pos())
+                        });
+                        if drag_active && !consumed && self.dialog.is_none() {
+                            if let (Some(origin), Some(pos)) = (origin_opt, pos_opt) {
+                                let on_fg = ctx
+                                    .layer_id_at(origin)
+                                    .is_some_and(|l| l.order == Order::Foreground);
+                                if area.contains(origin) && !on_fg {
+                                    let y_min = origin.y.min(pos.y);
+                                    let y_max = origin.y.max(pos.y);
+                                    let hit: Vec<&(Range<usize>, Rect)> = block_rects
+                                        .iter()
+                                        .filter(|(r, rect)| {
+                                            !r.is_empty()
+                                                && rect.bottom() + 2.0 >= y_min
+                                                && rect.top() - 2.0 <= y_max
+                                        })
+                                        .collect();
+                                    if hit.len() == 1 {
+                                        let (b, _) = hit[0];
+                                        self.block_sel = None;
+                                        if self.active != Some(b.start) {
+                                            self.drag_anchor = Some((b.start, origin));
+                                            self.drag_last_pos = Some(pos);
+                                            go_to = Some((b.start, b.end));
+                                            consumed = true;
+                                            ctx.request_repaint();
+                                        } else if self.drag_anchor.is_some() {
+                                            self.drag_last_pos = Some(pos);
+                                            consumed = true;
+                                        }
+                                    } else if hit.len() >= 2 {
+                                        let start = hit.first().unwrap().0.start;
+                                        let end = hit.last().unwrap().0.end;
+                                        self.leave_blank();
+                                        self.active = None;
+                                        self.drag_anchor = None;
+                                        self.drag_last_pos = None;
+                                        self.block_sel = Some(start..end);
+                                        go_to = None;
+                                        consumed = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 다중 블록 / 전체 문서 선택 하이라이트 및 서식 막대 표시
+                        let mut first_sel_rect: Option<Rect> = None;
+                        if let Some(sel_range) = self.block_sel.clone() {
+                            for (r, full_row) in &block_rects {
+                                if !r.is_empty()
+                                    && r.start < sel_range.end
+                                    && r.end > sel_range.start
+                                {
+                                    let box_rect = Rect::from_x_y_ranges(
+                                        ui.min_rect().x_range(),
+                                        full_row.y_range(),
+                                    )
+                                    .expand2(vec2(6.0, 2.0));
+                                    ui.painter().rect(
+                                        box_rect,
+                                        6.0,
+                                        p.accent.gamma_multiply(0.16),
+                                        Stroke::new(1.0, p.accent.gamma_multiply(0.45)),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    if first_sel_rect.is_none() && box_rect.bottom() >= clip.top() {
+                                        first_sel_rect = Some(box_rect);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(sr) =
+                            first_sel_rect.filter(|_| !ctx.input(|i| i.pointer.primary_down()))
+                        {
+                            let (f, bar_hit) =
+                                self.show_format_bar(&ctx, p, sr.left_top() - vec2(0.0, 40.0));
+                            fmt = fmt.or(f);
+                            consumed |= bar_hit;
+                        }
+
                         // 마지막 블록 아래 빈 곳을 누르면 새 블록 (노션과 같음)
                         let rest = ui.available_height().max(140.0);
                         let (_, resp) = ui.allocate_exact_size(vec2(w, rest), Sense::click());
@@ -838,9 +988,34 @@ impl App {
             go_to = None;
         }
         if let Some((r, s)) = change.take() {
+            let s = if s.len() < r.len() && s.starts_with('\n') {
+                s.trim_start_matches('\n').to_string()
+            } else {
+                s
+            };
             if let Some(doc) = self.docs.get_mut(&name) {
+                if !r.is_empty() && s.is_empty() {
+                    let lead = doc.text[..r.start]
+                        .bytes()
+                        .rev()
+                        .take_while(|&b| b == b'\n')
+                        .count()
+                        .min(2);
+                    self.blank = if lead > 0 {
+                        lead
+                    } else {
+                        doc.text[r.end..]
+                            .bytes()
+                            .take_while(|&b| b == b'\n')
+                            .count()
+                            .min(2)
+                    };
+                } else if !s.is_empty() {
+                    self.blank = 0;
+                }
                 doc.text.replace_range(r, &s);
                 doc.edited_at = Some(Instant::now());
+                doc.refresh_meta();
             }
             go_to = None;
         }
@@ -848,6 +1023,7 @@ impl App {
         if let Some((s, c)) = go_to {
             self.go(s, c);
         } else if below {
+            self.block_sel = None;
             let last_is_blank = self.active_block().is_some_and(|r| r.is_empty());
             if !last_is_blank {
                 self.append_block();
@@ -864,14 +1040,82 @@ impl App {
         self.find_bar(&ctx, p, area);
     }
 
+    // 열린 문서가 없을 때: 첫 실행·빈 폴더에서 바로 시작할 수 있는 화면
+    fn welcome(&mut self, ui: &mut egui::Ui, p: &Pal) {
+        let top = (ui.available_height() * 0.5 - 130.0).max(24.0);
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add_space(top);
+            let (r, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
+            ui.painter().rect_filled(r, 13.0, p.accent);
+            img(theme::BRAND, 28.0, Color32::WHITE)
+                .paint_at(ui, Rect::from_center_size(r.center(), vec2(28.0, 28.0)));
+            ui.add_space(18.0);
+            ui.label(
+                RichText::new("무엇을 쓸까요?")
+                    .font(FontId::new(20.0, theme::bold()))
+                    .color(p.text),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("새 문서를 만들거나, 가지고 있는 Markdown 파일·폴더를 여세요.")
+                    .size(13.5)
+                    .color(p.muted),
+            );
+            ui.add_space(20.0);
+            ui.spacing_mut().button_padding = vec2(16.0, 6.0);
+            // 버튼 세 개를 가운데 정렬하려고 폭을 미리 잡는다
+            let width = 330.0_f32.min(ui.available_width());
+            ui.allocate_ui_with_layout(
+                vec2(width, 32.0),
+                egui::Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if primary(ui, p, "새 문서  Ctrl+N").clicked() {
+                        self.dialog = Some(Dialog::NewFile(String::new()));
+                    }
+                    if ghost(ui, p, "폴더 열기", None).clicked() {
+                        self.pick_folder();
+                    }
+                    if ghost(ui, p, "파일 열기", None).clicked() {
+                        self.open_local_file();
+                    }
+                },
+            );
+            ui.add_space(22.0);
+            ui.label(
+                RichText::new(".md 파일이나 폴더를 이 창에 끌어다 놓아도 열립니다.")
+                    .size(12.0)
+                    .color(p.faint),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!("작업 폴더  {}", self.root.display()))
+                    .size(11.5)
+                    .color(p.faint),
+            );
+        });
+    }
+
     // 전체 문서 기준 선택(sel)을 블록 편집기 상태로 옮긴다
     fn place_cursor(&mut self, ctx: &egui::Context, name: &str, sel: Sel) {
-        let text = &self.docs[name].text;
-        let b = byte_idx(text, sel.0);
-        let start = split_blocks(text)
-            .into_iter()
-            .find(|r| r.start <= b && b <= r.end)
-            .map_or(b, |r| r.start);
+        let doc = &self.docs[name];
+        let text = &doc.text;
+        let b0 = byte_idx(text, sel.0);
+        let b1 = byte_idx(text, sel.1);
+        let block = doc
+            .blocks
+            .iter()
+            .find(|r| r.start <= b0 && b0 <= r.end)
+            .cloned();
+        if let Some(r) = &block {
+            if b1 > r.end {
+                self.active = None;
+                self.block_sel = Some(b0..b1);
+                return;
+            }
+        }
+        let start = block.map_or(b0, |r| r.start);
         let base = char_len(&text[..start]);
         let id = Self::editor_id(name, start);
         let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
@@ -880,8 +1124,104 @@ impl App {
             CCursor::new(sel.1.saturating_sub(base)),
         )));
         egui::TextEdit::store_state(ctx, id, st);
+        self.block_sel = None;
         self.active = Some(start);
+        self.last_sel = Some(sel);
         self.scroll_cursor = true;
+    }
+
+    fn show_format_bar(&self, ctx: &egui::Context, p: &Pal, at: egui::Pos2) -> (Option<Fmt>, bool) {
+        let mut fmt = None;
+        let area_resp = egui::Area::new(egui::Id::unique("format-bar"))
+            .order(Order::Foreground)
+            .fixed_pos(at)
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(p.elevated)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(8)
+                    .shadow(theme::shadow(p))
+                    .inner_margin(Margin::symmetric(5, 3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let m = p.muted;
+                            let mut pick = None;
+                            let mut kbd = false;
+                            let mut b = |ui: &mut egui::Ui, icon, color, tip, f| {
+                                if small_icon_btn(ui, p, icon, color, tip).clicked() {
+                                    pick = Some(f);
+                                }
+                            };
+                            b(
+                                ui,
+                                theme::BOLD,
+                                m,
+                                "굵게 (Ctrl+B)",
+                                Fmt::Wrap("**", "**", "굵게"),
+                            );
+                            b(
+                                ui,
+                                theme::ITALIC,
+                                m,
+                                "기울임 (Ctrl+I)",
+                                Fmt::Wrap("*", "*", "기울임"),
+                            );
+                            b(
+                                ui,
+                                theme::STRIKE,
+                                m,
+                                "취소선",
+                                Fmt::Wrap("~~", "~~", "취소선"),
+                            );
+                            divider(ui, p);
+                            b(
+                                ui,
+                                theme::HIGHLIGHT,
+                                Color32::from_rgb(0xea, 0xb3, 0x08),
+                                "형광펜 강조",
+                                Fmt::Wrap("==", "==", "강조"),
+                            );
+                            b(
+                                ui,
+                                theme::CODE,
+                                m,
+                                "인라인 코드",
+                                Fmt::Wrap("`", "`", "code"),
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("K").monospace().size(11.0).color(m),
+                                    )
+                                    .min_size(vec2(26.0, 26.0))
+                                    .corner_radius(5),
+                                )
+                                .on_hover_text("키보드 키 ([[키]])")
+                                .clicked()
+                            {
+                                kbd = true;
+                            }
+                            divider(ui, p);
+                            b(
+                                ui,
+                                theme::LINK,
+                                m,
+                                "링크 (Ctrl+K)",
+                                Fmt::Wrap("[", "](https://)", "링크"),
+                            );
+                            b(ui, theme::X, m, "서식 지우기", Fmt::Clear);
+                            fmt = fmt
+                                .or(pick)
+                                .or(kbd.then_some(Fmt::Wrap("[[", "]]", "Ctrl")));
+                        });
+                    });
+            });
+        let hit = fmt.is_some()
+            || ctx
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|pos| area_resp.response.rect.contains(pos));
+        (fmt, hit)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -913,110 +1253,66 @@ impl App {
             .hint_text(RichText::new(PLACEHOLDER).size(body).color(p.faint))
             .layouter(&mut layouter)
             .show(ui);
-        if std::mem::take(&mut self.focus_editor) {
+        let mut sel = out.cursor_range.map(|c| c.as_sorted_char_range());
+        if let Some((anchor_start, origin)) = self.drag_anchor {
+            if anchor_start == r.start {
+                let (down, i_pos) =
+                    ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
+                if let Some(p_cur) = i_pos {
+                    self.drag_last_pos = Some(p_cur);
+                }
+                let cur_pos = self.drag_last_pos.unwrap_or(origin);
+                let c1 = out.galley.cursor_from_pos(origin - out.galley_pos);
+                let c2 = out.galley.cursor_from_pos(cur_pos - out.galley_pos);
+                let cr = CCursorRange::two(c1, c2);
+                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                st.cursor.set_char_range(Some(cr));
+                egui::TextEdit::store_state(ctx, id, st);
+                sel = Some(cr.as_sorted_char_range());
+                out.response.request_focus();
+                ctx.request_repaint();
+                if !down {
+                    self.drag_anchor = None;
+                    self.drag_last_pos = None;
+                }
+            } else {
+                self.drag_anchor = None;
+                self.drag_last_pos = None;
+            }
+        }
+        if std::mem::take(&mut self.focus_editor)
+            || (self.dialog.is_none() && !self.find.open && ctx.memory(|m| m.focused().is_none()))
+        {
             out.response.request_focus();
+        }
+        if let Some(s) = &sel {
+            let base = char_len(&text[..r.start]);
+            let blen = char_len(&buf);
+            if out.response.has_focus() || s.start.0 < s.end.0 {
+                self.last_sel = Some((base + s.start.0.min(blen), base + s.end.0.min(blen)));
+            }
         }
         let cursor_of = |c: usize| {
             out.galley
                 .pos_from_cursor(CCursor::new(c))
                 .translate(out.galley_pos.to_vec2())
         };
-        let sel = out.cursor_range.map(|c| c.as_sorted_char_range());
         if std::mem::take(&mut self.scroll_cursor) {
             let c = sel.as_ref().map_or(0, |s| s.end.0);
             ui.scroll_to_rect(cursor_of(c), Some(Align::Center));
         }
         let changed = (buf != text[r.clone()]).then(|| buf.clone());
 
-        // 선택 영역 위 서식 막대
+        // 선택 영역 위 서식 막대 (드래그 중에는 띄우지 않음)
         let mut fmt = None;
-        if let Some(s) = sel.filter(|s| s.start.0 != s.end.0) {
+        let mut interacted = false;
+        if let Some(s) =
+            sel.filter(|s| s.start.0 != s.end.0 && !ctx.input(|i| i.pointer.primary_down()))
+        {
             let at = cursor_of(s.start.0).left_top() - vec2(0.0, 40.0);
-            egui::Area::new(egui::Id::unique("format-bar"))
-                .order(Order::Foreground)
-                .fixed_pos(at)
-                .show(ctx, |ui| {
-                    Frame::new()
-                        .fill(p.elevated)
-                        .stroke(Stroke::new(1.0, p.border))
-                        .corner_radius(8)
-                        .shadow(theme::shadow(p))
-                        .inner_margin(Margin::symmetric(5, 3))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 2.0;
-                                let m = p.muted;
-                                let mut pick = None;
-                                let mut kbd = false;
-                                let mut b = |ui: &mut egui::Ui, icon, color, tip, f| {
-                                    if small_icon_btn(ui, p, icon, color, tip).clicked() {
-                                        pick = Some(f);
-                                    }
-                                };
-                                b(
-                                    ui,
-                                    theme::BOLD,
-                                    m,
-                                    "굵게 (Ctrl+B)",
-                                    Fmt::Wrap("**", "**", "굵게"),
-                                );
-                                b(
-                                    ui,
-                                    theme::ITALIC,
-                                    m,
-                                    "기울임 (Ctrl+I)",
-                                    Fmt::Wrap("*", "*", "기울임"),
-                                );
-                                b(
-                                    ui,
-                                    theme::STRIKE,
-                                    m,
-                                    "취소선",
-                                    Fmt::Wrap("~~", "~~", "취소선"),
-                                );
-                                divider(ui, p);
-                                b(
-                                    ui,
-                                    theme::HIGHLIGHT,
-                                    Color32::from_rgb(0xea, 0xb3, 0x08),
-                                    "형광펜 강조",
-                                    Fmt::Wrap("==", "==", "강조"),
-                                );
-                                b(
-                                    ui,
-                                    theme::CODE,
-                                    m,
-                                    "인라인 코드",
-                                    Fmt::Wrap("`", "`", "code"),
-                                );
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("K").monospace().size(11.0).color(m),
-                                        )
-                                        .min_size(vec2(26.0, 26.0))
-                                        .corner_radius(5),
-                                    )
-                                    .on_hover_text("키보드 키 ([[키]])")
-                                    .clicked()
-                                {
-                                    kbd = true;
-                                }
-                                divider(ui, p);
-                                b(
-                                    ui,
-                                    theme::LINK,
-                                    m,
-                                    "링크 (Ctrl+K)",
-                                    Fmt::Wrap("[", "](https://)", "링크"),
-                                );
-                                b(ui, theme::X, m, "서식 지우기", Fmt::Clear);
-                                fmt = fmt
-                                    .or(pick)
-                                    .or(kbd.then_some(Fmt::Wrap("[[", "]]", "Ctrl")));
-                            });
-                        });
-                });
+            let (f, hit) = self.show_format_bar(ctx, p, at);
+            fmt = f;
+            interacted |= hit;
         }
 
         // 슬래시 메뉴
@@ -1027,7 +1323,7 @@ impl App {
         {
             let matches = slash_matches(q);
             let sel_idx = self.slash_sel.min(matches.len().saturating_sub(1));
-            egui::Area::new(egui::Id::unique("slash-menu"))
+            let slash_resp = egui::Area::new(egui::Id::unique("slash-menu"))
                 .order(Order::Foreground)
                 .fixed_pos(out.response.rect.left_bottom() + vec2(0.0, 4.0))
                 .show(ctx, |ui| {
@@ -1071,12 +1367,17 @@ impl App {
                                 });
                         });
                 });
+            interacted |= slash.is_some()
+                || ctx
+                    .input(|i| i.pointer.interact_pos())
+                    .is_some_and(|pos| slash_resp.response.rect.contains(pos));
         }
         EditorOut {
             rect: out.response.rect,
             changed,
             fmt,
             slash,
+            interacted,
         }
     }
 
@@ -1125,26 +1426,28 @@ impl App {
                             .inner_margin(Margin::symmetric(12, 8))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                let head = ui
-                                    .horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(if open { "▼" } else { "▶" })
-                                                .color(p.muted),
-                                        );
-                                        ui.label(
-                                            RichText::new(title)
-                                                .font(FontId::new(body, theme::bold()))
-                                                .color(p.text),
-                                        );
-                                    })
-                                    .response
-                                    .interact(Sense::click())
-                                    .on_hover_cursor(CursorIcon::PointingHand);
-                                if head.clicked() {
-                                    open = !open;
-                                    consumed = true;
-                                    ui.data_mut(|d| d.insert_temp(open_id, open));
-                                }
+                                ui.horizontal(|ui| {
+                                    let arrow = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(if open { "▼" } else { "▶" })
+                                                    .color(p.muted),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .on_hover_cursor(CursorIcon::PointingHand)
+                                        .on_hover_text("클릭하여 펼치기/접기");
+                                    if arrow.clicked() {
+                                        open = !open;
+                                        consumed = true;
+                                        ui.data_mut(|d| d.insert_temp(open_id, open));
+                                    }
+                                    ui.label(
+                                        RichText::new(title)
+                                            .font(FontId::new(body, theme::bold()))
+                                            .color(p.text),
+                                    );
+                                });
                                 if open {
                                     ui.add_space(4.0);
                                     let inner_resp = ui.horizontal(|ui| {
@@ -1186,15 +1489,50 @@ impl App {
                                 );
                             });
                         });
-                    } else if let Some(rest) = t.strip_prefix("```mermaid") {
-                        let code = rest.trim_end().trim_end_matches('`').trim_matches('\n');
-                        card(ui, p, Some("Mermaid 다이어그램"), |ui| {
-                            ui.label(
-                                RichText::new(code)
-                                    .family(FontFamily::Monospace)
-                                    .size(body * 0.84)
-                                    .color(p.text),
-                            );
+                    } else if t.starts_with("```") || t.starts_with("~~~") {
+                        let fence = &t[..3];
+                        let first_nl = t.find('\n').unwrap_or(t.len());
+                        let lang = t[3..first_nl].trim();
+                        let body_part = if first_nl < t.len() {
+                            &t[first_nl + 1..]
+                        } else {
+                            ""
+                        };
+                        let code = body_part
+                            .trim_end()
+                            .strip_suffix(fence)
+                            .unwrap_or(body_part)
+                            .trim_end_matches(['\n', '\r']);
+                        let label = if lang.eq_ignore_ascii_case("mermaid") {
+                            Some("Mermaid 다이어그램")
+                        } else if !lang.is_empty() {
+                            Some(lang)
+                        } else {
+                            None
+                        };
+                        card(ui, p, label, |ui| {
+                            if lang.eq_ignore_ascii_case("mermaid") {
+                                ui.label(
+                                    RichText::new(code)
+                                        .family(FontFamily::Monospace)
+                                        .size(body * 0.84)
+                                        .color(p.text),
+                                );
+                            } else {
+                                let code_theme = if dark {
+                                    egui_extras::syntax_highlighting::CodeTheme::dark(body * 0.84)
+                                } else {
+                                    egui_extras::syntax_highlighting::CodeTheme::light(body * 0.84)
+                                };
+                                let job = egui_extras::syntax_highlighting::highlight(
+                                    ui.ctx(),
+                                    ui.style(),
+                                    &code_theme,
+                                    code,
+                                    lang,
+                                );
+                                ui.add(egui::Label::new(job).selectable(false));
+                            }
                         });
                     } else {
                         changed = self.markdown(ui, src, width, scheme, dark);
@@ -1224,12 +1562,14 @@ impl App {
         let math = |ui: &mut egui::Ui, s: &str, _inline: bool| {
             ui.code(s.trim());
         };
-        CommonMarkViewer::new()
+        let mut viewer = CommonMarkViewer::new()
             .default_implicit_uri_scheme(scheme)
             .max_image_width(Some(width as usize))
-            .render_math_fn(Some(&math))
-            .alerts(alerts(dark))
-            .show_mut(ui, &mut self.md_cache, &mut shown);
+            .render_math_fn(Some(&math));
+        if src.contains("[!") {
+            viewer = viewer.alerts(alerts(dark));
+        }
+        viewer.show_mut(ui, &mut self.md_cache, &mut shown);
         if shown == before {
             return None;
         }
@@ -1242,11 +1582,13 @@ impl App {
         if !self.find.open {
             return;
         }
-        let matches = self
-            .doc()
-            .map(|d| find_all(&d.text, &self.find.query, self.find.case))
-            .unwrap_or_default();
         let sel = self.cursor(ctx);
+        let matches = self
+            .current
+            .as_ref()
+            .and_then(|n| self.docs.get(n))
+            .map(|d| self.find.matches(d).to_vec())
+            .unwrap_or_default();
         let mut action: Option<u8> = None; // 0 이전, 1 다음, 2 바꾸기, 3 모두 바꾸기
         egui::Area::new(egui::Id::unique("find-bar"))
             .order(Order::Foreground)
@@ -1351,6 +1693,9 @@ impl App {
                             }
                             if small_icon_btn(ui, p, theme::X, p.muted, "닫기 (Esc)").clicked() {
                                 self.find.open = false;
+                                if self.active.is_some() {
+                                    self.focus_editor = true;
+                                }
                             }
                         });
                         if self.find.replace {
@@ -1477,9 +1822,23 @@ impl App {
                                         .size(12.0)
                                         .color(p.muted),
                                 );
-                                let r =
-                                    input(ui, p, egui::Id::unique("rename"), to, "", f32::INFINITY);
+                                let id = egui::Id::unique("rename");
+                                let opening = !ui.memory(|m| m.has_focus(id));
+                                let r = input(ui, p, id, to, "", f32::INFINITY);
                                 r.request_focus();
+                                if opening {
+                                    // 폴더·확장자는 두고 이름만 선택해 둔다 → 바로 새 이름을 치면 된다
+                                    let from_c = to.rfind('/').map_or(0, |i| char_len(&to[..=i]));
+                                    let to_c =
+                                        to.rfind('.').map_or(char_len(to), |i| char_len(&to[..i]));
+                                    let mut st = egui::TextEdit::load_state(ui.ctx(), id)
+                                        .unwrap_or_default();
+                                    st.cursor.set_char_range(Some(CCursorRange::two(
+                                        CCursor::new(from_c),
+                                        CCursor::new(to_c.max(from_c)),
+                                    )));
+                                    egui::TextEdit::store_state(ui.ctx(), id, st);
+                                }
                                 submit = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                             });
                         footer(ui, p, None, |ui| {
@@ -1542,7 +1901,9 @@ impl App {
                             &format!("{} 전에 저장할까요?\n{}", what, names.join(", ")),
                         );
                         footer(ui, p, Some(p.surface), |ui| {
-                            if primary(ui, p, "저장 후 계속").clicked() {
+                            if primary(ui, p, "저장 후 계속").clicked()
+                                || ui.input(|i| i.key_pressed(Key::Enter))
+                            {
                                 if self.save_all() {
                                     close = true;
                                 } else {
@@ -1552,6 +1913,8 @@ impl App {
                             if ghost(ui, p, "저장 안 함", Some(RED)).clicked() {
                                 for d in self.docs.values_mut() {
                                     d.text = d.saved.clone();
+                                    d.edited_at = None;
+                                    d.refresh_meta();
                                 }
                                 close = true;
                             }
@@ -1610,6 +1973,7 @@ impl App {
             .cloned()
             .collect();
         let mut open: Option<String> = None;
+        let mut moved = false; // 방향키로 선택을 옮겼으면 그 행이 보이게 스크롤한다
         Frame::new()
             .inner_margin(Margin {
                 left: 20,
@@ -1643,9 +2007,11 @@ impl App {
                 let n = shown.len().max(1);
                 if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
                     *sel = (*sel + 1) % n;
+                    moved = true;
                 }
                 if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
                     *sel = (*sel + n - 1) % n;
+                    moved = true;
                 }
                 if ui.input(|i| i.key_pressed(Key::Enter)) {
                     open = shown.get(*sel).cloned();
@@ -1672,6 +2038,9 @@ impl App {
                                 vec2(ui.available_width(), 32.0),
                                 Sense::click(),
                             );
+                            if moved && i == *sel {
+                                resp.scroll_to_me(None);
+                            }
                             let hot = resp.hovered() || i == *sel;
                             let bg = if current {
                                 Some(p.accent.gamma_multiply(0.08))
@@ -1899,6 +2268,7 @@ impl App {
 fn canvas_style(ui: &mut egui::Ui, body: f32, p: &Pal) {
     use egui::TextStyle;
     let s = ui.style_mut();
+    s.interaction.selectable_labels = false;
     s.text_styles
         .insert(TextStyle::Body, FontId::proportional(body));
     s.text_styles
@@ -2037,8 +2407,16 @@ fn help_body(ui: &mut egui::Ui, p: &Pal) {
                             ("Ctrl + N", "새 파일 만들기"),
                             ("Ctrl + O", "작업 폴더 파일 탐색기 열기"),
                             ("Ctrl + Shift + O", "작업 폴더 바꾸기"),
+                            (
+                                "Ctrl + Z / Ctrl + Y",
+                                "실행 취소 / 다시 실행 (블록 편집 포함)",
+                            ),
                             ("Ctrl + F / H", "본문 찾기 / 찾기 및 바꾸기"),
-                            ("Ctrl + B / I / K", "선택 영역 굵게 / 기울임 / 하이퍼링크"),
+                            ("F3 / Shift + F3", "다음 / 이전 일치 항목"),
+                            (
+                                "Ctrl + B / I / K",
+                                "굵게 / 기울임 / 링크 (다시 누르면 해제)",
+                            ),
                             ("Ctrl + Shift + I", "이미지 삽입 (파일 / 웹 링크)"),
                             ("Ctrl + V (이미지)", "스크린샷을 images/ 에 저장하고 삽입"),
                             ("Ctrl + P", "인쇄 (PDF로 저장 가능)"),

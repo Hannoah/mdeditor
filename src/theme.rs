@@ -133,6 +133,12 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     };
     ctx.set_visuals_of(theme, v);
     ctx.set_theme(theme);
+    // 창 제목 표시줄도 앱 테마를 따르게 한다
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if dark {
+        egui::SystemTheme::Dark
+    } else {
+        egui::SystemTheme::Light
+    }));
     ctx.all_styles_mut(|s| {
         s.text_styles = [
             (TextStyle::Small, FontId::proportional(11.5)),
@@ -160,17 +166,31 @@ pub fn install_fonts(ctx: &egui::Context) {
     let user = std::env::var_os("LOCALAPPDATA")
         .map(|d| std::path::PathBuf::from(d).join(r"Microsoft\Windows\Fonts"));
     let dirs: Vec<std::path::PathBuf> = user.into_iter().chain([win]).collect();
-    // 파일명이 이 접두어로 시작하는 첫 글꼴 (사용자 글꼴은 "… 1.ttf"처럼 접미어가 붙기도 함)
-    let find = |prefixes: &[&str]| -> Option<Vec<u8>> {
+    // 디렉토리 전체 스캔은 한 번만 수행하고, 정확한 파일명(.ttf)은 O(1) 직접 경로로 먼저 읽는다
+    let mut cached_entries: Option<Vec<(String, std::path::PathBuf)>> = None;
+    let mut find = |prefixes: &[&str]| -> Option<Vec<u8>> {
         prefixes.iter().find_map(|pre| {
-            dirs.iter().find_map(|d| {
-                std::fs::read_dir(d).ok()?.flatten().find_map(|e| {
-                    let n = e.file_name().to_string_lossy().to_lowercase();
-                    (n.starts_with(&pre.to_lowercase()) && n.ends_with(".ttf"))
-                        .then(|| std::fs::read(e.path()).ok())
-                        .flatten()
-                })
-            })
+            if pre.ends_with(".ttf") {
+                if let Some(bytes) = dirs.iter().find_map(|d| std::fs::read(d.join(pre)).ok()) {
+                    return Some(bytes);
+                }
+            }
+            let lower = pre.to_lowercase();
+            let entries = cached_entries.get_or_insert_with(|| {
+                dirs.iter()
+                    .filter_map(|d| std::fs::read_dir(d).ok())
+                    .flatten()
+                    .flatten()
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().to_lowercase();
+                        n.ends_with(".ttf").then(|| (n, e.path()))
+                    })
+                    .collect()
+            });
+            entries
+                .iter()
+                .find(|(n, _)| n.starts_with(&lower))
+                .and_then(|(_, p)| std::fs::read(p).ok())
         })
     };
     let mut fonts = egui::FontDefinitions::default();

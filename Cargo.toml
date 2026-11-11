@@ -1,15 +1,15 @@
 [package]
 name = "mdeditor"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "A native Markdown editor & previewer desktop app in Rust (eframe/egui)"
 
 [dependencies]
 # 순수 네이티브 데스크톱 앱(mdeditor) — 브라우저/웹뷰/로컬 서버 없음
 # glow(OpenGL) 렌더러: wgpu 대비 메모리·바이너리 크기 절반 수준
-eframe = { version = "0.37", default-features = false, features = ["glow", "persistence", "default_fonts", "system_fonts", "clipboard", "links", "accesskit", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "persistence", "default_fonts", "clipboard", "links", "accesskit", "wayland", "x11"] }
 egui_extras = { version = "0.37", features = ["image", "file", "svg"] }
-egui_commonmark = "0.26"
+egui_commonmark = { version = "0.26", default-features = false, features = ["load-images", "pulldown_cmark"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 rfd = "0.18"
 # HTML 내보내기 (egui_commonmark가 이미 쓰는 파서, html 기능만 추가)
@@ -20,7 +20,7 @@ name = "mdeditor"
 path = "src/main.rs"
 
 [profile.release]
-opt-level = "z"     # 바이너리 크기 최소화
+opt-level = 3       # 실행 속도 및 렌더링 성능 최대화
 lto = true          # Link Time Optimization
 codegen-units = 1
 panic = "abort"
