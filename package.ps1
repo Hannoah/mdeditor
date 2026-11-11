@@ -10,7 +10,7 @@ param(
 $Host.UI.RawUI.WindowTitle = "MDEditor 프로덕션 패키징 빌더"
 
 $AppName = "MDEditor"
-$AppVersion = "0.1.0"
+$AppVersion = "0.2.0"
 $scriptDir = $PSScriptRoot
 if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
 $distDir = Join-Path $scriptDir "dist"

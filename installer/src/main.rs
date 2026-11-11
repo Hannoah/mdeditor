@@ -67,7 +67,7 @@ fn main() {
 
     #[cfg(windows)]
     if !silent {
-        let prompt = "MDEditor v0.1.0을 이 컴퓨터에 설치하시겠습니까?\n\n\
+        let prompt = "MDEditor v0.2.0을 이 컴퓨터에 설치하시겠습니까?\n\n\
                       • 설치 위치: %LOCALAPPDATA%\\Programs\\mdeditor\n\
                       • .md 및 .markdown 파일 기본 연결\n\
                       • Windows 탐색기 'MDEditor로 이 폴더 열기' 등록\n\
@@ -156,7 +156,7 @@ fn main() {
     // 5. 완료 알림 및 실행 안내
     #[cfg(windows)]
     if !silent {
-        let success_msg = "✨ MDEditor v0.1.0 설치가 성공적으로 완료되었습니다!\n\n\
+        let success_msg = "✨ MDEditor v0.2.0 설치가 성공적으로 완료되었습니다!\n\n\
                            • .md 파일을 더블클릭하면 MDEditor로 열립니다.\n\
                            • 폴더 우클릭 -> 'MDEditor로 이 폴더 열기'를 지원합니다.\n\
                            • 언제든 Windows 설정의 '설치된 앱'에서 제거할 수 있습니다.\n\n\

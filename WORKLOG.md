@@ -1,5 +1,69 @@
 # MDEditor 작업 기록
 
+## 2026-11-11 — 네이티브 앱을 기본 mdeditor.exe로 전환 (웹 기반 실행 종료)
+
+### 1. 바이너리 구성 변경
+- `mdeditor` = 네이티브 앱(`src/main.rs`, eframe/egui). 설치·패키징 스크립트는 파일명이 같아 수정 없이 네이티브 앱을 배포.
+- 이전 웹 서버 버전(`src/main.rs` HTTP 서버 + `src/index.html` UI)과 `src/lib.rs`를 삭제. `markdown` 모듈은 `main.rs`에서 `mod markdown;`으로 직접 사용. `native` 피처 제거, eframe 필수 의존성화.
+- 렌더러를 wgpu → glow로 교체: 릴리즈 9.4 MB → 7.0 MB, 실행 메모리 384 MB → 150 MB (동일 화면 실측).
+- 버전 0.2.0 (Cargo.toml, installer, install.ps1, package.ps1).
+
+### 2. 네이티브 앱 기능
+- 미리보기를 자체 LayoutJob 렌더러에서 `egui_commonmark`로 교체: 표·로컬 이미지·구문 강조·GitHub 알림·각주·클릭 가능한 체크박스(원문 반영)·링크.
+- 확장 문법(`==형광==`, `[[키]]`, `:::toggle`)은 바이트 길이를 보존하는 전처리로 표시 → 체크박스 위치가 원문과 1:1 대응.
+- 편집: 서식 도구 모음 20종, Ctrl+B/I/K, 스마트 목록 Enter, Tab/Shift+Tab, 찾기·바꾸기(Ctrl+F/H).
+- 이미지: Ctrl+V 스크린샷 붙여넣기, 파일 끌어다 놓기, 🖼 버튼 → `문서 폴더/images/`.
+- 파일: 검색(Ctrl+O), 새 문서(하위 폴더 가능), 이름 변경(F2), 삭제(확인), 폴더 열기 대화상자, .md/폴더 끌어다 놓기, 문서 간 .md 링크 앱 내 열기, 목차 탭.
+- 자동 저장(2초), 닫기 시 미저장 확인, CRLF·BOM 보존, UTF-8 아닌 파일은 오류 표시, 작업 폴더·문서·보기·테마·창 크기 기억, 앱 아이콘, HTML 내보내기(로컬 이미지 상대 경로).
+- 이름 검증: `..`/절대 경로/드라이브/금지 문자/Windows 예약 이름 거부.
+
+### 3. 검증
+- `cargo test`: 51개 통과 (39 markdown + 12 네이티브).
+- `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`: 클린.
+- 실제 실행 확인: 분할 보기 렌더링(한글·표·이미지·코드·알림·토글), 스크린샷 붙여넣기 → `images/paste-*.png` 저장·링크 삽입, 폴더 인자 실행, 릴리즈(GUI 서브시스템) 실행.
+- `installer/` 빌드 성공 (mdeditor-setup.exe 7.6 MB, 네이티브 앱 내장). 설치 자체는 실행하지 않음.
+
+### 4. 한계
+- 노션식 WYSIWYG 캔버스 없음(분할 보기로 대체), KaTeX·Mermaid는 소스 표시, 원격 이미지 미지원.
+
+## 2026-11-11 — 순수 네이티브 앱 골격 (`mdeditor-native`, eframe/egui)
+
+### 1. 네이티브 바이너리 신설 (`src/bin/native.rs`, `--features native`)
+- **브라우저·서버 완전 제외**: `eframe 0.37` 기반 순수 로컬 데스크톱 앱. 웹 버전(`mdeditor`, std-only)은 그대로 유지.
+- **공유 구조**: `src/lib.rs` 신설 후 `markdown` 모듈을 라이브러리로 승격, `main.rs`는 `use mdeditor::markdown`으로 전환 (동작 변경 없음).
+- **MVP 기능**: 폴더/파일 인자 처리, 재귀 파일 목록, 멀티 버퍼 편집, 원자적 저장, `Ctrl+S`, 새 파일, 글자/단어 수 상태바, 맑은고딕 자동 등록.
+- **선택 의존성**: `eframe`은 optional + `required-features`라 기본 빌드(`cargo build`, `cargo test`)는 std-only 그대로.
+
+### 2. 검증 결과
+- `cargo test --features native`: 61개 전체 통과 (39 lib + 16 web + 6 native).
+- `cargo clippy --features native --all-targets -- -D warnings`: 무경고 통과.
+- `cargo fmt --check`: 클린 통과.
+- `cargo build --features native --bin mdeditor-native` (debug + release): 성공. eframe 0.37 API 변경(`App::ui`, `Panel::{left,top,bottom}`, `show(&mut Ui)`) 반영.
+- 릴리즈 바이너리: 8.1 MB (`target/release/mdeditor-native.exe`).
+
+### 3. 네이티브 미리보기 (`src/bin/native.rs`)
+- **편집/미리보기/분할 3종 뷰**: 상단 바로 전환. 분할은 좌우 컬럼에 편집기와 미리보기를 동시 표시.
+- **LayoutJob 렌더러**: 제목(H1-H4 크기 단계), 굵게/기울임/취소선/형광펜, 인라인·블록 코드, 인용구, 순서·비순서·체크박스 목록, 표(모노스페이스), 구분선, 링크(원문 URL 병기), 이미지 자리표시, `$수식` 모노 표시, `[[키캡]]`.
+- **볼드 한글**: 맑은고딕 볼드(`malgunbd.ttf`, 없으면 일반체로 대체 등록)로 tofu 방지.
+
+## 2026-11-11 — Windows 단독 앱 창 전용 실행 (일반 브라우저 탭 폴백 제거)
+
+### 1. 네이티브 창 exclusive 실행 (`src/main.rs`)
+- **브라우저 탭 폴백 삭제**: Windows에서 Edge/Chrome을 못 찾으면 `cmd /C start`로 기본 브라우저 탭을 열던 동작을 제거. 이제 단독 앱 창(`--app`)으로만 실행된다.
+- **찾을 수 없을 때 오류 대화상자**: 인스톨러와 동일한 std-only `win32::message_box(MessageBoxW)` 패턴으로 안내 후 `exit(1)`. 조용한 좀비 서버로 남지 않는다.
+- **탐색 로직 분리**: `find_chromium_exe()` + `first_existing()` 순수 함수로 분리 (Edge → Chrome → Brave 우선순위 유지).
+- **탈출구 유지**: `MDEDITOR_BROWSER` 지정 시에만 기본 브라우저로 열기, `MDEDITOR_NO_BROWSER` 서버 전용 모드 그대로. macOS/Linux 동작 불변.
+
+### 2. 회귀 테스트 및 문서
+- `first_existing_picks_first_present_candidate` 추가: 첫 존재 후보 선택, 전부 없음·빈 목록 시 `None` 검증.
+- `README.md`: 테스트 배지 51→55, 브라우저 탭 언급을 앱 창으로 정정.
+
+### 3. 검증 결과
+- `cargo test`: 55개 전체 통과 (55 passed, 0 failed).
+- `cargo clippy --all-targets -- -D warnings`: 무경고 통과.
+- `cargo fmt --check`: 클린 통과.
+- `cargo build --release`: 717,824 바이트 (~701 KB).
+
 세션 작업 내역을 일자별로 정리한 로그입니다.
 검증 수치는 실행 당시 실측값이며, `target/` 빌드 산출물은 기록 대상에서 제외합니다.
 
