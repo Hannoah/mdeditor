@@ -11,7 +11,7 @@ const HEADING_TOP: [f32; 6] = [26.0, 20.0, 14.0, 10.0, 8.0, 8.0];
 const PLACEHOLDER: &str = "글을 작성하거나 '/'를 눌러 명령어를 사용하세요";
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
             self.save_all();
@@ -27,6 +27,19 @@ impl eframe::App for App {
         }) {
             self.sync_from_disk();
         }
+        if ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::WindowFocused(false)))
+        }) {
+            theme::trim_working_set();
+        }
+        if self.startup_frames < 4 {
+            self.startup_frames += 1;
+            if self.startup_frames == 3 {
+                theme::trim_working_set();
+            }
+        }
         self.handle_drops(&ctx);
         let pasted: Vec<_> = ctx.input(|i| {
             i.events
@@ -41,7 +54,7 @@ impl eframe::App for App {
             self.insert_pasted_image(&ctx, &img);
         }
         self.handle_shortcuts(&ctx);
-        self.auto_save_tick(&ctx);
+        self.auto_save_tick(&ctx, frame.storage_mut());
         self.title_bar(&ctx);
 
         let p = theme::pal(self.dark);
@@ -82,7 +95,13 @@ impl eframe::App for App {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("root", self.root.to_string_lossy().into_owned());
-        storage.set_string("file", self.current.clone().unwrap_or_default());
+        let file = self
+            .current
+            .as_deref()
+            .filter(|n| *n != SCRATCH_KEY)
+            .unwrap_or("");
+        storage.set_string("file", file.to_string());
+        storage.set_string("draft", self.draft_text().to_string());
         storage.set_string("theme", if self.dark { "dark" } else { "light" }.into());
         storage.set_string("full_width", self.full_width.to_string());
         storage.set_string("small_text", self.small_text.to_string());
@@ -406,7 +425,8 @@ struct EditorOut {
 
 impl App {
     fn title_bar(&mut self, ctx: &egui::Context) {
-        let title = match &self.current {
+        let title = match self.current.as_deref() {
+            Some(SCRATCH_KEY) => "새 문서 — MDEditor".into(),
             Some(n) if self.docs.get(n).is_some_and(Doc::dirty) => format!("● {n} — MDEditor"),
             Some(n) => format!("{n} — MDEditor"),
             None => "MDEditor".into(),
@@ -437,7 +457,17 @@ impl App {
             ui.add_space(7.0);
 
             let name = self.current.clone();
-            let dirty = self.doc().is_some_and(Doc::dirty);
+            let is_scratch = self.is_scratch();
+            let dirty = !is_scratch && self.doc().is_some_and(Doc::dirty);
+            let display_name = match name.as_deref() {
+                Some(SCRATCH_KEY) | None => "새 문서",
+                Some(n) => n,
+            };
+            let badge_tip = if is_scratch {
+                "클릭하여 파일로 저장 (Ctrl+S)"
+            } else {
+                "클릭하여 파일 이름 변경 (F2)"
+            };
             let badge = Frame::new()
                 .fill(p.elevated)
                 .stroke(Stroke::new(1.0, p.border))
@@ -448,12 +478,8 @@ impl App {
                     ui.set_max_width(220.0);
                     ui.add(img(theme::FILE, 14.0, p.muted));
                     ui.add(
-                        egui::Label::new(
-                            RichText::new(name.as_deref().unwrap_or("untitled.md"))
-                                .size(12.5)
-                                .color(p.text),
-                        )
-                        .truncate(),
+                        egui::Label::new(RichText::new(display_name).size(12.5).color(p.text))
+                            .truncate(),
                     );
                     if dirty {
                         dot(ui, AMBER, 3.5, false);
@@ -462,9 +488,11 @@ impl App {
                 .response
                 .interact(Sense::click())
                 .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text("클릭하여 파일 이름 변경 (Rename)");
+                .on_hover_text(badge_tip);
             if badge.clicked() {
-                if let Some(n) = &name {
+                if is_scratch {
+                    self.dialog = Some(Dialog::SaveScratch(String::new()));
+                } else if let Some(n) = &name {
                     self.ask_rename(n);
                 }
             }
@@ -478,13 +506,11 @@ impl App {
             if icon_btn(ui, p, theme::UPLOAD, "로컬 파일 열기 (OS 탐색기)").clicked() {
                 self.open_local_file();
             }
-            if icon_btn(ui, p, theme::PLUS, "새 파일 (Ctrl+N)").clicked() {
-                self.dialog = Some(Dialog::NewFile(String::new()));
+            if icon_btn(ui, p, theme::PLUS, "새 문서 (Ctrl+N)").clicked() {
+                self.new_scratch();
             }
             if icon_btn(ui, p, theme::SAVE, "문서 저장 (Ctrl+S)").clicked() {
-                if let Some(n) = self.current.clone() {
-                    self.save(&n);
-                }
+                self.trigger_save();
             }
             ui.add_space(12.0);
             if icon_btn(ui, p, theme::LIST, "문서 목차 (TOC) 열기/닫기").clicked() {
@@ -601,6 +627,15 @@ impl App {
         ui.horizontal(|ui| {
             let (label, color, ring) = match self.doc() {
                 None => ("준비됨", GREEN, false),
+                Some(d) if d.scratch => {
+                    if d.text.is_empty() {
+                        ("새 문서", GREEN, false)
+                    } else if d.dirty() {
+                        ("임시 보관 중...", AMBER, true)
+                    } else {
+                        ("자동 보관됨", GREEN, false)
+                    }
+                }
                 Some(d) if d.dirty() => ("저장되지 않음", AMBER, true),
                 Some(_) => ("저장됨", GREEN, false),
             };
@@ -629,10 +664,10 @@ impl App {
                     .size(11.5)
                     .color(p.faint),
                 );
-                let (a, b) = self.cursor(ui.ctx());
-                if b > a && (self.active.is_some() || self.block_sel.is_some()) {
+                let sel_len = self.selected_chars();
+                if sel_len > 0 {
                     ui.label(
-                        RichText::new(format!("{}자 선택됨", b - a))
+                        RichText::new(format!("{sel_len}자 선택됨"))
                             .family(FontFamily::Monospace)
                             .size(11.5)
                             .color(p.faint),
@@ -694,22 +729,26 @@ impl App {
                 });
             });
         hline(ui, p);
-        let Some(doc) = self.doc() else {
+        let Some(name) = self.current.as_deref() else {
             return;
         };
-        let items = doc.outline.clone();
+        let Some(doc) = self.docs.get(name) else {
+            return;
+        };
+        let mut clicked_byte = None;
+        let toc_active = self.toc_active;
         egui::ScrollArea::vertical().show(ui, |ui| {
             Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                if items.is_empty() {
+                if doc.outline.is_empty() {
                     ui.label(
                         RichText::new("제목(#)이 없습니다")
                             .size(13.0)
                             .color(p.faint),
                     );
                 }
-                for (level, title, _, _, b) in items {
-                    let active = self.toc_active == Some(b);
+                for &(level, ref title, _, _, b) in &doc.outline {
+                    let active = toc_active == Some(b);
                     let indent = match level {
                         1 => 0.0,
                         2 => 14.0,
@@ -726,15 +765,18 @@ impl App {
                     let r = ui
                         .horizontal(|ui| {
                             ui.add_space(indent);
-                            row(ui, p, None, &title, color, 30.0, bg)
+                            row(ui, p, None, title, color, 30.0, bg)
                         })
                         .inner;
                     if r.clicked() {
-                        self.scroll_to = Some(b);
+                        clicked_byte = Some(b);
                     }
                 }
             });
         });
+        if let Some(b) = clicked_byte {
+            self.scroll_to = Some(b);
+        }
     }
 
     // ---------- 노션 라이브 캔버스 ----------
@@ -745,30 +787,38 @@ impl App {
             self.welcome(ui, p);
             return;
         };
-        if self.block_heights.len() > 20_000 {
+        if self.block_heights.len() > 2_048 {
             self.block_heights.clear(); // 오래 편집하면 쌓이는 높이 캐시 상한
         }
         if let Some(sel) = self.pending_sel.take() {
             self.place_cursor(&ctx, &name, sel);
         }
-        let text = self.docs[&name].text.clone();
-        let blocks = self.docs[&name].blocks.clone();
         let active = self.active_block();
         if let Some(r) = &active {
             self.active = Some(r.start);
         }
-        let mut items: Vec<(Range<usize>, bool)> = blocks
-            .iter()
-            .map(|b| (b.clone(), active.as_ref() == Some(b)))
-            .collect();
-        if let Some(r) = active.filter(|r| r.is_empty() && !blocks.contains(r)) {
-            let at = items
-                .iter()
-                .position(|(b, _)| b.start > r.start)
-                .unwrap_or(items.len());
-            items.insert(at, (r, true));
+        let mut items = std::mem::take(&mut self.canvas_items);
+        items.clear();
+        {
+            let blocks = &self.docs[&name].blocks;
+            items.reserve(blocks.len() + 1);
+            for b in blocks {
+                items.push((b.clone(), active.as_ref() == Some(b)));
+            }
+            if let Some(r) = active.filter(|r| r.is_empty() && !blocks.contains(r)) {
+                let at = items
+                    .iter()
+                    .position(|(b, _)| b.start > r.start)
+                    .unwrap_or(items.len());
+                items.insert(at, (r, true));
+            }
         }
-        let body = if self.small_text { 14.5 } else { 16.0 };
+        // 전체 문서 String 복제 없이 잠시 꺼내 쓰고 프레임 끝에 되돌린다 (Zero-Copy)
+        let (text, doc_rev) = {
+            let doc = self.docs.get_mut(&name).unwrap();
+            (std::mem::take(&mut doc.text), doc.rev)
+        };
+        let body: f32 = if self.small_text { 14.5 } else { 16.0 };
         let scheme = format!(
             "file:///{}/",
             to_slash(&self.doc_dir()).trim_start_matches('/')
@@ -782,6 +832,8 @@ impl App {
         let mut fmt = None;
         let mut slash = None;
         let mut toc_active = None;
+        let mut block_rects = std::mem::take(&mut self.canvas_rects);
+        block_rects.clear();
 
         egui::ScrollArea::vertical()
             .id_salt(("canvas", &name))
@@ -793,6 +845,11 @@ impl App {
                 } else {
                     (full - 64.0).clamp(200.0, 840.0)
                 };
+                let h_cache_key = (w.to_bits(), body.to_bits());
+                if self.height_cache_key != h_cache_key {
+                    self.height_cache_key = h_cache_key;
+                    self.block_heights.clear();
+                }
                 let pad = ((full - w) / 2.0).max(16.0);
                 ui.add_space(36.0);
                 ui.horizontal_top(|ui| {
@@ -802,12 +859,19 @@ impl App {
                         canvas_style(ui, body, p);
                         let clip = ui.clip_rect();
                         let view_top = clip.top();
-                        let mut block_rects: Vec<(Range<usize>, Rect)> =
-                            Vec::with_capacity(items.len());
+                        block_rects.reserve(items.len());
                         for (r, is_active) in &items {
                             if *is_active {
-                                let out =
-                                    self.block_editor(ui, &ctx, p, &name, &text, r.clone(), body);
+                                let out = self.block_editor(
+                                    ui,
+                                    &ctx,
+                                    p,
+                                    &name,
+                                    &text,
+                                    doc_rev,
+                                    r.clone(),
+                                    body,
+                                );
                                 if out.changed.is_some() {
                                     change = out.changed.map(|s| (r.clone(), s));
                                 }
@@ -883,6 +947,9 @@ impl App {
                             }
                             ui.add_space(4.0);
                         }
+                        if let Some(doc) = self.docs.get_mut(&name) {
+                            doc.text = text;
+                        }
 
                         // 마우스 드래그: 단일 블록 텍스트 선택 또는 다중 블록 범위 선택
                         let (drag_active, origin_opt, pos_opt) = ctx.input(|i| {
@@ -898,16 +965,23 @@ impl App {
                                 if area.contains(origin) && !on_fg {
                                     let y_min = origin.y.min(pos.y);
                                     let y_max = origin.y.max(pos.y);
-                                    let hit: Vec<&(Range<usize>, Rect)> = block_rects
-                                        .iter()
-                                        .filter(|(r, rect)| {
-                                            !r.is_empty()
-                                                && rect.bottom() + 2.0 >= y_min
-                                                && rect.top() - 2.0 <= y_max
-                                        })
-                                        .collect();
-                                    if hit.len() == 1 {
-                                        let (b, _) = hit[0];
+                                    let mut first_hit: Option<Range<usize>> = None;
+                                    let mut last_hit: Option<Range<usize>> = None;
+                                    let mut hit_count = 0usize;
+                                    for (r, rect) in &block_rects {
+                                        if !r.is_empty()
+                                            && rect.bottom() + 2.0 >= y_min
+                                            && rect.top() - 2.0 <= y_max
+                                        {
+                                            if first_hit.is_none() {
+                                                first_hit = Some(r.clone());
+                                            }
+                                            last_hit = Some(r.clone());
+                                            hit_count += 1;
+                                        }
+                                    }
+                                    if hit_count == 1 {
+                                        let b = first_hit.unwrap();
                                         self.block_sel = None;
                                         if self.active != Some(b.start) {
                                             self.drag_anchor = Some((b.start, origin));
@@ -919,9 +993,9 @@ impl App {
                                             self.drag_last_pos = Some(pos);
                                             consumed = true;
                                         }
-                                    } else if hit.len() >= 2 {
-                                        let start = hit.first().unwrap().0.start;
-                                        let end = hit.last().unwrap().0.end;
+                                    } else if hit_count >= 2 {
+                                        let start = first_hit.unwrap().start;
+                                        let end = last_hit.unwrap().end;
                                         self.leave_blank();
                                         self.active = None;
                                         self.drag_anchor = None;
@@ -982,6 +1056,10 @@ impl App {
                     });
                 });
             });
+
+        // 프레임 재사용 벡터를 즉시 복구
+        self.canvas_items = items;
+        self.canvas_rects = block_rects;
 
         // 링크·복사 버튼을 누른 클릭은 블록 편집으로 넘어가지 않는다
         if ctx.output(|o| o.commands.len()) > cmds_before {
@@ -1232,6 +1310,7 @@ impl App {
         p: &Pal,
         name: &str,
         text: &str,
+        doc_rev: u64,
         r: Range<usize>,
         body: f32,
     ) -> EditorOut {
@@ -1285,9 +1364,21 @@ impl App {
         {
             out.response.request_focus();
         }
+        let is_changed = buf != text[r.clone()];
         if let Some(s) = &sel {
-            let base = char_len(&text[..r.start]);
-            let blen = char_len(&buf);
+            let (base, blen) = if !is_changed
+                && self.active_char_cache.0 == r.start
+                && self.active_char_cache.1 == doc_rev
+            {
+                (self.active_char_cache.2, self.active_char_cache.3)
+            } else {
+                let b = char_len(&text[..r.start]);
+                let l = char_len(&buf);
+                if !is_changed {
+                    self.active_char_cache = (r.start, doc_rev, b, l);
+                }
+                (b, l)
+            };
             if out.response.has_focus() || s.start.0 < s.end.0 {
                 self.last_sel = Some((base + s.start.0.min(blen), base + s.end.0.min(blen)));
             }
@@ -1301,7 +1392,6 @@ impl App {
             let c = sel.as_ref().map_or(0, |s| s.end.0);
             ui.scroll_to_rect(cursor_of(c), Some(Align::Center));
         }
-        let changed = (buf != text[r.clone()]).then(|| buf.clone());
 
         // 선택 영역 위 서식 막대 (드래그 중에는 띄우지 않음)
         let mut fmt = None;
@@ -1372,6 +1462,7 @@ impl App {
                     .input(|i| i.pointer.interact_pos())
                     .is_some_and(|pos| slash_resp.response.rect.contains(pos));
         }
+        let changed = is_changed.then_some(buf);
         EditorOut {
             rect: out.response.rect,
             changed,
@@ -1558,7 +1649,6 @@ impl App {
         dark: bool,
     ) -> Option<String> {
         let before = preprocess(src);
-        let mut shown = before.clone();
         let math = |ui: &mut egui::Ui, s: &str, _inline: bool| {
             ui.code(s.trim());
         };
@@ -1569,8 +1659,16 @@ impl App {
         if src.contains("[!") {
             viewer = viewer.alerts(alerts(dark));
         }
+        // 체크박스([ ] / [x] / [X])가 없는 일반 블록은 복제 없이 참조(&str)로 즉시 렌더링 (Zero-Allocation)
+        let has_checkbox =
+            before.contains("[ ]") || before.contains("[x]") || before.contains("[X]");
+        if !has_checkbox {
+            viewer.show(ui, &mut self.md_cache, &before);
+            return None;
+        }
+        let mut shown = before.clone().into_owned();
         viewer.show_mut(ui, &mut self.md_cache, &mut shown);
-        if shown == before {
+        if shown == *before {
             return None;
         }
         let mut s = src.to_string();
@@ -1752,11 +1850,12 @@ impl App {
         let kind = match dialog {
             Dialog::Files { .. } => 0,
             Dialog::NewFile(_) => 1,
-            Dialog::Rename { .. } => 2,
-            Dialog::Delete(_) => 3,
-            Dialog::Unsaved(_) => 4,
-            Dialog::Image { .. } => 5,
-            Dialog::Help => 6,
+            Dialog::SaveScratch(_) => 2,
+            Dialog::Rename { .. } => 3,
+            Dialog::Delete(_) => 4,
+            Dialog::Unsaved(_) => 5,
+            Dialog::Image { .. } => 6,
+            Dialog::Help => 7,
         };
         // 종류마다 다른 id: 같은 id면 이전 창 크기를 기억해 레이아웃이 늘어난다
         let modal = egui::Modal::new(egui::Id::unique(("dialog", kind)))
@@ -1775,8 +1874,14 @@ impl App {
                     Dialog::Files { filter, sel } => {
                         self.files_modal(ui, p, filter, sel, &mut close, &mut next);
                     }
-                    Dialog::NewFile(new_name) => {
-                        cancel |= modal_header(ui, p, theme::PLUS, p.accent, "새 파일");
+                    Dialog::NewFile(new_name) | Dialog::SaveScratch(new_name) => {
+                        let save_mode = matches!(kind, 2);
+                        let (icon, title, btn, input_id) = if save_mode {
+                            (theme::SAVE, "파일로 저장", "저장", "save-scratch")
+                        } else {
+                            (theme::PLUS, "새 파일", "만들기", "new-file")
+                        };
+                        cancel |= modal_header(ui, p, icon, p.accent, title);
                         let mut submit = false;
                         Frame::new()
                             .inner_margin(Margin::symmetric(20, 18))
@@ -1791,7 +1896,7 @@ impl App {
                                 let r = input(
                                     ui,
                                     p,
-                                    egui::Id::unique("new-file"),
+                                    egui::Id::unique(input_id),
                                     new_name,
                                     "새문서.md",
                                     f32::INFINITY,
@@ -1800,11 +1905,16 @@ impl App {
                                 submit = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                             });
                         footer(ui, p, None, |ui| {
-                            submit |= primary(ui, p, "만들기").clicked();
+                            submit |= primary(ui, p, btn).clicked();
                             cancel |= ghost(ui, p, "취소", None).clicked();
                         });
                         if submit {
-                            match self.create_file(new_name) {
+                            let res = if save_mode {
+                                self.save_scratch_as(new_name)
+                            } else {
+                                self.create_file(new_name)
+                            };
+                            match res {
                                 Ok(()) => close = true,
                                 Err(e) => error = Some(e),
                             }
@@ -1887,7 +1997,7 @@ impl App {
                         let names: Vec<String> = self
                             .docs
                             .iter()
-                            .filter(|(_, d)| d.dirty())
+                            .filter(|(_, d)| !d.scratch && d.dirty())
                             .map(|(n, _)| n.clone())
                             .collect();
                         let what = if matches!(after, After::Close) {

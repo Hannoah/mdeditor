@@ -16,8 +16,9 @@ mod theme;
 mod ui;
 
 const AUTO_SAVE_DELAY: Duration = Duration::from_secs(2);
-const UNDO_LIMIT: usize = 200; // ponytail: 단계마다 전체 텍스트 스냅샷. 아주 큰 문서에서 메모리가 문제면 diff 저장으로
-const MAX_FILES: usize = 5000; // ponytail: 거대한 폴더(예: 사용자 홈) 스캔 상한
+const UNDO_LIMIT: usize = 200; // 단계마다 변경 구간(Patch)만 기록해 메모리 점유를 최소화
+const MAX_FILES: usize = 5000; // 거대한 폴더(예: 사용자 홈) 스캔 상한
+const SCRATCH_KEY: &str = ""; // 이름 없는 임시 메모 문서 키 (실제 파일 경로는 비어 있을 수 없다)
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,6 +43,8 @@ fn main() -> eframe::Result {
             .with_min_inner_size([640.0, 420.0])
             .with_icon(app_icon())
             .with_drag_and_drop(true),
+        system_font_fallback: false,
+        dithering: false,
         ..Default::default()
     };
     eframe::run_native(
@@ -236,6 +239,46 @@ fn save_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
 
 // ---------- 문서 ----------
 
+// 전체 문자열 스냅샷 대신 바뀐 구간만 보관하는 최소 역패치(Patch)
+#[derive(Clone)]
+struct Patch {
+    start: usize,
+    end: usize,
+    with: String,
+}
+
+impl Patch {
+    fn between(old: &str, new: &str) -> Self {
+        let (o, n) = (old.as_bytes(), new.as_bytes());
+        let mut prefix = o.iter().zip(n).take_while(|(x, y)| x == y).count();
+        while prefix > 0 && (!old.is_char_boundary(prefix) || !new.is_char_boundary(prefix)) {
+            prefix -= 1;
+        }
+        let max = o.len().min(n.len()) - prefix;
+        let mut suffix = o
+            .iter()
+            .rev()
+            .zip(n.iter().rev())
+            .take(max)
+            .take_while(|(x, y)| x == y)
+            .count();
+        while suffix > 0
+            && (!old.is_char_boundary(o.len() - suffix) || !new.is_char_boundary(n.len() - suffix))
+        {
+            suffix -= 1;
+        }
+        Self {
+            start: prefix,
+            end: n.len() - suffix,
+            with: old[prefix..o.len() - suffix].to_string(),
+        }
+    }
+
+    fn apply(&self, text: &mut String) {
+        text.replace_range(self.start..self.end, &self.with);
+    }
+}
+
 struct Doc {
     text: String,
     saved: String,
@@ -243,6 +286,7 @@ struct Doc {
     bom: bool,
     edited_at: Option<Instant>,
     dirty_flag: bool,
+    scratch: bool,
     chars: usize,
     lines: usize,
     blocks: Vec<Range<usize>>,
@@ -250,8 +294,8 @@ struct Doc {
     rev: u64,
     mtime: Option<std::time::SystemTime>, // 마지막으로 읽거나 쓴 시점의 디스크 수정 시각
     prev: String,                         // 직전 refresh_meta 때의 텍스트 (실행 취소 기록용)
-    undo: Vec<String>,
-    redo: Vec<String>,
+    undo: Vec<Patch>,
+    redo: Vec<Patch>,
     typed_at: Option<Instant>,
 }
 
@@ -308,6 +352,7 @@ impl Doc {
             bom,
             edited_at: None,
             dirty_flag: false,
+            scratch: false,
             chars: 0,
             lines: 1,
             blocks: Vec::new(),
@@ -316,6 +361,30 @@ impl Doc {
         };
         doc.refresh_meta();
         Ok(doc)
+    }
+
+    fn scratch(text: String) -> Doc {
+        let mut doc = Doc {
+            saved: text.clone(),
+            prev: text.clone(),
+            mtime: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            typed_at: None,
+            text,
+            crlf: false,
+            bom: false,
+            edited_at: None,
+            dirty_flag: false,
+            scratch: true,
+            chars: 0,
+            lines: 1,
+            blocks: Vec::new(),
+            outline: Vec::new(),
+            rev: 0,
+        };
+        doc.refresh_meta();
+        doc
     }
 
     // 실행 취소 기록. 모든 편집이 refresh_meta를 거치므로 여기 한 곳에서 직전 텍스트와 비교한다.
@@ -330,13 +399,32 @@ impl Doc {
                 .typed_at
                 .is_some_and(|t| now.duration_since(t) < Duration::from_millis(700))
             && self.text.len().abs_diff(self.prev.len()) <= 4;
-        let before = std::mem::replace(&mut self.prev, self.text.clone());
-        if !typing {
-            self.undo.push(before);
-            if self.undo.len() > UNDO_LIMIT {
+        let patch = Patch::between(&self.prev, &self.text);
+        if typing {
+            if let Some(last) = self.undo.last_mut() {
+                let p_end_in_prev = patch.start + patch.with.len();
+                let o_start = patch.start.min(last.start);
+                let o_end = p_end_in_prev.max(last.end);
+                let mut merged = String::with_capacity(
+                    (last.start - o_start) + last.with.len() + (o_end - last.end),
+                );
+                merged.push_str(&self.prev[o_start..last.start]);
+                merged.push_str(&last.with);
+                merged.push_str(&self.prev[last.end..o_end]);
+                last.start = o_start;
+                last.end = o_end + patch.end - p_end_in_prev;
+                last.with = merged;
+            } else {
+                self.undo.push(patch);
+            }
+        } else {
+            if self.undo.len() >= UNDO_LIMIT {
                 self.undo.remove(0);
             }
+            self.undo.push(patch);
         }
+        self.prev.clear();
+        self.prev.push_str(&self.text);
         self.redo.clear();
         self.typed_at = Some(now);
     }
@@ -348,17 +436,19 @@ impl Doc {
         } else {
             (&mut self.redo, &mut self.undo)
         };
-        let mut snap = from.pop()?;
-        while same_blocks(&snap, &self.text) {
+        let first = from.pop()?;
+        let old = self.text.clone();
+        first.apply(&mut self.text);
+        while same_blocks(&self.text, &old) {
             match from.pop() {
-                Some(s) => snap = s,
+                Some(p) => p.apply(&mut self.text),
                 None => break,
             }
         }
-        let old = std::mem::replace(&mut self.text, snap);
         let caret = change_end(&old, &self.text);
-        to.push(old);
-        self.prev = self.text.clone();
+        to.push(Patch::between(&old, &self.text));
+        self.prev.clear();
+        self.prev.push_str(&self.text);
         self.typed_at = None;
         self.edited_at = Some(Instant::now());
         self.refresh_meta();
@@ -369,10 +459,10 @@ impl Doc {
         let lines = self.text.bytes().filter(|&b| b == b'\n').count() + 1;
         self.record_history(lines == self.lines);
         self.lines = lines;
-        self.dirty_flag = self.text != self.saved;
+        self.dirty_flag = self.text.len() != self.saved.len() || self.text != self.saved;
         self.chars = char_len(&self.text);
-        self.blocks = split_blocks(&self.text);
-        self.outline = outline_with_bytes(&self.text);
+        split_blocks_into(&self.text, &mut self.blocks);
+        outline_with_bytes_into(&self.text, &mut self.outline);
         self.rev = self.rev.wrapping_add(1);
     }
 
@@ -542,18 +632,46 @@ fn smart_enter(s: &str, cursor: usize) -> Option<(String, usize)> {
     Some((out, cursor + char_len(&ins)))
 }
 
-// 찾기: 모든 일치 구간(문자 인덱스). 대소문자 무시는 문자 단위 비교.
+// 찾기: 모든 일치 구간(문자 인덱스). 대소문자 구분·ASCII 검색은 힙 할당 없이 바이트 단위로 고속 스캔한다.
 fn find_all(s: &str, query: &str, case: bool) -> Vec<Sel> {
     if query.is_empty() || query.len() > s.len() {
         return Vec::new();
     }
-    let norm = |c: char| {
-        if case {
-            c
-        } else {
-            c.to_lowercase().next().unwrap_or(c)
+    if case {
+        let q_chars = char_len(query);
+        let mut out = Vec::new();
+        let (mut last_b, mut ci) = (0, 0);
+        for (b, _) in s.match_indices(query) {
+            ci += char_len(&s[last_b..b]);
+            out.push((ci, ci + q_chars));
+            last_b = b + query.len();
+            ci += q_chars;
         }
-    };
+        return out;
+    }
+    if query.is_ascii() {
+        let qb = query.as_bytes();
+        let sb = s.as_bytes();
+        let q_len = qb.len();
+        let mut out = Vec::new();
+        let (mut i, mut last_b, mut ci) = (0, 0, 0);
+        while i + q_len <= sb.len() {
+            if sb[i..i + q_len].eq_ignore_ascii_case(qb)
+                && s.is_char_boundary(i)
+                && s.is_char_boundary(i + q_len)
+            {
+                ci += char_len(&s[last_b..i]);
+                out.push((ci, ci + q_len));
+                i += q_len;
+                last_b = i;
+                ci += q_len;
+            } else {
+                i += 1;
+            }
+        }
+        return out;
+    }
+    let norm = |c: char| c.to_lowercase().next().unwrap_or(c);
     let needle: Vec<char> = query.chars().map(norm).collect();
     let hay: Vec<char> = s.chars().map(norm).collect();
     if needle.is_empty() || needle.len() > hay.len() {
@@ -581,16 +699,19 @@ fn replace_all(s: &str, matches: &[Sel], with: &str) -> String {
 }
 
 // 목차: (레벨, 제목, 줄 번호, 줄 시작 문자 인덱스, 줄 시작 바이트 인덱스). 코드 펜스 안은 제외.
-fn outline_with_bytes(s: &str) -> Vec<(usize, String, usize, usize, usize)> {
-    let mut out = Vec::new();
-    let (mut in_code, mut ci, mut bi) = (false, 0, 0);
+// 일반 줄에서는 UTF-8 문자 수(char_len)를 세지 않고 제목 줄을 만났을 때만 증분 계산한다.
+fn outline_with_bytes_into(s: &str, out: &mut Vec<(usize, String, usize, usize, usize)>) {
+    out.clear();
+    let (mut in_code, mut ci, mut bi, mut last_bi) = (false, 0, 0, 0);
     for (n, line) in s.split('\n').enumerate() {
         let t = line.trim_start();
         if t.starts_with("```") || t.starts_with("~~~") {
             in_code = !in_code;
         } else if !in_code {
-            let level = t.chars().take_while(|&c| c == '#').count();
-            if (1..=6).contains(&level) && t[level..].starts_with(' ') {
+            let level = t.bytes().take_while(|&c| c == b'#').count();
+            if (1..=6).contains(&level) && t.as_bytes().get(level) == Some(&b' ') {
+                ci += char_len(&s[last_bi..bi]);
+                last_bi = bi;
                 out.push((
                     level,
                     t[level..].trim().trim_end_matches('#').trim().into(),
@@ -600,25 +721,25 @@ fn outline_with_bytes(s: &str) -> Vec<(usize, String, usize, usize, usize)> {
                 ));
             }
         }
-        ci += char_len(line) + 1;
         bi += line.len() + 1;
     }
-    out
 }
 
 #[cfg(test)]
 fn outline(s: &str) -> Vec<(usize, String, usize, usize)> {
-    outline_with_bytes(s)
-        .into_iter()
+    let mut out = Vec::new();
+    outline_with_bytes_into(s, &mut out);
+    out.into_iter()
         .map(|(l, t, n, ci, _)| (l, t, n, ci))
         .collect()
 }
 
 // 미리보기 전용 변환. 바이트 길이를 보존해서 체크박스 위치가 원문과 1:1로 대응한다.
 //   :::toggle 제목 → ##### ▸ 제목,  ::: → 공백,  ==형광펜== → **형광펜**,  [[Ctrl]] → ``Ctrl``
-fn preprocess(s: &str) -> String {
+// 확장 문법이 없는 일반 블록은 힙 할당 없이 원본 슬라이스(Cow::Borrowed)를 그대로 돌려준다.
+fn preprocess(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains(":::") && !s.contains("==") && !s.contains("[[") {
-        return s.to_string();
+        return std::borrow::Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len());
     let mut in_code = false;
@@ -636,13 +757,17 @@ fn preprocess(s: &str) -> String {
             out.push_str("##### ▸"); // 9바이트 = ":::toggle"
             out.push_str(rest);
         } else if line.trim_end() == ":::" {
-            out.push_str(&" ".repeat(line.len()));
+            for _ in 0..line.len() {
+                out.push(' ');
+            }
+        } else if !line.contains("==") && !line.contains("[[") {
+            out.push_str(line);
         } else {
             out.push_str(&preprocess_inline(line));
         }
     }
     debug_assert_eq!(out.len(), s.len());
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 fn preprocess_inline(line: &str) -> String {
@@ -768,8 +893,8 @@ fn heading_level(t: &str) -> Option<usize> {
 
 // 노션식 캔버스의 블록: 빈 줄로 나뉜 바이트 구간.
 // 코드 펜스·$$·:::toggle 안의 빈 줄로는 나누지 않고, 제목 줄은 항상 혼자 한 블록이다.
-fn split_blocks(s: &str) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
+fn split_blocks_into(s: &str, out: &mut Vec<Range<usize>>) {
+    out.clear();
     let mut start: Option<usize> = None;
     let mut fence: Option<&str> = None; // 닫는 표식
     let (mut pos, mut last_end) = (0, 0);
@@ -825,6 +950,11 @@ fn split_blocks(s: &str) -> Vec<Range<usize>> {
     if let Some(st) = start {
         out.push(st..last_end);
     }
+}
+
+fn split_blocks(s: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    split_blocks_into(s, &mut out);
     out
 }
 
@@ -836,6 +966,7 @@ enum Dialog {
         sel: usize,
     },
     NewFile(String),
+    SaveScratch(String),
     Rename {
         from: String,
         to: String,
@@ -963,6 +1094,11 @@ struct App {
     allow_close: bool,
     last_title: String,
     block_heights: HashMap<egui::Id, f32>,
+    height_cache_key: (u32, u32),
+    active_char_cache: (usize, u64, usize, usize),
+    canvas_items: Vec<(Range<usize>, bool)>,
+    canvas_rects: Vec<(Range<usize>, egui::Rect)>,
+    startup_frames: u8,
 }
 
 impl App {
@@ -970,12 +1106,17 @@ impl App {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         theme::install_fonts(&cc.egui_ctx);
         let get = |k: &str| cc.storage.and_then(|s| s.get_string(k));
+        let has_arg = arg.is_some();
+        let draft = get("draft").unwrap_or_default();
         let (root, open) = match arg {
             Some(p) => resolve_target(Some(&p), cwd),
-            None => match get("root").map(PathBuf::from).filter(|p| p.is_dir()) {
-                Some(r) => (r, get("file")),
-                None => resolve_target(None, cwd),
-            },
+            None => {
+                let r = get("root")
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_dir())
+                    .unwrap_or_else(|| resolve_target(None, cwd).0);
+                (r, None)
+            }
         };
         let dark = match get("theme").as_deref() {
             Some("light") => false,
@@ -1013,12 +1154,65 @@ impl App {
             allow_close: false,
             last_title: String::new(),
             block_heights: HashMap::new(),
+            height_cache_key: (0, 0),
+            active_char_cache: (usize::MAX, u64::MAX, 0, 0),
+            canvas_items: Vec::new(),
+            canvas_rects: Vec::new(),
+            startup_frames: 0,
         };
-        app.switch_root(root, open);
+        if has_arg {
+            app.switch_root(root, open);
+            if !draft.is_empty() {
+                app.docs.insert(SCRATCH_KEY.into(), Doc::scratch(draft));
+            }
+        } else {
+            // 인자 없이 실행하면 메모장/Notepad++처럼 항상 새 문서(또는 저장 없이 유지된 임시 메모)로 시작
+            app.root = root;
+            app.open_scratch(draft);
+        }
         if app.status.starts_with("작업 폴더") {
             app.status.clear(); // 시작할 때는 알림을 띄우지 않는다
         }
         app
+    }
+
+    fn is_scratch(&self) -> bool {
+        self.current.as_deref() == Some(SCRATCH_KEY)
+    }
+
+    fn draft_text(&self) -> &str {
+        self.docs.get(SCRATCH_KEY).map_or("", |d| d.text.as_str())
+    }
+
+    fn open_scratch(&mut self, initial: String) {
+        self.deactivate();
+        self.docs
+            .entry(SCRATCH_KEY.into())
+            .or_insert_with(|| Doc::scratch(initial));
+        self.current = Some(SCRATCH_KEY.into());
+        if self.docs[SCRATCH_KEY].text.is_empty() {
+            self.active = Some(0);
+            self.pending_sel = Some((0, 0));
+            self.focus_editor = true;
+        }
+    }
+
+    fn new_scratch(&mut self) {
+        self.deactivate();
+        if let Some(doc) = self.docs.get_mut(SCRATCH_KEY) {
+            if !doc.text.is_empty() {
+                doc.text.clear();
+                doc.edited_at = Some(Instant::now());
+                doc.refresh_meta();
+            }
+        } else {
+            self.docs
+                .insert(SCRATCH_KEY.into(), Doc::scratch(String::new()));
+        }
+        self.current = Some(SCRATCH_KEY.into());
+        self.active = Some(0);
+        self.pending_sel = Some((0, 0));
+        self.focus_editor = true;
     }
 
     fn doc(&self) -> Option<&Doc> {
@@ -1033,7 +1227,7 @@ impl App {
     fn switch_root(&mut self, root: PathBuf, open: Option<String>) {
         self.deactivate();
         self.root = root;
-        self.docs.clear();
+        self.docs.retain(|k, _| k == SCRATCH_KEY);
         self.current = None;
         self.files.clear();
         self.block_heights.clear();
@@ -1071,6 +1265,10 @@ impl App {
         if self.current.as_deref() != Some(name) {
             self.deactivate();
             self.current = Some(name.to_string());
+            // 수정되지 않은 비활성 문서는 메모리에서 내려 메모리 점유를 최소화
+            self.docs
+                .retain(|k, d| k == SCRATCH_KEY || k == name || d.dirty());
+            self.block_heights.clear();
         }
         true
     }
@@ -1086,13 +1284,20 @@ impl App {
 
     // 자동 저장·종료 시 저장: 성공은 조용히(상태 알약이 알려 준다), 실패만 알린다
     fn save_quiet(&mut self, name: &str) -> bool {
+        if name == SCRATCH_KEY {
+            return false;
+        }
         let Some(doc) = self.docs.get_mut(name) else {
             return false;
         };
+        if doc.scratch {
+            return false;
+        }
         let path = self.root.join(name);
         match save_atomic(&path, doc.encoded().as_bytes()) {
             Ok(()) => {
-                doc.saved = doc.text.clone();
+                doc.saved.clear();
+                doc.saved.push_str(&doc.text);
                 doc.edited_at = None;
                 doc.dirty_flag = false;
                 doc.mtime = modified(&path);
@@ -1108,7 +1313,7 @@ impl App {
 
     // 창으로 돌아왔을 때: 다른 프로그램이 현재 문서를 바꿨으면 다시 읽는다 (편집 중이면 경고만)
     fn sync_from_disk(&mut self) {
-        let Some(name) = self.current.clone() else {
+        let Some(name) = self.current.clone().filter(|n| n != SCRATCH_KEY) else {
             return;
         };
         let path = self.root.join(&name);
@@ -1167,14 +1372,52 @@ impl App {
         let dirty: Vec<String> = self
             .docs
             .iter()
-            .filter(|(_, d)| d.dirty())
+            .filter(|(_, d)| !d.scratch && d.dirty())
             .map(|(n, _)| n.clone())
             .collect();
         dirty.iter().filter(|n| !self.save_quiet(n)).count() == 0 // 실패해도 나머지는 계속 저장
     }
 
     fn any_dirty(&self) -> bool {
-        self.docs.values().any(Doc::dirty)
+        self.docs.values().any(|d| !d.scratch && d.dirty())
+    }
+
+    fn save_scratch_as(&mut self, input: &str) -> Result<(), String> {
+        let name = validate_name(input)?;
+        let path = self.root.join(&name);
+        if path.exists() {
+            return Err(format!("이미 있는 파일입니다: {name}"));
+        }
+        let body = self
+            .docs
+            .get(SCRATCH_KEY)
+            .map(|d| d.encoded())
+            .unwrap_or_default();
+        save_atomic(&path, body.as_bytes()).map_err(|e| format!("저장 실패: {e}"))?;
+        let mut doc = self
+            .docs
+            .remove(SCRATCH_KEY)
+            .unwrap_or_else(|| Doc::scratch(String::new()));
+        doc.scratch = false;
+        doc.saved = doc.text.clone();
+        doc.edited_at = None;
+        doc.dirty_flag = false;
+        doc.mtime = modified(&path);
+        self.docs.insert(name.clone(), doc);
+        self.docs
+            .insert(SCRATCH_KEY.into(), Doc::scratch(String::new()));
+        self.current = Some(name.clone());
+        self.refresh_files();
+        self.status = format!("저장됨: {name}");
+        Ok(())
+    }
+
+    fn trigger_save(&mut self) {
+        if self.is_scratch() {
+            self.dialog = Some(Dialog::SaveScratch(String::new()));
+        } else if let Some(n) = self.current.clone() {
+            self.save(&n);
+        }
     }
 
     fn create_file(&mut self, input: &str) -> Result<(), String> {
@@ -1216,6 +1459,9 @@ impl App {
     }
 
     fn delete(&mut self, name: &str) {
+        if name == SCRATCH_KEY {
+            return;
+        }
         match std::fs::remove_file(self.root.join(name)) {
             Ok(()) => {
                 if self.current.as_deref() == Some(name) {
@@ -1293,11 +1539,14 @@ impl App {
     }
 
     fn doc_dir(&self) -> PathBuf {
-        let cur = self.current.as_deref().unwrap_or("");
-        self.root
-            .join(cur)
-            .parent()
-            .map_or_else(|| self.root.clone(), Path::to_path_buf)
+        match self.current.as_deref() {
+            Some(cur) if cur != SCRATCH_KEY => self
+                .root
+                .join(cur)
+                .parent()
+                .map_or_else(|| self.root.clone(), Path::to_path_buf),
+            _ => self.root.clone(),
+        }
     }
 
     fn editor_id(name: &str, start: usize) -> egui::Id {
@@ -1313,7 +1562,7 @@ impl App {
 
     // ----- 블록 편집 상태 -----
 
-    // 활성 블록의 바이트 구간 (새로 만든 빈 블록이면 a..a)
+    // 활성 블록의 바이트 구간 (새로 만든 빈 블록이면 a..a) — O(log B) 이진 탐색
     fn active_block(&self) -> Option<Range<usize>> {
         let a = self.active?;
         let doc = self.doc()?;
@@ -1321,13 +1570,32 @@ impl App {
         if a > text.len() || !text.is_char_boundary(a) {
             return None;
         }
+        let idx = doc.blocks.partition_point(|b| b.start <= a);
         Some(
-            doc.blocks
-                .iter()
-                .find(|b| b.start <= a && a <= b.end)
+            idx.checked_sub(1)
+                .and_then(|i| doc.blocks.get(i))
+                .filter(|b| a <= b.end)
                 .cloned()
                 .unwrap_or(a..a),
         )
+    }
+
+    // 상태바 표시용: 매 프레임 전체 문서 char_len 스캔 없이 선택된 글자 수만 O(1) 계산
+    fn selected_chars(&self) -> usize {
+        if let Some(bs) = &self.block_sel {
+            let Some(doc) = self.doc() else {
+                return 0;
+            };
+            let s = bs.start.min(doc.text.len());
+            let e = bs.end.min(doc.text.len());
+            return if e > s { char_len(&doc.text[s..e]) } else { 0 };
+        }
+        if self.active.is_some() {
+            if let Some((a, b)) = self.last_sel {
+                return b.saturating_sub(a);
+            }
+        }
+        0
     }
 
     fn editor_focused(&self, ctx: &egui::Context) -> bool {
@@ -1936,17 +2204,38 @@ impl App {
         }
     }
 
-    fn auto_save_tick(&mut self, ctx: &egui::Context) {
+    fn auto_save_tick(
+        &mut self,
+        ctx: &egui::Context,
+        storage: Option<&mut (dyn eframe::Storage + 'static)>,
+    ) {
         let now = Instant::now();
         let mut due = Vec::new();
+        let mut flush_draft = false;
         for (name, doc) in &self.docs {
             if let (true, Some(t)) = (doc.dirty(), doc.edited_at) {
                 let elapsed = now.duration_since(t);
                 if elapsed >= AUTO_SAVE_DELAY {
-                    due.push(name.clone());
+                    if doc.scratch {
+                        flush_draft = true;
+                    } else {
+                        due.push(name.clone());
+                    }
                 } else {
                     ctx.request_repaint_after(AUTO_SAVE_DELAY - elapsed);
                 }
+            }
+        }
+        if flush_draft {
+            if let Some(doc) = self.docs.get_mut(SCRATCH_KEY) {
+                if let Some(st) = storage {
+                    st.set_string("draft", doc.text.clone());
+                    st.flush();
+                }
+                doc.saved.clear();
+                doc.saved.push_str(&doc.text);
+                doc.edited_at = None;
+                doc.dirty_flag = false;
             }
         }
         for name in due {
@@ -1974,12 +2263,10 @@ impl App {
             self.open_files();
         }
         if k(cmd, Key::S) {
-            if let Some(n) = self.current.clone() {
-                self.save(&n);
-            }
+            self.trigger_save();
         }
         if k(cmd, Key::N) {
-            self.dialog = Some(Dialog::NewFile(String::new()));
+            self.new_scratch();
         }
         if k(cmd, Key::H) {
             self.open_find(ctx, true);
@@ -2003,7 +2290,9 @@ impl App {
             self.dialog = Some(Dialog::Help);
         }
         if k(Modifiers::NONE, Key::F2) {
-            if let Some(n) = self.current.clone() {
+            if self.is_scratch() {
+                self.dialog = Some(Dialog::SaveScratch(String::new()));
+            } else if let Some(n) = self.current.clone() {
                 self.ask_rename(&n);
             }
         }
@@ -2841,5 +3130,116 @@ mod tests {
         assert_eq!(h.state().active, Some(0));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memo_mode_opens_scratch_and_persists_draft() {
+        #[derive(Default)]
+        struct MemStorage(HashMap<String, String>);
+        impl eframe::Storage for MemStorage {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.to_string(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+            fn flush(&mut self) {}
+        }
+
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_memo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("existing.md"), "# 기존 파일\n").unwrap();
+
+        let mut store = MemStorage::default();
+        store
+            .0
+            .insert("root".into(), dir.to_string_lossy().into_owned());
+        store.0.insert("file".into(), "existing.md".into());
+
+        // 1. 인자 없이 실행하면 기존 파일이 있어도 항상 새 문서(임시 메모)로 시작한다
+        let d1 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, None, &d1));
+        h.run_steps(2);
+        assert!(h.state().is_scratch());
+        assert_eq!(h.state().doc().unwrap().text, "");
+        assert_eq!(h.state().active, Some(0));
+
+        // 2. 저장 없이 메모를 작성하고 종료(App::save)해도 확인 창 없이 draft에 유지된다
+        h.event(egui::Event::Text("임시 메모 테스트".into()));
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().text, "임시 메모 테스트");
+        assert!(!h.state().any_dirty());
+        eframe::App::save(h.state_mut(), &mut store);
+        assert_eq!(
+            store.0.get("draft").map(String::as_str),
+            Some("임시 메모 테스트")
+        );
+        assert_eq!(store.0.get("file").map(String::as_str), Some(""));
+
+        // 3. 재실행 시 저장하지 않았던 메모가 그대로 복원된다 (기존 storage 시뮬레이션)
+        let saved_draft = store.0.get("draft").cloned().unwrap();
+        let d2 = dir.clone();
+        let mut h2 = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.docs
+                    .insert(SCRATCH_KEY.into(), Doc::scratch(saved_draft));
+                app.current = Some(SCRATCH_KEY.into());
+                app
+            });
+        h2.run_steps(2);
+        assert!(h2.state().is_scratch());
+        assert_eq!(h2.state().doc().unwrap().text, "임시 메모 테스트");
+
+        // 4. Ctrl+N으로 새 빈 메모 시작 (Ctrl+Z로 이전 메모 복구 가능)
+        h2.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
+        h2.run_steps(2);
+        assert!(h2.state().is_scratch());
+        assert_eq!(h2.state().doc().unwrap().text, "");
+        h2.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h2.run_steps(2);
+        assert_eq!(h2.state().doc().unwrap().text, "임시 메모 테스트");
+
+        // 5. 파일로 저장(save_scratch_as)하면 실제 .md 파일이 생성되고 draft는 비워진다
+        h2.state_mut().save_scratch_as("saved_memo").unwrap();
+        assert!(!h2.state().is_scratch());
+        assert_eq!(h2.state().current.as_deref(), Some("saved_memo.md"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("saved_memo.md")).unwrap(),
+            "임시 메모 테스트"
+        );
+        assert_eq!(h2.state().draft_text(), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_history_and_fast_find_work_accurately() {
+        let mut doc = Doc::scratch("초기 텍스트".into());
+        doc.text.push('A');
+        doc.refresh_meta();
+        doc.text.push('B');
+        doc.refresh_meta();
+        // 연속된 단일 문자 타이핑은 하나의 실행 취소 단위로 병합
+        assert_eq!(doc.undo.len(), 1);
+        doc.step_history(true);
+        assert_eq!(doc.text, "초기 텍스트");
+        doc.step_history(false);
+        assert_eq!(doc.text, "초기 텍스트AB");
+
+        // 대소문자 구분 / ASCII 대소문자 무시 / 유니코드 검색 검증
+        let s = "Hello 한글 HELLO world hello";
+        assert_eq!(find_all(s, "Hello", true), vec![(0, 5)]);
+        assert_eq!(find_all(s, "hello", false), vec![(0, 5), (9, 14), (21, 26)]);
+        assert_eq!(find_all(s, "한글", false), vec![(6, 8)]);
     }
 }

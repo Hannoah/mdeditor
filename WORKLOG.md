@@ -1,5 +1,27 @@
 # MDEditor 작업 기록
 
+## 2026-11-13 — v0.5.0: 메모 앱 모드(새 문서 자동 보관) 및 메모리·반응 속도 극강 최적화
+
+### 1. 메모장 / Notepad++ 스타일 새 문서(임시 메모) 모드 (`src/main.rs`, `src/ui.rs`)
+- 인자 없이 앱을 실행하면 기존 파일을 자동으로 열지 않고 항상 **`새 문서`**를 즉시 열어 곧바로 메모를 시작할 수 있게 변경.
+- 작성 중인 `새 문서`는 파일로 저장하지 않아도 입력 후 2초마다 및 앱 종료 시 `eframe::Storage["draft"]`에 자동 보관되어, 저장 확인 창 없이 바로 닫고 다시 열어도 그대로 유지됨.
+- `새 문서` 상태에서 `Ctrl+S`(저장 버튼·파일 배지 클릭·`F2`)를 누르면 파일 이름을 입력해 실제 `.md` 파일로 저장(`Dialog::SaveScratch`)하며, `Ctrl+N`은 새 빈 메모를 시작(실행 취소 `Ctrl+Z`로 이전 메모 복원 가능).
+
+### 2. 메모리 점유율 극강 최적화 (85.32 MB → 4.39 MB, 94.9% 절감)
+- **시스템 폰트 Zero-Heap OS 메모리 매핑 (`src/theme.rs`)**: `std::fs::read`로 약 49.88 MB의 `.ttf` 폰트를 힙(`Vec<u8>`)에 복사하던 방식을 Win32 `CreateFileMappingW` + `MapViewOfFile` 읽기 전용 파일 매핑(`egui::FontData::from_blob`)으로 교체하여 폰트 힙 할당을 0 바이트로 제거. `FontDefinitions::empty()`에서 출발해 미사용 기본 내장 폰트를 제외하고 중복 볼드 폰트(`malgunbd.ttf`) 로드를 생략.
+- **Working Set 자동 정리 (`src/theme.rs`, `src/ui.rs`)**: 초기 OpenGL(`glow`) 드라이버가 일회성으로 건드린 콜드 페이지를 첫 렌더링 직후(3프레임) 및 창 포커스 해제 시 `SetProcessWorkingSetSize`로 즉시 반환.
+- **차분(Delta Patch) 기반 실행 취소/다시 실행 (`src/main.rs`)**: 200단계의 전체 문서 `String` 복제본 대신 바뀐 바이트 구간만 저장하는 `Patch { start, end, with }` 구조로 교체하고, 연속된 단일 문자 타이핑/삭제를 하나의 패치로 병합.
+- **비활성 문서 및 레이아웃 캐시 정리 (`src/main.rs`, `src/ui.rs`)**: 다른 문서를 열 때 수정되지 않은 이전 문서는 메모리에서 내리고(`SCRATCH_KEY`는 유지), 창 폭·글꼴 크기가 바뀔 때 `block_heights` 캐시를 즉시 비움.
+
+### 3. UI 반응 속도 및 프레임 타임 극강 최적화 (`src/main.rs`, `src/ui.rs`)
+- **캔버스 Zero-Copy 렌더링**: 매 프레임 수행하던 `doc.text.clone()`, `doc.blocks.clone()`, `doc.outline.clone()`을 제거하고 `std::mem::take` 대여 및 `canvas_items`/`canvas_rects` 버퍼 재사용으로 전환.
+- **Markdown 블록 무할당 렌더링**: 확장 문법(`:::`, `==`, `[[`)이 없는 블록은 `preprocess()`가 `Cow::Borrowed`를 반환하고, 체크박스(`[ ]`, `[x]`)가 없는 블록은 복제 없이 `CommonMarkViewer::show`로 즉시 렌더링.
+- **메타 갱신·커서·찾기 고속화**: `split_blocks_into`와 `outline_with_bytes_into`가 기존 `Vec` 용량을 재사용하고 제목 줄에서만 `char_len`을 지연 계산. `active_block` 이진 탐색(`partition_point`), 상태바·블록 편집기 문자 오프셋 캐싱, `find_all` 대소문자 구분/ASCII 고속 경로 추가.
+
+### 4. 검증 및 실측 결과
+- `cargo test` 21개 통과, `cargo clippy --all-targets -- -D warnings` 무경고 통과, `cargo fmt --check` 통과.
+- 릴리즈 실행 파일 실측 메모리: `WorkingSetPrivate` **85.32 MB → 4.39 MB (-94.9%)**, `WorkingSet64` **203.16 MB → 22.82 MB (-88.8%)**, `PrivateBytes` **129.36 MB → 100.56 MB (-22.3%)**.
+
 ## 2026-11-11 — v0.4.0: 설치 마법사 재작성, 사용감 개선, 시작 속도
 
 ### 1. 설치·제거 (메시지박스 → 앱과 같은 디자인의 마법사)

@@ -157,78 +157,189 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
 }
 
 pub fn bold() -> FontFamily {
-    FontFamily::Name("bold".into())
+    static BOLD: std::sync::OnceLock<FontFamily> = std::sync::OnceLock::new();
+    BOLD.get_or_init(|| FontFamily::Name("bold".into())).clone()
+}
+
+#[cfg(windows)]
+mod win_mem {
+    use std::fs::File;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use std::ptr::NonNull;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileMappingW(
+            hFile: *mut core::ffi::c_void,
+            lpAttributes: *const core::ffi::c_void,
+            flProtect: u32,
+            dwMaximumSizeHigh: u32,
+            dwMaximumSizeLow: u32,
+            lpName: *const u16,
+        ) -> *mut core::ffi::c_void;
+        fn MapViewOfFile(
+            hFileMappingObject: *mut core::ffi::c_void,
+            dwDesiredAccess: u32,
+            dwFileOffsetHigh: u32,
+            dwFileOffsetLow: u32,
+            dwNumberOfBytesToMap: usize,
+        ) -> *mut core::ffi::c_void;
+        fn UnmapViewOfFile(lpBaseAddress: *const core::ffi::c_void) -> i32;
+        fn CloseHandle(hObject: *mut core::ffi::c_void) -> i32;
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn SetProcessWorkingSetSize(
+            hProcess: *mut core::ffi::c_void,
+            dwMinimumWorkingSetSize: usize,
+            dwMaximumWorkingSetSize: usize,
+        ) -> i32;
+    }
+
+    // 시스템 폰트 파일을 힙에 복사(Vec<u8>, ~50MB)하지 않고 OS 파일 캐시에 읽기 전용으로 매핑한다 (PrivateBytes 0)
+    pub struct MappedFile {
+        ptr: NonNull<u8>,
+        len: usize,
+    }
+
+    unsafe impl Send for MappedFile {}
+    unsafe impl Sync for MappedFile {}
+
+    impl MappedFile {
+        pub fn open(path: &Path) -> Option<Self> {
+            let file = File::open(path).ok()?;
+            let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
+            if len == 0 {
+                return None;
+            }
+            unsafe {
+                let mapping = CreateFileMappingW(
+                    file.as_raw_handle() as *mut _,
+                    core::ptr::null(),
+                    0x02, // PAGE_READONLY
+                    0,
+                    0,
+                    core::ptr::null(),
+                );
+                if mapping.is_null() {
+                    return None;
+                }
+                let view = MapViewOfFile(mapping, 0x04, 0, 0, len); // FILE_MAP_READ
+                CloseHandle(mapping);
+                let ptr = NonNull::new(view.cast::<u8>())?;
+                Some(Self { ptr, len })
+            }
+        }
+    }
+
+    impl AsRef<[u8]> for MappedFile {
+        fn as_ref(&self) -> &[u8] {
+            unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+        }
+    }
+
+    impl Drop for MappedFile {
+        fn drop(&mut self) {
+            unsafe {
+                UnmapViewOfFile(self.ptr.as_ptr().cast());
+            }
+        }
+    }
+
+    pub fn trim_working_set() {
+        unsafe {
+            SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+        }
+    }
+}
+
+pub fn trim_working_set() {
+    #[cfg(windows)]
+    win_mem::trim_working_set();
+}
+
+fn load_font_data(path: &std::path::Path) -> Option<egui::FontData> {
+    #[cfg(windows)]
+    if let Some(mapped) = win_mem::MappedFile::open(path) {
+        return Some(egui::FontData::from_blob(std::sync::Arc::new(mapped), 0));
+    }
+    std::fs::read(path).ok().map(egui::FontData::from_owned)
 }
 
 // 웹과 같은 글꼴: KoPubWorld 돋움(설치돼 있으면) → Segoe UI → 맑은 고딕, 코드는 Consolas
 pub fn install_fonts(ctx: &egui::Context) {
-    let win = std::path::PathBuf::from(r"C:\Windows\Fonts");
-    let user = std::env::var_os("LOCALAPPDATA")
-        .map(|d| std::path::PathBuf::from(d).join(r"Microsoft\Windows\Fonts"));
-    let dirs: Vec<std::path::PathBuf> = user.into_iter().chain([win]).collect();
-    // 디렉토리 전체 스캔은 한 번만 수행하고, 정확한 파일명(.ttf)은 O(1) 직접 경로로 먼저 읽는다
-    let mut cached_entries: Option<Vec<(String, std::path::PathBuf)>> = None;
-    let mut find = |prefixes: &[&str]| -> Option<Vec<u8>> {
-        prefixes.iter().find_map(|pre| {
-            if pre.ends_with(".ttf") {
-                if let Some(bytes) = dirs.iter().find_map(|d| std::fs::read(d.join(pre)).ok()) {
-                    return Some(bytes);
-                }
+    static FONTS: std::sync::OnceLock<egui::FontDefinitions> = std::sync::OnceLock::new();
+    let fonts = FONTS
+        .get_or_init(|| {
+            let win = std::path::PathBuf::from(r"C:\Windows\Fonts");
+            let user = std::env::var_os("LOCALAPPDATA")
+                .map(|d| std::path::PathBuf::from(d).join(r"Microsoft\Windows\Fonts"));
+            let dirs: Vec<std::path::PathBuf> = user.into_iter().chain([win]).collect();
+            let mut cached_entries: Option<Vec<(String, std::path::PathBuf)>> = None;
+            let mut find = |prefixes: &[&str]| -> Option<(usize, egui::FontData)> {
+                prefixes.iter().enumerate().find_map(|(idx, pre)| {
+                    if pre.ends_with(".ttf") {
+                        if let Some(fd) = dirs.iter().find_map(|d| load_font_data(&d.join(pre))) {
+                            return Some((idx, fd));
+                        }
+                    }
+                    let lower = pre.to_lowercase();
+                    let entries = cached_entries.get_or_insert_with(|| {
+                        dirs.iter()
+                            .filter_map(|d| std::fs::read_dir(d).ok())
+                            .flatten()
+                            .flatten()
+                            .filter_map(|e| {
+                                let n = e.file_name().to_string_lossy().to_lowercase();
+                                n.ends_with(".ttf").then(|| (n, e.path()))
+                            })
+                            .collect()
+                    });
+                    entries
+                        .iter()
+                        .find(|(n, _)| n.starts_with(&lower))
+                        .and_then(|(_, p)| load_font_data(p))
+                        .map(|fd| (idx, fd))
+                })
+            };
+            let mut fonts = egui::FontDefinitions::empty();
+            let mut add =
+                |key: &str, found: Option<(usize, egui::FontData)>| -> Option<(usize, String)> {
+                    let (idx, fd) = found?;
+                    fonts.font_data.insert(key.into(), fd.into());
+                    Some((idx, key.to_string()))
+                };
+            let reg_found = add("regular", find(&["KoPubWorld Dotum Medium", "segoeui.ttf"]));
+            let bold_found = add("bold", find(&["KoPubWorld Dotum Bold", "segoeuib.ttf"]));
+            let regular = reg_found.as_ref().map(|(_, k)| k.clone());
+            let bold_f = bold_found.as_ref().map(|(_, k)| k.clone());
+            let ko = add("malgun", find(&["malgun.ttf"])).map(|(_, k)| k);
+            // KoPubWorld Dotum Bold가 있으면 이미 한글 굵은 글꼴을 포함하므로 malgunbd.ttf(12MB)는 생략
+            let ko_bold = if bold_found.as_ref().is_some_and(|(idx, _)| *idx == 0) {
+                None
+            } else {
+                add("malgunbd", find(&["malgunbd.ttf"])).map(|(_, k)| k)
+            };
+            let mono = add("mono", find(&["consola.ttf"])).map(|(_, k)| k);
+            let sym = add("symbol", find(&["seguisym.ttf"])).map(|(_, k)| k);
+            let emoji = add("emoji", find(&["seguiemj.ttf"])).map(|(_, k)| k);
+            let chain = |list: &[&Option<String>]| -> Vec<String> {
+                list.iter().filter_map(|o| (*o).clone()).collect()
+            };
+            let prop_chain = chain(&[&regular, &ko, &sym, &emoji]);
+            if prop_chain.is_empty() {
+                return egui::FontDefinitions::default();
             }
-            let lower = pre.to_lowercase();
-            let entries = cached_entries.get_or_insert_with(|| {
-                dirs.iter()
-                    .filter_map(|d| std::fs::read_dir(d).ok())
-                    .flatten()
-                    .flatten()
-                    .filter_map(|e| {
-                        let n = e.file_name().to_string_lossy().to_lowercase();
-                        n.ends_with(".ttf").then(|| (n, e.path()))
-                    })
-                    .collect()
-            });
-            entries
-                .iter()
-                .find(|(n, _)| n.starts_with(&lower))
-                .and_then(|(_, p)| std::fs::read(p).ok())
+            fonts.families.insert(FontFamily::Proportional, prop_chain);
+            fonts
+                .families
+                .insert(FontFamily::Monospace, chain(&[&mono, &ko, &sym, &emoji]));
+            fonts.families.insert(
+                bold(),
+                chain(&[&bold_f, &ko_bold, &regular, &ko, &sym, &emoji]),
+            );
+            fonts
         })
-    };
-    let mut fonts = egui::FontDefinitions::default();
-    let defaults = fonts.families[&FontFamily::Proportional].clone();
-    let mut add = |key: &str, bytes: Option<Vec<u8>>| -> Option<String> {
-        let b = bytes?;
-        fonts
-            .font_data
-            .insert(key.into(), egui::FontData::from_owned(b).into());
-        Some(key.to_string())
-    };
-    let regular = add("regular", find(&["KoPubWorld Dotum Medium", "segoeui.ttf"]));
-    let bold_f = add("bold", find(&["KoPubWorld Dotum Bold", "segoeuib.ttf"]));
-    let ko = add("malgun", find(&["malgun.ttf"]));
-    let ko_bold = add("malgunbd", find(&["malgunbd.ttf"]));
-    let mono = add("mono", find(&["consola.ttf"]));
-    // 기호·이모지 대체 (코드 복사 버튼 아이콘 등)
-    let sym = add("symbol", find(&["seguisym.ttf"]));
-    let emoji = add("emoji", find(&["seguiemj.ttf"]));
-    let chain = |list: &[&Option<String>], tail: &[String]| -> Vec<String> {
-        list.iter()
-            .filter_map(|o| (*o).clone())
-            .chain(tail.iter().cloned())
-            .collect()
-    };
-    let mono_defaults = fonts.families[&FontFamily::Monospace].clone();
-    fonts.families.insert(
-        FontFamily::Proportional,
-        chain(&[&regular, &ko, &sym, &emoji], &defaults),
-    );
-    fonts.families.insert(
-        FontFamily::Monospace,
-        chain(&[&mono, &ko, &sym, &emoji], &mono_defaults),
-    );
-    fonts.families.insert(
-        bold(),
-        chain(&[&bold_f, &ko_bold, &regular, &ko, &sym, &emoji], &defaults),
-    );
+        .clone();
     ctx.set_fonts(fonts);
 }
 
