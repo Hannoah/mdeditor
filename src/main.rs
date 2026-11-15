@@ -18,7 +18,22 @@ mod ui;
 const AUTO_SAVE_DELAY: Duration = Duration::from_secs(2);
 const UNDO_LIMIT: usize = 200; // 단계마다 변경 구간(Patch)만 기록해 메모리 점유를 최소화
 const MAX_FILES: usize = 5000; // 거대한 폴더(예: 사용자 홈) 스캔 상한
-const SCRATCH_KEY: &str = ""; // 이름 없는 임시 메모 문서 키 (실제 파일 경로는 비어 있을 수 없다)
+const SCRATCH_KEY: &str = ""; // 첫 번째 임시 메모 문서 키 (실제 파일 경로는 비어 있을 수 없다)
+const SCRATCH_PREFIX: &str = ":scratch:"; // 추가 임시 메모 탭 키 접두어
+
+fn is_scratch_key(key: &str) -> bool {
+    key == SCRATCH_KEY || key.starts_with(SCRATCH_PREFIX)
+}
+
+fn tab_base_name(key: &str) -> std::borrow::Cow<'_, str> {
+    if key == SCRATCH_KEY {
+        std::borrow::Cow::Borrowed("새 문서")
+    } else if let Some(n) = key.strip_prefix(SCRATCH_PREFIX) {
+        std::borrow::Cow::Owned(format!("새 문서 {n}"))
+    } else {
+        std::borrow::Cow::Borrowed(key.rsplit(['/', '\\']).next().unwrap_or(key))
+    }
+}
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -297,6 +312,13 @@ struct Doc {
     undo: Vec<Patch>,
     redo: Vec<Patch>,
     typed_at: Option<Instant>,
+    // 탭 전환 시 복원되는 문서별 편집 위치/선택 상태
+    view_active: Option<usize>,
+    view_blank: usize,
+    view_block_sel: Option<Range<usize>>,
+    view_block_sel_anchor: Option<usize>,
+    view_block_sel_head: Option<usize>,
+    view_last_sel: Option<Sel>,
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -358,12 +380,23 @@ impl Doc {
             blocks: Vec::new(),
             outline: Vec::new(),
             rev: 0,
+            view_active: None,
+            view_blank: 0,
+            view_block_sel: None,
+            view_block_sel_anchor: None,
+            view_block_sel_head: None,
+            view_last_sel: None,
         };
         doc.refresh_meta();
+        if doc.text.is_empty() {
+            doc.view_active = Some(0);
+            doc.view_last_sel = Some((0, 0));
+        }
         Ok(doc)
     }
 
     fn scratch(text: String) -> Doc {
+        let empty = text.is_empty();
         let mut doc = Doc {
             saved: text.clone(),
             prev: text.clone(),
@@ -382,6 +415,12 @@ impl Doc {
             blocks: Vec::new(),
             outline: Vec::new(),
             rev: 0,
+            view_active: empty.then_some(0),
+            view_blank: 0,
+            view_block_sel: None,
+            view_block_sel_anchor: None,
+            view_block_sel_head: None,
+            view_last_sel: empty.then_some((0, 0)),
         };
         doc.refresh_meta();
         doc
@@ -958,6 +997,77 @@ fn split_blocks(s: &str) -> Vec<Range<usize>> {
     out
 }
 
+// 캔버스/커서 이동용 슬롯 목록: 비어 있지 않은 블록 + 빈 줄 블록(start..start)
+fn collect_doc_slots_into(
+    text: &str,
+    blocks: &[Range<usize>],
+    active_empty: Option<usize>,
+    out: &mut Vec<Range<usize>>,
+) {
+    fn push_gap(
+        out: &mut Vec<Range<usize>>,
+        active_empty: Option<usize>,
+        start: usize,
+        end: usize,
+        step_from: usize,
+        skip_end: bool,
+    ) {
+        let mut p = step_from;
+        while p < end || (!skip_end && p == end) {
+            out.push(p..p);
+            p += 2;
+        }
+        if let Some(a) = active_empty {
+            if a >= start && a <= end && (!skip_end || a < end) && !out.contains(&(a..a)) {
+                let at = out.partition_point(|r| r.start < a);
+                out.insert(at, a..a);
+            }
+        }
+    }
+    out.clear();
+    if blocks.is_empty() {
+        if text.is_empty() {
+            if active_empty == Some(0) {
+                out.push(0..0);
+            }
+        } else {
+            push_gap(out, active_empty, 0, text.len(), 0, false);
+        }
+        return;
+    }
+    push_gap(out, active_empty, 0, blocks[0].start, 0, true);
+    for (i, b) in blocks.iter().enumerate() {
+        out.push(b.clone());
+        let next_start = blocks.get(i + 1).map_or(text.len(), |n| n.start);
+        let step_from = (b.end + 2).min(next_start + 1);
+        push_gap(
+            out,
+            active_empty,
+            b.end,
+            next_start,
+            step_from,
+            i + 1 < blocks.len(),
+        );
+    }
+}
+
+#[cfg(test)]
+fn collect_doc_slots(
+    text: &str,
+    blocks: &[Range<usize>],
+    active_empty: Option<usize>,
+) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    collect_doc_slots_into(text, blocks, active_empty, &mut out);
+    out
+}
+
+fn slot_index(slots: &[Range<usize>], target: &Range<usize>) -> Option<usize> {
+    slots
+        .binary_search_by(|s| s.start.cmp(&target.start).then(s.end.cmp(&target.end)))
+        .ok()
+}
+
 // ---------- 앱 ----------
 
 enum Dialog {
@@ -983,6 +1093,7 @@ enum Dialog {
 
 enum After {
     Close,
+    CloseTab(String),
     Switch(PathBuf, Option<String>),
 }
 
@@ -1065,10 +1176,19 @@ fn slash_matches(query: &str) -> Vec<usize> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+struct EditorCursorInfo {
+    block_start: usize,
+    doc_rev: u64,
+    on_first_row: bool,
+    on_last_row: bool,
+}
+
 struct App {
     root: PathBuf,
     files: Vec<String>,
     docs: HashMap<String, Doc>,
+    tabs: Vec<String>,
     current: Option<String>,
     dark: bool,
     full_width: bool,
@@ -1081,12 +1201,17 @@ struct App {
     active: Option<usize>,           // 캔버스에서 편집 중인 블록의 시작 바이트
     blank: usize,                    // 활성 블록을 만들며 넣은 줄바꿈 수 (비운 채 떠나면 되돌린다)
     block_sel: Option<Range<usize>>, // 다중 블록 또는 전체 문서 선택 바이트 구간
+    block_sel_anchor: Option<usize>, // Shift+방향키/Shift+클릭 다중 블록 선택 기준점
+    block_sel_head: Option<usize>,
     drag_anchor: Option<(usize, egui::Pos2)>, // 비활성 블록에서 시작한 드래그 기준점
     drag_last_pos: Option<egui::Pos2>,
     last_sel: Option<Sel>,
     pending_sel: Option<Sel>,
+    pending_click_pos: Option<(usize, egui::Pos2)>,
     focus_editor: bool,
-    scroll_cursor: bool,
+    scroll_cursor: Option<Option<egui::Align>>,
+    scroll_tab_to_active: bool,
+    cursor_info: Option<EditorCursorInfo>,
     slash_sel: usize,
     toc_open: bool,
     toc_active: Option<usize>,
@@ -1096,6 +1221,7 @@ struct App {
     block_heights: HashMap<egui::Id, f32>,
     height_cache_key: (u32, u32),
     active_char_cache: (usize, u64, usize, usize),
+    canvas_slots: Vec<Range<usize>>,
     canvas_items: Vec<(Range<usize>, bool)>,
     canvas_rects: Vec<(Range<usize>, egui::Rect)>,
     startup_frames: u8,
@@ -1129,6 +1255,7 @@ impl App {
             root: PathBuf::new(),
             files: Vec::new(),
             docs: HashMap::new(),
+            tabs: Vec::new(),
             current: None,
             dark,
             full_width: flag("full_width"),
@@ -1141,12 +1268,17 @@ impl App {
             active: None,
             blank: 0,
             block_sel: None,
+            block_sel_anchor: None,
+            block_sel_head: None,
             drag_anchor: None,
             drag_last_pos: None,
             last_sel: None,
             pending_sel: None,
+            pending_click_pos: None,
             focus_editor: false,
-            scroll_cursor: false,
+            scroll_cursor: None,
+            scroll_tab_to_active: false,
+            cursor_info: None,
             slash_sel: 0,
             toc_open: false,
             toc_active: None,
@@ -1156,6 +1288,7 @@ impl App {
             block_heights: HashMap::new(),
             height_cache_key: (0, 0),
             active_char_cache: (usize::MAX, u64::MAX, 0, 0),
+            canvas_slots: Vec::new(),
             canvas_items: Vec::new(),
             canvas_rects: Vec::new(),
             startup_frames: 0,
@@ -1164,6 +1297,7 @@ impl App {
             app.switch_root(root, open);
             if !draft.is_empty() {
                 app.docs.insert(SCRATCH_KEY.into(), Doc::scratch(draft));
+                app.tabs.insert(0, SCRATCH_KEY.into());
             }
         } else {
             // 인자 없이 실행하면 메모장/Notepad++처럼 항상 새 문서(또는 저장 없이 유지된 임시 메모)로 시작
@@ -1177,42 +1311,198 @@ impl App {
     }
 
     fn is_scratch(&self) -> bool {
-        self.current.as_deref() == Some(SCRATCH_KEY)
+        self.current.as_deref().is_some_and(is_scratch_key)
     }
 
     fn draft_text(&self) -> &str {
-        self.docs.get(SCRATCH_KEY).map_or("", |d| d.text.as_str())
+        if let Some(cur) = self.current.as_deref().filter(|k| is_scratch_key(k)) {
+            if let Some(d) = self.docs.get(cur).filter(|d| !d.text.is_empty()) {
+                return d.text.as_str();
+            }
+        }
+        self.docs
+            .get(SCRATCH_KEY)
+            .filter(|d| !d.text.is_empty())
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .filter(|k| is_scratch_key(k))
+                    .filter_map(|k| self.docs.get(k))
+                    .find(|d| !d.text.is_empty())
+            })
+            .map_or("", |d| d.text.as_str())
+    }
+
+    fn tab_title<'a>(&self, key: &'a str) -> std::borrow::Cow<'a, str> {
+        if is_scratch_key(key) {
+            return tab_base_name(key);
+        }
+        let base = tab_base_name(key);
+        let dup = self
+            .tabs
+            .iter()
+            .any(|k| k != key && !is_scratch_key(k) && tab_base_name(k) == base);
+        if dup {
+            std::borrow::Cow::Borrowed(key)
+        } else {
+            base
+        }
+    }
+
+    fn next_scratch_key(&self) -> String {
+        if !self.tabs.iter().any(|k| k == SCRATCH_KEY) && !self.docs.contains_key(SCRATCH_KEY) {
+            return SCRATCH_KEY.into();
+        }
+        (2..)
+            .map(|n| format!("{SCRATCH_PREFIX}{n}"))
+            .find(|k| !self.tabs.contains(k) && !self.docs.contains_key(k))
+            .expect("unbounded range")
+    }
+
+    fn save_current_tab_view(&mut self) {
+        let Some(cur) = self.current.clone() else {
+            return;
+        };
+        if let Some(doc) = self.docs.get_mut(&cur) {
+            doc.view_active = self.active;
+            doc.view_blank = self.blank;
+            doc.view_block_sel = self.block_sel.clone();
+            doc.view_block_sel_anchor = self.block_sel_anchor;
+            doc.view_block_sel_head = self.block_sel_head;
+            doc.view_last_sel = self.last_sel;
+        }
+    }
+
+    fn restore_tab_view(&mut self, name: &str) {
+        self.drag_anchor = None;
+        self.drag_last_pos = None;
+        self.pending_sel = None;
+        self.pending_click_pos = None;
+        self.cursor_info = None;
+        self.active_char_cache = (usize::MAX, u64::MAX, 0, 0);
+        self.block_heights.clear();
+        if let Some(doc) = self.docs.get(name) {
+            if doc.text.is_empty() {
+                self.active = Some(0);
+                self.blank = 0;
+                self.block_sel = None;
+                self.block_sel_anchor = None;
+                self.block_sel_head = None;
+                self.last_sel = Some((0, 0));
+                self.pending_sel = Some((0, 0));
+                self.focus_editor = true;
+            } else {
+                self.active = doc.view_active.filter(|&a| a <= doc.text.len());
+                self.blank = doc.view_blank;
+                self.block_sel = doc.view_block_sel.clone();
+                self.block_sel_anchor = doc.view_block_sel_anchor;
+                self.block_sel_head = doc.view_block_sel_head;
+                self.last_sel = doc.view_last_sel;
+                if self.active.is_some() {
+                    self.focus_editor = true;
+                }
+            }
+        } else {
+            self.active = None;
+            self.blank = 0;
+            self.block_sel = None;
+            self.block_sel_anchor = None;
+            self.block_sel_head = None;
+            self.last_sel = None;
+        }
+    }
+
+    fn switch_to_tab(&mut self, name: &str) {
+        if self.current.as_deref() == Some(name) {
+            return;
+        }
+        if !self.docs.contains_key(name) {
+            return;
+        }
+        self.save_current_tab_view();
+        if !self.tabs.iter().any(|k| k == name) {
+            self.tabs.push(name.to_string());
+        }
+        self.current = Some(name.to_string());
+        self.restore_tab_view(name);
+        self.scroll_tab_to_active = true;
+    }
+
+    fn cycle_tab(&mut self, delta: isize) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let cur = self
+            .current
+            .as_deref()
+            .and_then(|c| self.tabs.iter().position(|t| t == c))
+            .unwrap_or(0);
+        let n = self.tabs.len() as isize;
+        let next = ((cur as isize + delta).rem_euclid(n)) as usize;
+        let target = self.tabs[next].clone();
+        self.switch_to_tab(&target);
+    }
+
+    fn new_tab(&mut self) {
+        self.save_current_tab_view();
+        let key = self.next_scratch_key();
+        self.docs.insert(key.clone(), Doc::scratch(String::new()));
+        self.tabs.push(key.clone());
+        self.current = Some(key.clone());
+        self.restore_tab_view(&key);
+        self.scroll_tab_to_active = true;
+    }
+
+    fn close_tab(&mut self, name: &str) {
+        let Some(idx) = self.tabs.iter().position(|t| t == name) else {
+            return;
+        };
+        if !is_scratch_key(name) && self.docs.get(name).is_some_and(Doc::dirty) {
+            self.save_quiet(name);
+            if self.docs.get(name).is_some_and(Doc::dirty) {
+                self.dialog = Some(Dialog::Unsaved(After::CloseTab(name.to_string())));
+                return;
+            }
+        }
+        self.force_close_tab(name, idx);
+    }
+
+    fn force_close_tab(&mut self, name: &str, idx: usize) {
+        self.tabs.remove(idx);
+        self.docs.remove(name);
+        if self.current.as_deref() == Some(name) {
+            self.active = None;
+            self.blank = 0;
+            self.block_sel = None;
+            self.block_sel_anchor = None;
+            self.block_sel_head = None;
+            self.drag_anchor = None;
+            self.drag_last_pos = None;
+            self.last_sel = None;
+            self.pending_sel = None;
+            self.pending_click_pos = None;
+            self.cursor_info = None;
+            self.block_heights.clear();
+            if self.tabs.is_empty() {
+                self.current = None;
+            } else {
+                let next = self.tabs[idx.min(self.tabs.len() - 1)].clone();
+                self.current = Some(next.clone());
+                self.restore_tab_view(&next);
+                self.scroll_tab_to_active = true;
+            }
+        }
     }
 
     fn open_scratch(&mut self, initial: String) {
-        self.deactivate();
-        self.docs
-            .entry(SCRATCH_KEY.into())
-            .or_insert_with(|| Doc::scratch(initial));
-        self.current = Some(SCRATCH_KEY.into());
-        if self.docs[SCRATCH_KEY].text.is_empty() {
-            self.active = Some(0);
-            self.pending_sel = Some((0, 0));
-            self.focus_editor = true;
-        }
-    }
-
-    fn new_scratch(&mut self) {
-        self.deactivate();
-        if let Some(doc) = self.docs.get_mut(SCRATCH_KEY) {
-            if !doc.text.is_empty() {
-                doc.text.clear();
-                doc.edited_at = Some(Instant::now());
-                doc.refresh_meta();
-            }
-        } else {
-            self.docs
-                .insert(SCRATCH_KEY.into(), Doc::scratch(String::new()));
+        self.save_current_tab_view();
+        self.docs.insert(SCRATCH_KEY.into(), Doc::scratch(initial));
+        if !self.tabs.iter().any(|k| k == SCRATCH_KEY) {
+            self.tabs.push(SCRATCH_KEY.into());
         }
         self.current = Some(SCRATCH_KEY.into());
-        self.active = Some(0);
-        self.pending_sel = Some((0, 0));
-        self.focus_editor = true;
+        self.restore_tab_view(SCRATCH_KEY);
+        self.scroll_tab_to_active = true;
     }
 
     fn doc(&self) -> Option<&Doc> {
@@ -1227,8 +1517,9 @@ impl App {
     fn switch_root(&mut self, root: PathBuf, open: Option<String>) {
         self.deactivate();
         self.root = root;
-        self.docs.retain(|k, _| k == SCRATCH_KEY);
-        self.current = None;
+        self.docs.retain(|k, _| is_scratch_key(k));
+        self.tabs.retain(|k| is_scratch_key(k));
+        self.current = self.tabs.first().cloned();
         self.files.clear();
         self.block_heights.clear();
         self.status = format!("작업 폴더: {}", self.root.display());
@@ -1240,6 +1531,8 @@ impl App {
         }
         if let Some(name) = first {
             self.open_file(&name);
+        } else if let Some(cur) = self.current.clone() {
+            self.restore_tab_view(&cur);
         }
     }
 
@@ -1251,6 +1544,10 @@ impl App {
     }
 
     fn open_file(&mut self, name: &str) -> bool {
+        if self.tabs.iter().any(|t| t == name) {
+            self.switch_to_tab(name);
+            return true;
+        }
         if !self.docs.contains_key(name) {
             match Doc::load(&self.root.join(name)) {
                 Ok(doc) => {
@@ -1262,14 +1559,29 @@ impl App {
                 }
             }
         }
-        if self.current.as_deref() != Some(name) {
-            self.deactivate();
-            self.current = Some(name.to_string());
-            // 수정되지 않은 비활성 문서는 메모리에서 내려 메모리 점유를 최소화
-            self.docs
-                .retain(|k, d| k == SCRATCH_KEY || k == name || d.dirty());
-            self.block_heights.clear();
+        self.save_current_tab_view();
+        // 현재 탭이 비어 있고 아무 편집 이력이 없는 임시 메모라면 그 자리를 대체한다
+        let replace_empty_scratch = self
+            .current
+            .as_deref()
+            .filter(|k| is_scratch_key(k))
+            .and_then(|k| self.docs.get(k).map(|d| (k.to_string(), d)))
+            .is_some_and(|(_, d)| d.text.is_empty() && d.undo.is_empty() && d.redo.is_empty());
+        if replace_empty_scratch {
+            if let Some(old) = self.current.take() {
+                if let Some(idx) = self.tabs.iter().position(|t| t == &old) {
+                    self.tabs[idx] = name.to_string();
+                } else {
+                    self.tabs.push(name.to_string());
+                }
+                self.docs.remove(&old);
+            }
+        } else {
+            self.tabs.push(name.to_string());
         }
+        self.current = Some(name.to_string());
+        self.restore_tab_view(name);
+        self.scroll_tab_to_active = true;
         true
     }
 
@@ -1284,7 +1596,7 @@ impl App {
 
     // 자동 저장·종료 시 저장: 성공은 조용히(상태 알약이 알려 준다), 실패만 알린다
     fn save_quiet(&mut self, name: &str) -> bool {
-        if name == SCRATCH_KEY {
+        if is_scratch_key(name) {
             return false;
         }
         let Some(doc) = self.docs.get_mut(name) else {
@@ -1313,7 +1625,7 @@ impl App {
 
     // 창으로 돌아왔을 때: 다른 프로그램이 현재 문서를 바꿨으면 다시 읽는다 (편집 중이면 경고만)
     fn sync_from_disk(&mut self) {
-        let Some(name) = self.current.clone().filter(|n| n != SCRATCH_KEY) else {
+        let Some(name) = self.current.clone().filter(|n| !is_scratch_key(n)) else {
             return;
         };
         let path = self.root.join(&name);
@@ -1363,9 +1675,12 @@ impl App {
         let c = char_len(&doc.text[..caret]);
         self.blank = 0;
         self.block_sel = None;
+        self.block_sel_anchor = None;
+        self.block_sel_head = None;
         self.active = Some(start);
         self.pending_sel = Some((c, c));
         self.focus_editor = true;
+        self.scroll_cursor = Some(None);
     }
 
     fn save_all(&mut self) -> bool {
@@ -1383,6 +1698,11 @@ impl App {
     }
 
     fn save_scratch_as(&mut self, input: &str) -> Result<(), String> {
+        let scratch_key = self
+            .current
+            .clone()
+            .filter(|k| is_scratch_key(k))
+            .unwrap_or_else(|| SCRATCH_KEY.into());
         let name = validate_name(input)?;
         let path = self.root.join(&name);
         if path.exists() {
@@ -1390,13 +1710,13 @@ impl App {
         }
         let body = self
             .docs
-            .get(SCRATCH_KEY)
+            .get(&scratch_key)
             .map(|d| d.encoded())
             .unwrap_or_default();
         save_atomic(&path, body.as_bytes()).map_err(|e| format!("저장 실패: {e}"))?;
         let mut doc = self
             .docs
-            .remove(SCRATCH_KEY)
+            .remove(&scratch_key)
             .unwrap_or_else(|| Doc::scratch(String::new()));
         doc.scratch = false;
         doc.saved = doc.text.clone();
@@ -1404,8 +1724,11 @@ impl App {
         doc.dirty_flag = false;
         doc.mtime = modified(&path);
         self.docs.insert(name.clone(), doc);
-        self.docs
-            .insert(SCRATCH_KEY.into(), Doc::scratch(String::new()));
+        if let Some(slot) = self.tabs.iter_mut().find(|t| **t == scratch_key) {
+            *slot = name.clone();
+        } else if !self.tabs.iter().any(|t| t == &name) {
+            self.tabs.push(name.clone());
+        }
         self.current = Some(name.clone());
         self.refresh_files();
         self.status = format!("저장됨: {name}");
@@ -1450,6 +1773,9 @@ impl App {
         if let Some(doc) = self.docs.remove(from) {
             self.docs.insert(to.clone(), doc);
         }
+        if let Some(slot) = self.tabs.iter_mut().find(|t| **t == from) {
+            *slot = to.clone();
+        }
         if self.current.as_deref() == Some(from) {
             self.current = Some(to.clone());
         }
@@ -1459,17 +1785,16 @@ impl App {
     }
 
     fn delete(&mut self, name: &str) {
-        if name == SCRATCH_KEY {
+        if is_scratch_key(name) {
             return;
         }
         match std::fs::remove_file(self.root.join(name)) {
             Ok(()) => {
-                if self.current.as_deref() == Some(name) {
-                    self.active = None;
-                    self.blank = 0;
-                    self.current = None;
+                if let Some(idx) = self.tabs.iter().position(|t| t == name) {
+                    self.force_close_tab(name, idx);
+                } else {
+                    self.docs.remove(name);
                 }
-                self.docs.remove(name);
                 self.refresh_files();
                 self.status = format!("삭제됨: {name}");
             }
@@ -1490,6 +1815,11 @@ impl App {
     fn finish(&mut self, after: After) {
         match after {
             After::Close => self.allow_close = true,
+            After::CloseTab(name) => {
+                if let Some(idx) = self.tabs.iter().position(|t| t == &name) {
+                    self.force_close_tab(&name, idx);
+                }
+            }
             After::Switch(root, open) => self.switch_root(root, open),
         }
     }
@@ -1540,7 +1870,7 @@ impl App {
 
     fn doc_dir(&self) -> PathBuf {
         match self.current.as_deref() {
-            Some(cur) if cur != SCRATCH_KEY => self
+            Some(cur) if !is_scratch_key(cur) => self
                 .root
                 .join(cur)
                 .parent()
@@ -1605,6 +1935,26 @@ impl App {
         }
     }
 
+    fn block_char_bounds(&self, r: &Range<usize>, doc: &Doc) -> (usize, usize) {
+        if self.active_char_cache.0 == r.start && self.active_char_cache.1 == doc.rev {
+            (self.active_char_cache.2, self.active_char_cache.3)
+        } else {
+            (
+                char_len(&doc.text[..r.start]),
+                char_len(&doc.text[r.clone()]),
+            )
+        }
+    }
+
+    fn block_byte_of(&self, r: &Range<usize>, doc: &Doc, char_pos: usize) -> usize {
+        let (base, _) = self.block_char_bounds(r, doc);
+        if char_pos >= base {
+            (r.start + byte_idx(&doc.text[r.clone()], char_pos - base)).min(r.end)
+        } else {
+            r.start
+        }
+    }
+
     // 현재 선택 영역 (문서 전체 기준 문자 인덱스)
     fn cursor(&self, ctx: &egui::Context) -> Sel {
         let (Some(name), Some(doc)) = (&self.current, self.doc()) else {
@@ -1619,8 +1969,7 @@ impl App {
         let Some(r) = self.active_block() else {
             return (len, len);
         };
-        let base = char_len(&doc.text[..r.start]);
-        let blen = char_len(&doc.text[r.clone()]);
+        let (base, blen) = self.block_char_bounds(&r, doc);
         egui::TextEdit::load_state(ctx, Self::editor_id(name, r.start))
             .and_then(|s| s.cursor.char_range())
             .map(|c| {
@@ -1663,9 +2012,12 @@ impl App {
         self.leave_blank();
         self.active = None;
         self.block_sel = None;
+        self.block_sel_anchor = None;
+        self.block_sel_head = None;
         self.drag_anchor = None;
         self.drag_last_pos = None;
         self.last_sel = None;
+        self.cursor_info = None;
     }
 
     // 블록으로 이동 (위치는 이동 전 기준 바이트)
@@ -1681,9 +2033,26 @@ impl App {
         };
         let c = char_len(&doc.text[..caret.min(doc.text.len())]);
         self.block_sel = None;
+        self.block_sel_anchor = None;
+        self.block_sel_head = None;
         self.active = Some(start);
         self.pending_sel = Some((c, c));
+        self.pending_click_pos = None;
         self.focus_editor = true;
+        self.scroll_cursor = Some(None);
+    }
+
+    fn doc_slots(&self) -> Vec<Range<usize>> {
+        let Some(doc) = self.doc() else {
+            return Vec::new();
+        };
+        let active_empty = self
+            .active_block()
+            .filter(|r| r.is_empty())
+            .map(|r| r.start);
+        let mut out = Vec::new();
+        collect_doc_slots_into(&doc.text, &doc.blocks, active_empty, &mut out);
+        out
     }
 
     // 다중 블록 / 전체 문서 선택 구간 삭제
@@ -1691,6 +2060,8 @@ impl App {
         let Some(sel) = self.block_sel.take() else {
             return false;
         };
+        self.block_sel_anchor = None;
+        self.block_sel_head = None;
         self.leave_blank();
         let Some(doc) = self.doc_mut() else {
             return false;
@@ -1750,6 +2121,8 @@ impl App {
         let Some(sel) = self.block_sel.take() else {
             return;
         };
+        self.block_sel_anchor = None;
+        self.block_sel_head = None;
         self.leave_blank();
         let Some(doc) = self.doc_mut() else {
             return;
@@ -1794,6 +2167,7 @@ impl App {
         self.blank = n;
         self.pending_sel = Some((c, c));
         self.focus_editor = true;
+        self.scroll_cursor = Some(None);
     }
 
     // b 위치에서 블록을 둘로 나누고 뒤 블록을 편집 (노션의 Enter)
@@ -1811,13 +2185,40 @@ impl App {
         self.blank = if rest_empty { 2 } else { 0 };
         self.pending_sel = Some((c, c));
         self.focus_editor = true;
+        self.scroll_cursor = Some(None);
     }
 
     fn set_text(&mut self, text: String, sel: Sel) {
-        if let Some(doc) = self.doc_mut() {
+        let was_block_sel = self.block_sel.is_some();
+        let next_bs = if let Some(doc) = self.doc_mut() {
             doc.text = text;
             doc.edited_at = Some(Instant::now());
             doc.refresh_meta();
+            if was_block_sel {
+                let b0 = byte_idx(&doc.text, sel.0);
+                let b1 = byte_idx(&doc.text, sel.1).max(b0);
+                let anchor_block = doc
+                    .blocks
+                    .iter()
+                    .find(|b| b.end > b0 && b.start < b1)
+                    .map_or(b0, |b| b.start);
+                let head_block = doc
+                    .blocks
+                    .iter()
+                    .rfind(|b| b.end > b0 && b.start < b1)
+                    .map_or(b1, |b| b.start);
+                Some((b0..b1, anchor_block, head_block))
+            } else {
+                None
+            }
+        } else {
+            return;
+        };
+        if let Some((range, anchor, head)) = next_bs {
+            self.block_sel = Some(range);
+            self.block_sel_anchor = Some(anchor);
+            self.block_sel_head = Some(head);
+        } else {
             self.pending_sel = Some(sel);
             self.focus_editor = true;
         }
@@ -1902,24 +2303,41 @@ impl App {
         }
     }
 
-    // Enter: 목록은 다음 항목, 빈 항목은 목록 끝내기, 그 밖에는 블록 나누기. 코드·표·수식 안은 일반 줄바꿈.
+    // Enter: 목록은 다음 항목, 빈 항목은 목록 끝내기, 빈 블록은 빈 줄 추가 후 아래로, 그 밖에는 블록 나누기.
+    // 코드·표·수식 안은 일반 줄바꿈.
     fn enter(&mut self, ctx: &egui::Context) -> bool {
         let sel = self.cursor(ctx);
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
             return false;
         };
-        if sel.0 != sel.1 {
-            return false;
-        }
-        let text = doc.text.clone();
-        let t0 = text[r.clone()].trim_start();
+        let t0 = doc.text[r.clone()].trim_start();
         if ["```", "~~~", "$$", ":::toggle", "|"]
             .iter()
             .any(|p| t0.starts_with(p))
         {
             return false;
         }
-        let b = byte_idx(&text, sel.0);
+        // 아무 내용 없이 빈 블록에서 Enter: 의도적인 빈 줄을 남기고 다음 줄로 이동
+        if r.is_empty() {
+            self.blank = 0;
+            self.split(r.start);
+            self.blank = 0;
+            return true;
+        }
+        let text = doc.text.clone();
+        if sel.0 != sel.1 {
+            let (ba, bb) = (
+                self.block_byte_of(&r, doc, sel.0),
+                self.block_byte_of(&r, doc, sel.1),
+            );
+            let mut t2 = text;
+            t2.replace_range(ba..bb, "");
+            let c = char_len(&t2[..ba]);
+            self.set_text(t2, (c, c));
+            self.split(ba);
+            return true;
+        }
+        let b = self.block_byte_of(&r, doc, sel.0);
         let ls = text[..b].rfind('\n').map_or(0, |i| i + 1).max(r.start);
         let le = text[b..].find('\n').map_or(text.len(), |i| b + i);
         if let Some((.., empty)) = list_marker(&text[ls..le]) {
@@ -1930,7 +2348,7 @@ impl App {
                 }
                 return false;
             }
-            let mut t2 = text.clone();
+            let mut t2 = text;
             if ls == r.start {
                 // 첫 줄이 빈 항목이면 기호만 지우고 일반 문단으로
                 t2.replace_range(ls..le, "");
@@ -1947,13 +2365,14 @@ impl App {
         true
     }
 
-    // 블록 맨 앞 Backspace: 빈 블록은 지우고, 내용이 있으면 앞 블록과 합친다
+    // 블록 맨 앞 Backspace: 앞 빈 줄을 지우거나, 내용이 있으면 앞 블록과 합친다
     fn backspace_at_start(&mut self, ctx: &egui::Context) -> bool {
         let sel = self.cursor(ctx);
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
             return false;
         };
-        if sel.0 != sel.1 || sel.0 != char_len(&doc.text[..r.start]) {
+        let (base, _) = self.block_char_bounds(&r, doc);
+        if sel.0 != sel.1 || sel.0 != base {
             return false;
         }
         if r.start == 0 && r.is_empty() {
@@ -1961,22 +2380,33 @@ impl App {
             if post == 0 {
                 return false;
             }
+            let rm = post.min(2);
             let mut t2 = doc.text.clone();
-            t2.replace_range(0..post, "");
+            t2.replace_range(0..rm, "");
             self.blank = 0;
             self.active = Some(0);
             self.set_text(t2, (0, 0));
             return true;
         }
-        let Some(prev) = doc
-            .blocks
-            .iter()
-            .rev()
-            .find(|x| x.end <= r.start && x.start < r.start)
-            .cloned()
-        else {
+        let slots = self.doc_slots();
+        let Some(idx) = slot_index(&slots, &r) else {
             return false;
         };
+        let Some(prev) = idx.checked_sub(1).and_then(|i| slots.get(i)).cloned() else {
+            return false;
+        };
+        if prev.is_empty() {
+            // 바로 앞이 빈 줄 블록이면 빈 줄 하나(최대 2바이트)만 지우고 현재 블록을 위로 올린다
+            let rm_start = r.start.saturating_sub(2).max(prev.start);
+            let mut t2 = doc.text.clone();
+            t2.replace_range(rm_start..r.start, "");
+            let c = char_len(&t2[..rm_start]);
+            self.blank = 0;
+            self.active = Some(rm_start);
+            self.set_text(t2, (c, c));
+            self.scroll_cursor = Some(None);
+            return true;
+        }
         let pt = doc.text[prev.clone()].trim_start();
         if !r.is_empty()
             && ["```", "~~~", "$$", ":::toggle"]
@@ -1991,29 +2421,41 @@ impl App {
         self.blank = 0;
         self.active = Some(prev.start);
         self.set_text(t2, (c, c));
+        self.scroll_cursor = Some(None);
         true
     }
 
-    // 블록 맨 끝 Delete: 빈 블록은 지우고, 내용이 있으면 뒤 블록과 합친다
+    // 블록 맨 끝 Delete: 뒤 빈 줄을 지우거나, 내용이 있으면 뒤 블록과 합친다
     fn delete_at_end(&mut self, ctx: &egui::Context) -> bool {
         let sel = self.cursor(ctx);
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
             return false;
         };
-        if sel.0 != sel.1 || sel.0 != char_len(&doc.text[..r.end]) {
+        let (base, blen) = self.block_char_bounds(&r, doc);
+        if sel.0 != sel.1 || sel.0 != base + blen {
             return false;
         }
-        let Some(next) = doc
-            .blocks
-            .iter()
-            .find(|x| x.start >= r.end && x.start > r.start)
-            .cloned()
-        else {
+        let slots = self.doc_slots();
+        let Some(idx) = slot_index(&slots, &r) else {
+            return false;
+        };
+        let Some(next) = slots.get(idx + 1).cloned() else {
             if r.is_empty() && r.start > 0 {
                 return self.backspace_at_start(ctx);
             }
             return false;
         };
+        if next.is_empty() {
+            let rm_end = (r.end + 2).min(doc.text.len());
+            let mut t2 = doc.text.clone();
+            t2.replace_range(r.end..rm_end, "");
+            let c = char_len(&t2[..r.end]);
+            self.blank = 0;
+            self.active = Some(r.start);
+            self.set_text(t2, (c, c));
+            self.scroll_cursor = Some(None);
+            return true;
+        }
         let nt = doc.text[next.clone()].trim_start();
         if !r.is_empty()
             && ["```", "~~~", "$$", ":::toggle"]
@@ -2028,10 +2470,32 @@ impl App {
         self.blank = 0;
         self.active = Some(r.start);
         self.set_text(t2, (c, c));
+        self.scroll_cursor = Some(None);
         true
     }
 
-    // 첫 줄에서 ↑ / 마지막 줄에서 ↓ 는 이웃 블록으로
+    fn at_block_vertical_edge(&self, r: &Range<usize>, b: usize, doc: &Doc, up: bool) -> bool {
+        if r.is_empty() {
+            return true;
+        }
+        if let Some(info) = self
+            .cursor_info
+            .filter(|i| i.block_start == r.start && i.doc_rev == doc.rev)
+        {
+            return if up {
+                info.on_first_row
+            } else {
+                info.on_last_row
+            };
+        }
+        if up {
+            !doc.text[r.start..b].contains('\n')
+        } else {
+            !doc.text[b..r.end].contains('\n')
+        }
+    }
+
+    // 첫 줄에서 ↑ / 마지막 줄에서 ↓ 는 열 위치를 유지하며 이웃 블록(빈 줄 포함)으로 이동
     fn arrow(&mut self, ctx: &egui::Context, up: bool) -> bool {
         let sel = self.cursor(ctx);
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
@@ -2040,26 +2504,69 @@ impl App {
         if sel.0 != sel.1 {
             return false;
         }
-        let text = &doc.text;
-        let b = byte_idx(text, sel.0).clamp(r.start, r.end);
-        let blocks = &doc.blocks;
+        let b = self.block_byte_of(&r, doc, sel.0);
+        if !self.at_block_vertical_edge(&r, b, doc, up) {
+            return false;
+        }
+        let ls = doc.text[r.start..b]
+            .rfind('\n')
+            .map_or(r.start, |i| r.start + i + 1);
+        let col = char_len(&doc.text[ls..b]);
+        let slots = self.doc_slots();
+        let Some(idx) = slot_index(&slots, &r) else {
+            return false;
+        };
         let target = if up {
-            if text[r.start..b].contains('\n') {
-                return false;
-            }
-            blocks
-                .iter()
-                .rev()
-                .find(|x| x.end <= r.start && x.start < r.start)
-                .map(|x| (x.start, x.end))
+            idx.checked_sub(1).and_then(|i| slots.get(i))
         } else {
-            if text[b..r.end].contains('\n') {
-                return false;
-            }
-            blocks
-                .iter()
-                .find(|x| x.start > r.start && x.start >= r.end)
-                .map(|x| (x.start, x.start))
+            slots.get(idx + 1)
+        }
+        .cloned();
+        let Some(t) = target else {
+            return false;
+        };
+        let caret = if t.is_empty() {
+            t.start
+        } else if up {
+            let t_ls = doc.text[t.start..t.end]
+                .rfind('\n')
+                .map_or(t.start, |i| t.start + i + 1);
+            let max_c = char_len(&doc.text[t_ls..t.end]);
+            t_ls + byte_idx(&doc.text[t_ls..t.end], col.min(max_c))
+        } else {
+            let t_le = doc.text[t.start..t.end]
+                .find('\n')
+                .map_or(t.end, |i| t.start + i);
+            let max_c = char_len(&doc.text[t.start..t_le]);
+            t.start + byte_idx(&doc.text[t.start..t_le], col.min(max_c))
+        };
+        self.go(t.start, caret);
+        true
+    }
+
+    // 블록 맨 앞에서 ← / 맨 끝에서 → 로 이웃 블록 이동
+    fn arrow_lr(&mut self, ctx: &egui::Context, right: bool) -> bool {
+        let sel = self.cursor(ctx);
+        let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
+            return false;
+        };
+        if sel.0 != sel.1 {
+            return false;
+        }
+        let b = self.block_byte_of(&r, doc, sel.0);
+        if (!right && b > r.start) || (right && b < r.end) {
+            return false;
+        }
+        let slots = self.doc_slots();
+        let Some(idx) = slot_index(&slots, &r) else {
+            return false;
+        };
+        let target = if right {
+            slots.get(idx + 1).map(|t| (t.start, t.start))
+        } else {
+            idx.checked_sub(1)
+                .and_then(|i| slots.get(i))
+                .map(|t| (t.start, t.end))
         };
         match target {
             Some((s, c)) => {
@@ -2068,6 +2575,217 @@ impl App {
             }
             None => false,
         }
+    }
+
+    // Shift + 방향키로 블록 경계를 넘어 다중 블록 선택 확장/축소
+    fn shift_arrow(&mut self, ctx: &egui::Context, up: bool, horizontal: bool) -> bool {
+        if let Some(bs) = self.block_sel.clone() {
+            let slots = self.doc_slots();
+            if slots.is_empty() {
+                return false;
+            }
+            let anchor_pos = self.block_sel_anchor.unwrap_or(bs.start);
+            let head_pos = self
+                .block_sel_head
+                .unwrap_or(if up { bs.start } else { bs.end });
+            let a_idx = slots
+                .iter()
+                .position(|s| s.start <= anchor_pos && anchor_pos <= s.end)
+                .unwrap_or(0);
+            let h_idx = slots
+                .iter()
+                .position(|s| s.start <= head_pos && head_pos <= s.end)
+                .unwrap_or(a_idx);
+            let new_h = if up {
+                h_idx.saturating_sub(1)
+            } else {
+                (h_idx + 1).min(slots.len() - 1)
+            };
+            let lo = a_idx.min(new_h);
+            let hi = a_idx.max(new_h);
+            let range = slots[lo].start..slots[hi].end;
+            self.block_sel = Some(range);
+            self.block_sel_anchor = Some(slots[a_idx].start);
+            self.block_sel_head = Some(slots[new_h].start);
+            self.scroll_to = Some(slots[new_h].start);
+            return true;
+        }
+        let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
+            return false;
+        };
+        let sel = self.cursor(ctx);
+        let b = self.block_byte_of(&r, doc, if up { sel.0 } else { sel.1 });
+        let at_edge = if horizontal {
+            if up {
+                b == r.start
+            } else {
+                b == r.end
+            }
+        } else {
+            self.at_block_vertical_edge(&r, b, doc, up)
+        };
+        if !at_edge {
+            return false;
+        }
+        let slots = self.doc_slots();
+        let Some(idx) = slot_index(&slots, &r) else {
+            return false;
+        };
+        let adj_idx = if up {
+            idx.checked_sub(1)
+        } else {
+            (idx + 1 < slots.len()).then_some(idx + 1)
+        };
+        let Some(adj) = adj_idx.and_then(|i| slots.get(i)).cloned() else {
+            return false;
+        };
+        let start = r.start.min(adj.start);
+        let end = r.end.max(adj.end);
+        self.leave_blank();
+        self.active = None;
+        self.block_sel = Some(start..end);
+        self.block_sel_anchor = Some(r.start);
+        self.block_sel_head = Some(adj.start);
+        self.scroll_to = Some(adj.start);
+        true
+    }
+
+    // Ctrl+Home / Ctrl+End: 문서 맨 처음 / 맨 끝으로 이동
+    fn jump_doc_edge(&mut self, to_end: bool) {
+        let slots = self.doc_slots();
+        if let Some(t) = if to_end { slots.last() } else { slots.first() }.cloned() {
+            let caret = if to_end { t.end } else { t.start };
+            self.go(t.start, caret);
+        } else if let Some(doc) = self.doc() {
+            let pos = if to_end { doc.text.len() } else { 0 };
+            self.go(pos, pos);
+        }
+    }
+
+    // Alt+↑ / Alt+↓: 현재 블록(또는 선택된 블록들)을 위/아래 블록과 자리 바꾸기
+    fn move_blocks(&mut self, ctx: &egui::Context, up: bool) -> bool {
+        let (sel_range, was_block_sel, caret_rel) = if let Some(bs) = self.block_sel.clone() {
+            (bs, true, 0)
+        } else if let Some((r, doc)) = self
+            .active_block()
+            .filter(|r| !r.is_empty())
+            .zip(self.doc())
+        {
+            let sel = self.cursor(ctx);
+            let b = self.block_byte_of(&r, doc, sel.0);
+            (r.clone(), false, char_len(&doc.text[r.start..b]))
+        } else {
+            return false;
+        };
+        let Some(doc) = self.doc_mut() else {
+            return false;
+        };
+        let first_i = doc
+            .blocks
+            .iter()
+            .position(|b| b.end > sel_range.start && b.start < sel_range.end)
+            .or_else(|| doc.blocks.iter().position(|b| b.start == sel_range.start));
+        let last_i = doc
+            .blocks
+            .iter()
+            .rposition(|b| b.end > sel_range.start && b.start < sel_range.end)
+            .or(first_i);
+        let (Some(first_i), Some(last_i)) = (first_i, last_i) else {
+            return false;
+        };
+        let (a_range, b_range) = if up {
+            let Some(prev) = first_i
+                .checked_sub(1)
+                .and_then(|i| doc.blocks.get(i))
+                .cloned()
+            else {
+                return false;
+            };
+            (prev, doc.blocks[first_i].start..doc.blocks[last_i].end)
+        } else {
+            let Some(next) = doc.blocks.get(last_i + 1).cloned() else {
+                return false;
+            };
+            (doc.blocks[first_i].start..doc.blocks[last_i].end, next)
+        };
+        let a_str = doc.text[a_range.clone()].to_string();
+        let b_str = doc.text[b_range.clone()].to_string();
+        let replaced = format!("{b_str}\n\n{a_str}");
+        doc.text
+            .replace_range(a_range.start..b_range.end, &replaced);
+        doc.edited_at = Some(Instant::now());
+        doc.refresh_meta();
+        let new_start = if up {
+            a_range.start
+        } else {
+            a_range.start + b_str.len() + 2
+        };
+        let moved_len = if up { b_str.len() } else { a_str.len() };
+        if was_block_sel {
+            self.block_sel = Some(new_start..new_start + moved_len);
+            self.block_sel_anchor = Some(new_start);
+            self.block_sel_head = Some(new_start);
+            self.scroll_to = Some(new_start);
+        } else {
+            let base = char_len(&doc.text[..new_start]);
+            let max_c = char_len(&doc.text[new_start..new_start + moved_len]);
+            let c = base + caret_rel.min(max_c);
+            self.blank = 0;
+            self.active = Some(new_start);
+            self.pending_sel = Some((c, c));
+            self.focus_editor = true;
+            self.scroll_cursor = Some(None);
+        }
+        true
+    }
+
+    // Ctrl+D: 현재 블록(또는 다중 선택된 블록 구간)을 바로 아래에 복제
+    fn duplicate_blocks(&mut self) -> bool {
+        let (sel_range, was_block_sel) = if let Some(bs) = self.block_sel.clone() {
+            (bs, true)
+        } else if let Some(r) = self.active_block().filter(|r| !r.is_empty()) {
+            (r, false)
+        } else {
+            return false;
+        };
+        let Some(doc) = self.doc_mut() else {
+            return false;
+        };
+        let first_i = doc
+            .blocks
+            .iter()
+            .position(|b| b.end > sel_range.start && b.start < sel_range.end);
+        let last_i = doc
+            .blocks
+            .iter()
+            .rposition(|b| b.end > sel_range.start && b.start < sel_range.end)
+            .or(first_i);
+        let (Some(first_i), Some(last_i)) = (first_i, last_i) else {
+            return false;
+        };
+        let span = doc.blocks[first_i].start..doc.blocks[last_i].end;
+        let chunk = doc.text[span.clone()].to_string();
+        let insert_at = span.end;
+        let ins = format!("\n\n{chunk}");
+        doc.text.insert_str(insert_at, &ins);
+        doc.edited_at = Some(Instant::now());
+        doc.refresh_meta();
+        let new_start = insert_at + 2;
+        let new_end = new_start + chunk.len();
+        if was_block_sel {
+            self.block_sel = Some(new_start..new_end);
+            self.block_sel_anchor = Some(new_start);
+            self.block_sel_head = Some(new_start);
+            self.scroll_to = Some(new_start);
+        } else {
+            let c = char_len(&doc.text[..new_end]);
+            self.blank = 0;
+            self.active = Some(new_start);
+            self.pending_sel = Some((c, c));
+            self.focus_editor = true;
+            self.scroll_cursor = Some(None);
+        }
+        true
     }
 
     // 이미지 파일: 문서 폴더 안이면 상대 경로로, 밖이면 문서 폴더/images/ 로 복사 후 링크
@@ -2227,15 +2945,18 @@ impl App {
             }
         }
         if flush_draft {
-            if let Some(doc) = self.docs.get_mut(SCRATCH_KEY) {
-                if let Some(st) = storage {
-                    st.set_string("draft", doc.text.clone());
-                    st.flush();
+            let draft_body = self.draft_text().to_string();
+            if let Some(st) = storage {
+                st.set_string("draft", draft_body);
+                st.flush();
+            }
+            for doc in self.docs.values_mut() {
+                if doc.scratch {
+                    doc.saved.clear();
+                    doc.saved.push_str(&doc.text);
+                    doc.edited_at = None;
+                    doc.dirty_flag = false;
                 }
-                doc.saved.clear();
-                doc.saved.push_str(&doc.text);
-                doc.edited_at = None;
-                doc.dirty_flag = false;
             }
         }
         for name in due {
@@ -2265,8 +2986,42 @@ impl App {
         if k(cmd, Key::S) {
             self.trigger_save();
         }
-        if k(cmd, Key::N) {
-            self.new_scratch();
+        if k(cmd, Key::N) || k(cmd, Key::T) {
+            self.new_tab();
+        }
+        if k(cmd, Key::W) {
+            if let Some(cur) = self.current.clone() {
+                self.close_tab(&cur);
+            }
+            return;
+        }
+        if k(shift_cmd, Key::Tab) || k(cmd, Key::PageUp) {
+            self.cycle_tab(-1);
+            return;
+        } else if k(cmd, Key::Tab) || k(cmd, Key::PageDown) {
+            self.cycle_tab(1);
+            return;
+        }
+        for (i, key) in [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if k(cmd, key) {
+                if let Some(target) = self.tabs.get(i).cloned() {
+                    self.switch_to_tab(&target);
+                }
+                return;
+            }
         }
         if k(cmd, Key::H) {
             self.open_find(ctx, true);
@@ -2336,8 +3091,22 @@ impl App {
                 }
             } else if self.block_sel.is_some() {
                 self.block_sel = None;
+                self.block_sel_anchor = None;
+                self.block_sel_head = None;
             } else {
                 self.deactivate();
+            }
+        }
+
+        // Ctrl+Home / Ctrl+End: 문서 맨 처음 / 맨 끝으로 이동
+        if !self.find.open && self.current.is_some() {
+            if k(cmd, Key::Home) {
+                self.jump_doc_edge(false);
+                return;
+            }
+            if k(cmd, Key::End) {
+                self.jump_doc_edge(true);
+                return;
             }
         }
 
@@ -2362,13 +3131,76 @@ impl App {
                     self.leave_blank();
                     self.active = None;
                     self.block_sel = Some(0..len);
+                    self.block_sel_anchor = Some(0);
+                    self.block_sel_head = Some(len);
                 }
                 return;
             }
         }
 
-        // 다중 블록 / 문서 전체 선택 상태에서의 삭제·복사·잘라내기·붙여넣기·서식·타이핑
-        if self.block_sel.is_some() && !self.find.open {
+        // 다중 블록 / 문서 전체 선택 상태에서의 삭제·복사·잘라내기·붙여넣기·서식·이동·타이핑
+        if let Some(bs) = self.block_sel.clone().filter(|_| !self.find.open) {
+            if k(Modifiers::SHIFT, Key::ArrowUp) && self.shift_arrow(ctx, true, false) {
+                return;
+            }
+            if k(Modifiers::SHIFT, Key::ArrowDown) && self.shift_arrow(ctx, false, false) {
+                return;
+            }
+            if k(Modifiers::SHIFT, Key::ArrowLeft) && self.shift_arrow(ctx, true, true) {
+                return;
+            }
+            if k(Modifiers::SHIFT, Key::ArrowRight) && self.shift_arrow(ctx, false, true) {
+                return;
+            }
+            if k(Modifiers::ALT, Key::ArrowUp) {
+                self.move_blocks(ctx, true);
+                return;
+            }
+            if k(Modifiers::ALT, Key::ArrowDown) {
+                self.move_blocks(ctx, false);
+                return;
+            }
+            if k(cmd, Key::D) {
+                self.duplicate_blocks();
+                return;
+            }
+            if k(Modifiers::NONE, Key::ArrowUp)
+                || k(Modifiers::NONE, Key::ArrowLeft)
+                || k(Modifiers::NONE, Key::Home)
+            {
+                let start = self
+                    .doc()
+                    .and_then(|d| {
+                        d.blocks
+                            .iter()
+                            .find(|b| b.end > bs.start && b.start < bs.end)
+                    })
+                    .map_or(bs.start, |b| b.start);
+                self.go(start, start);
+                return;
+            }
+            if k(Modifiers::NONE, Key::ArrowDown)
+                || k(Modifiers::NONE, Key::ArrowRight)
+                || k(Modifiers::NONE, Key::End)
+            {
+                let (start, end) = self
+                    .doc()
+                    .and_then(|d| {
+                        d.blocks
+                            .iter()
+                            .rfind(|b| b.end > bs.start && b.start < bs.end)
+                    })
+                    .map_or((bs.end, bs.end), |b| (b.start, b.end));
+                self.go(start, end);
+                return;
+            }
+            if k(Modifiers::SHIFT, Key::Tab) {
+                self.edit(ctx, |t, sel| Some(indent_lines(t, sel, true)));
+                return;
+            } else if k(Modifiers::NONE, Key::Tab) {
+                self.edit(ctx, |t, sel| Some(indent_lines(t, sel, false)));
+                return;
+            }
             if k(Modifiers::NONE, Key::Backspace)
                 || k(Modifiers::NONE, Key::Delete)
                 || k(Modifiers::NONE, Key::Enter)
@@ -2442,7 +3274,22 @@ impl App {
                         self.set_text(t, (sel.0, sel.0));
                     }
                 }
+            } else if !self.find.open
+                && self.active.is_none()
+                && self.current.is_some()
+                && ctx.memory(|m| m.focused().is_none())
+            {
+                if k(Modifiers::NONE, Key::Enter) {
+                    self.append_block();
+                } else if k(Modifiers::NONE, Key::ArrowDown) {
+                    self.jump_doc_edge(false);
+                } else if k(Modifiers::NONE, Key::ArrowUp) {
+                    self.jump_doc_edge(true);
+                }
             }
+            return;
+        }
+        if k(cmd, Key::D) && self.duplicate_blocks() {
             return;
         }
         if k(cmd, Key::B) {
@@ -2453,6 +3300,12 @@ impl App {
         }
         if k(cmd, Key::K) {
             self.format(ctx, Fmt::Wrap("[", "](https://)", "링크"));
+        }
+        if k(Modifiers::ALT, Key::ArrowUp) && self.move_blocks(ctx, true) {
+            return;
+        }
+        if k(Modifiers::ALT, Key::ArrowDown) && self.move_blocks(ctx, false) {
+            return;
         }
         if k(Modifiers::SHIFT, Key::Tab) {
             self.edit(ctx, |t, sel| Some(indent_lines(t, sel, true)));
@@ -2468,8 +3321,14 @@ impl App {
             });
         }
         let pressed = |key| ctx.input(|i| i.key_pressed(key) && i.modifiers.is_none());
+        let shift_pressed = |key| ctx.input(|i| i.key_pressed(key) && i.modifiers.shift_only());
         if pressed(Key::Enter) && self.enter(ctx) {
             k(Modifiers::NONE, Key::Enter);
+        } else if shift_pressed(Key::Enter)
+            && self.active_block().is_some_and(|r| r.is_empty())
+            && self.enter(ctx)
+        {
+            k(Modifiers::SHIFT, Key::Enter);
         }
         if pressed(Key::Backspace) && self.backspace_at_start(ctx) {
             k(Modifiers::NONE, Key::Backspace);
@@ -2477,11 +3336,26 @@ impl App {
         if pressed(Key::Delete) && self.delete_at_end(ctx) {
             k(Modifiers::NONE, Key::Delete);
         }
+        if shift_pressed(Key::ArrowUp) && self.shift_arrow(ctx, true, false) {
+            k(Modifiers::SHIFT, Key::ArrowUp);
+        } else if shift_pressed(Key::ArrowDown) && self.shift_arrow(ctx, false, false) {
+            k(Modifiers::SHIFT, Key::ArrowDown);
+        } else if shift_pressed(Key::ArrowLeft) && self.shift_arrow(ctx, true, true) {
+            k(Modifiers::SHIFT, Key::ArrowLeft);
+        } else if shift_pressed(Key::ArrowRight) && self.shift_arrow(ctx, false, true) {
+            k(Modifiers::SHIFT, Key::ArrowRight);
+        }
         if pressed(Key::ArrowUp) && self.arrow(ctx, true) {
             k(Modifiers::NONE, Key::ArrowUp);
         }
         if pressed(Key::ArrowDown) && self.arrow(ctx, false) {
             k(Modifiers::NONE, Key::ArrowDown);
+        }
+        if pressed(Key::ArrowLeft) && self.arrow_lr(ctx, false) {
+            k(Modifiers::NONE, Key::ArrowLeft);
+        }
+        if pressed(Key::ArrowRight) && self.arrow_lr(ctx, true) {
+            k(Modifiers::NONE, Key::ArrowRight);
         }
     }
 
@@ -2522,8 +3396,10 @@ impl App {
         .copied();
         self.leave_blank();
         self.block_sel = None;
+        self.block_sel_anchor = None;
+        self.block_sel_head = None;
         self.pending_sel = next; // 찾기 입력창 포커스는 유지
-        self.scroll_cursor = true;
+        self.scroll_cursor = Some(Some(egui::Align::Center));
     }
 
     fn replace_one(&mut self, ctx: &egui::Context) {
@@ -2889,7 +3765,7 @@ mod tests {
         let text = |h: &egui_kittest::Harness<App>| h.state().doc().unwrap().text.clone();
         h.run_steps(3);
 
-        // 1. 렌더링된 문단을 클릭하면 그 블록이 편집 상태가 된다
+        // 1. 렌더링된 문단을 클릭하면 그 블록이 편집 상태가 되고 클릭 지점에 커서가 놓인다
         h.get_by_label("첫 문단").click();
         h.run_steps(3);
         assert_eq!(
@@ -2902,7 +3778,22 @@ mod tests {
             )
         );
 
-        // 2. 입력은 블록 끝(커서)에 들어간다
+        // 2. 입력은 클릭한 위치에 들어가며, End 후 입력하면 블록 끝에 붙는다
+        h.event(egui::Event::Text("!".into()));
+        h.run_steps(3);
+        assert_eq!(
+            text(&h),
+            "# 제목
+
+첫 !문단
+
+- [ ] 할 일
+"
+        );
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(2);
+        h.key_press(egui::Key::End);
+        h.run_steps(2);
         h.event(egui::Event::Text("!".into()));
         h.run_steps(3);
         assert_eq!(
@@ -2971,6 +3862,8 @@ mod tests {
         // 6. 빈 블록을 비운 채 떠나면 넣었던 빈 줄이 되돌려진다
         h.get_by_label("첫 문단!").click();
         h.run_steps(3);
+        h.key_press(egui::Key::End);
+        h.run_steps(2);
         h.key_press(egui::Key::Enter);
         h.run_steps(3);
         h.key_press(egui::Key::Escape);
@@ -2992,10 +3885,6 @@ mod tests {
         h.run_steps(3);
         h.key_press(egui::Key::Home);
         h.run_steps(2);
-        for _ in 0..3 {
-            h.key_press(egui::Key::ArrowLeft);
-            h.run_steps(1);
-        }
         h.key_press(egui::Key::Backspace);
         h.run_steps(3);
         assert_eq!(
@@ -3191,22 +4080,22 @@ mod tests {
             .with_accessibility_check(false)
             .build_eframe(move |cc| {
                 let mut app = App::new(cc, None, &d2);
-                app.docs
-                    .insert(SCRATCH_KEY.into(), Doc::scratch(saved_draft));
-                app.current = Some(SCRATCH_KEY.into());
+                app.open_scratch(saved_draft);
                 app
             });
         h2.run_steps(2);
         assert!(h2.state().is_scratch());
         assert_eq!(h2.state().doc().unwrap().text, "임시 메모 테스트");
 
-        // 4. Ctrl+N으로 새 빈 메모 시작 (Ctrl+Z로 이전 메모 복구 가능)
+        // 4. Ctrl+N으로 새 편집 탭 추가 후 Ctrl+W로 닫으면 이전 메모 탭으로 돌아온다
         h2.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
         h2.run_steps(2);
+        assert_eq!(h2.state().tabs.len(), 2);
         assert!(h2.state().is_scratch());
         assert_eq!(h2.state().doc().unwrap().text, "");
-        h2.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h2.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::W);
         h2.run_steps(2);
+        assert_eq!(h2.state().tabs.len(), 1);
         assert_eq!(h2.state().doc().unwrap().text, "임시 메모 테스트");
 
         // 5. 파일로 저장(save_scratch_as)하면 실제 .md 파일이 생성되고 draft는 비워진다
@@ -3241,5 +4130,247 @@ mod tests {
         assert_eq!(find_all(s, "Hello", true), vec![(0, 5)]);
         assert_eq!(find_all(s, "hello", false), vec![(0, 5), (9, 14), (21, 26)]);
         assert_eq!(find_all(s, "한글", false), vec![(6, 8)]);
+    }
+
+    #[test]
+    fn multi_tab_editing_switching_and_closing() {
+        use egui_kittest::kittest::Queryable;
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_multitab");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.md"), "파일 탭 내용\n").unwrap();
+
+        let d1 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, None, &d1));
+        h.run_steps(2);
+
+        // 첫 번째 탭 편집
+        h.event(egui::Event::Text("첫 탭 메모".into()));
+        h.run_steps(2);
+        let tab1 = h.state().current.clone().unwrap();
+
+        // Ctrl+T로 두 번째 새 탭 추가 후 편집
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::T);
+        h.run_steps(2);
+        assert_eq!(h.state().tabs.len(), 2);
+        let tab2 = h.state().current.clone().unwrap();
+        assert_ne!(tab1, tab2);
+        h.event(egui::Event::Text("둘째 탭 메모".into()));
+        h.run_steps(2);
+
+        // 실제 파일 탭 열기 -> 총 3개 탭
+        h.state_mut().open_file("note.md");
+        h.run_steps(2);
+        assert_eq!(h.state().tabs.len(), 3);
+        assert_eq!(h.state().current.as_deref(), Some("note.md"));
+        assert_eq!(h.state().doc().unwrap().text, "파일 탭 내용\n");
+
+        // 탭 바 UI에서 첫 번째 탭 제목("메모")을 클릭하거나 Ctrl+1로 전환
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
+        h.run_steps(2);
+        assert_eq!(h.state().current.as_deref(), Some(tab1.as_str()));
+        assert_eq!(h.state().doc().unwrap().text, "첫 탭 메모");
+
+        // Ctrl+Tab으로 다음 탭(tab2) 순환
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Tab);
+        h.run_steps(2);
+        assert_eq!(h.state().current.as_deref(), Some(tab2.as_str()));
+        assert_eq!(h.state().doc().unwrap().text, "둘째 탭 메모");
+
+        // 수정된 파일 탭 닫기 -> 자동 저장 후 탭 닫힘
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num3);
+        h.run_steps(2);
+        h.state_mut().doc_mut().unwrap().text = "수정된 파일\n".into();
+        h.state_mut().doc_mut().unwrap().refresh_meta();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::W);
+        h.run_steps(2);
+        assert!(h.state().dialog.is_none());
+        assert_eq!(h.state().tabs.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("note.md")).unwrap(),
+            "수정된 파일\n"
+        );
+
+        // 저장할 수 없는 경로의 dirty 파일 탭을 닫으면 저장 확인 창(After::CloseTab) 표시
+        h.state_mut().open_file("note.md");
+        h.run_steps(2);
+        assert_eq!(h.state().tabs.len(), 3);
+        h.state_mut().doc_mut().unwrap().text = "미저장 충돌\n".into();
+        h.state_mut().doc_mut().unwrap().refresh_meta();
+        std::fs::remove_file(dir.join("note.md")).unwrap();
+        std::fs::create_dir(dir.join("note.md")).unwrap();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::W);
+        h.run_steps(2);
+        assert!(matches!(
+            h.state().dialog,
+            Some(Dialog::Unsaved(After::CloseTab(_)))
+        ));
+        h.get_by_label("저장 안 함").click();
+        h.run_steps(3);
+        assert!(h.state().dialog.is_none());
+        assert_eq!(h.state().tabs.len(), 2);
+        assert_ne!(h.state().current.as_deref(), Some("note.md"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_document_enter_creates_visible_blank_lines_and_navigates() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_blank_enter");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let d1 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, None, &d1));
+        h.run_steps(2);
+
+        assert_eq!(h.state().doc().unwrap().text, "");
+        assert_eq!(h.state().active, Some(0));
+
+        // 아무 내용 없이 Enter -> 빈 줄 2개 슬롯 생성 (0..0, 2..2), 커서는 2..2로 이동
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().text, "\n\n");
+        assert_eq!(h.state().active, Some(2));
+        assert_eq!(h.state().doc_slots(), vec![0..0, 2..2]);
+
+        // 한 번 더 Enter -> 빈 줄 하나 더 늘고 커서는 4..4로 이동
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().text, "\n\n\n\n");
+        assert_eq!(h.state().active, Some(4));
+        assert_eq!(
+            collect_doc_slots("\n\n\n\n", &[], None),
+            vec![0..0, 2..2, 4..4]
+        );
+
+        // 빈 줄 아래에서 텍스트 입력 시 위의 빈 줄은 유지됨
+        h.event(egui::Event::Text("셋째 줄".into()));
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().text, "\n\n\n\n셋째 줄");
+        assert_eq!(h.state().active, Some(4));
+
+        // ArrowUp으로 빈 줄 슬롯(2..2, 0..0)에 직접 진입하고 ArrowDown으로 복귀
+        h.key_press(egui::Key::Home);
+        h.run_steps(1);
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(2));
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(0));
+        h.key_press(egui::Key::ArrowDown);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(2));
+
+        // 빈 줄에서 Backspace로 빈 줄 하나 삭제
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().text, "\n\n셋째 줄");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_navigation_cross_block_selection_and_reorder() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_cursor_ux");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("nav.md");
+        std::fs::write(&file, "첫째 블록\n둘째 줄\n\n두번째 블록\n\n세번째 블록\n").unwrap();
+
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+
+        // Ctrl+Home -> 첫 블록 시작(0)
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Home);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(0));
+        assert_eq!(h.state().last_sel, Some((0, 0)));
+
+        // Ctrl+End -> 마지막 블록 끝
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::End);
+        h.run_steps(2);
+        let b3_start = h.state().doc().unwrap().blocks[2].start;
+        assert_eq!(h.state().active, Some(b3_start));
+
+        // Ctrl+Home 후 첫 Shift+ArrowDown은 블록 내 2행으로, 두 번째 Shift+ArrowDown은 다음 블록까지 선택 확장
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Home);
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+        h.run_steps(2);
+        assert_eq!(h.state().block_sel, None);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+        h.run_steps(2);
+        let blocks = h.state().doc().unwrap().blocks.clone();
+        assert_eq!(h.state().block_sel, Some(blocks[0].start..blocks[1].end));
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+        h.run_steps(2);
+        assert_eq!(h.state().block_sel, Some(blocks[0].start..blocks[2].end));
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowUp);
+        h.run_steps(2);
+        assert_eq!(h.state().block_sel, Some(blocks[0].start..blocks[1].end));
+
+        // block_sel 상태에서 Tab / Shift+Tab 일괄 들여쓰기·내어쓰기
+        h.key_press(egui::Key::Tab);
+        h.run_steps(2);
+        assert!(h.state().doc().unwrap().text.starts_with("  첫째 블록"));
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+        h.run_steps(2);
+        assert!(h.state().doc().unwrap().text.starts_with("첫째 블록"));
+
+        // Alt+ArrowDown으로 첫 블록을 두 번째 블록 아래로 이동
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Home);
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::ALT, egui::Key::ArrowDown);
+        h.run_steps(2);
+        let moved_blocks: Vec<String> = {
+            let d = h.state().doc().unwrap();
+            d.blocks
+                .iter()
+                .map(|r| d.text[r.clone()].to_string())
+                .collect()
+        };
+        assert_eq!(
+            moved_blocks,
+            vec!["두번째 블록", "첫째 블록\n둘째 줄", "세번째 블록"]
+        );
+
+        // ArrowLeft로 블록 시작에서 이전 블록 끝으로 이동, ArrowRight로 다시 다음 블록 시작으로 이동
+        let moved_start = h.state().active.unwrap();
+        let moved_chars = char_len(&h.state().doc().unwrap().text[..moved_start]);
+        assert_eq!(h.state().last_sel, Some((moved_chars, moved_chars)));
+        h.key_press(egui::Key::ArrowLeft);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(0));
+
+        h.key_press(egui::Key::ArrowRight);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(moved_start));
+
+        // Ctrl+D로 마지막 블록 복제
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::End);
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::D);
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().blocks.len(), 4);
+        assert!(h
+            .state()
+            .doc()
+            .unwrap()
+            .text
+            .ends_with("세번째 블록\n\n세번째 블록\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

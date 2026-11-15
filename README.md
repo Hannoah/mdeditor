@@ -2,7 +2,7 @@
 
 **Rust로 만든 순수 로컬 Markdown 편집기 — 브라우저·웹뷰·로컬 서버 없이 네이티브 창 하나로 동작합니다.**
 
-![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-21%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-24%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
@@ -18,9 +18,11 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 
 ## ✨ 기능
 
-### 노션 스타일 라이브 캔버스
-- 문서가 렌더링된 상태로 보이고, **블록을 클릭하면 그 자리에서 편집**됩니다 (편집 중인 블록만 원문 표시, 제목은 크기·굵기 유지).
-- `Enter`로 블록 나누기, 블록 맨 앞 `Backspace`로 앞 블록과 합치기, 첫 줄/마지막 줄에서 `↑`/`↓`로 블록 이동.
+### 노션 스타일 라이브 캔버스 & 멀티 탭
+- **멀티 탭 편집**: 상단 탭 바의 `+` 버튼(또는 빈 공간 더블클릭, `Ctrl+N`/`Ctrl+T`)으로 여러 임시 메모 탭과 마크다운 파일 탭을 동시에 열어 오가며 편집할 수 있습니다. 탭마다 커서·선택 상태가 보존됩니다.
+- 문서가 렌더링된 상태로 보이고, **블록을 클릭하면 클릭한 글자 위치에 바로 커서가 놓여 편집**됩니다 (편집 중인 블록만 원문 표시, 제목은 크기·굵기 유지).
+- 아무 내용 없이 `Enter`를 눌러도 **빈 줄이 그대로 생성·유지**되며, `Enter`로 블록 나누기, 블록 맨 앞 `Backspace`/끝 `Delete`로 빈 줄 정리 및 이웃 블록 합치기, 자동 줄바꿈 행을 인식하는 `↑`/`↓`(열 위치 유지) 및 `←`/`→` 블록 간 이동을 지원합니다.
+- **교차 블록 선택 및 블록 이동·복제**: 마우스 드래그, `Shift+클릭`, `Shift+방향키`로 여러 블록을 연속 선택해 일괄 삭제·복사·서식·들여쓰기(`Tab`/`Shift+Tab`)를 적용하고, `Alt+↑`/`Alt+↓`로 블록 순서를 바꾸거나 `Ctrl+D`로 복제할 수 있습니다.
 - **슬래시(`/`) 메뉴**: 빈 블록에서 `/`를 입력하면 텍스트·제목·할 일·목록·인용·구분선·콜아웃·코드·표·토글·수식·Mermaid·이미지·각주 블록을 삽입합니다.
 - **떠 있는 서식 막대**: 글자를 선택하면 굵게·기울임·취소선·형광펜·코드·키캡·링크·서식 지우기 막대가 나타납니다.
 - **스마트 목록**: 목록에서 `Enter`를 누르면 다음 기호·번호를 이어 쓰고, 빈 항목에서 `Enter`를 누르면 목록이 끝납니다. `Tab`/`Shift+Tab` 들여쓰기.
@@ -63,7 +65,9 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | 단축키 | 기능 |
 |---|---|
 | `Ctrl+S` | 저장 |
-| `Ctrl+N` | 새 파일 |
+| `Ctrl+N` / `Ctrl+T` | 새 편집 탭 열기 |
+| `Ctrl+W` | 현재 탭 닫기 |
+| `Ctrl+Tab` / `Ctrl+1~9` | 다음 탭 순환 / 번호별 탭 전환 |
 | `Ctrl+O` | 작업 폴더 파일 탐색기 |
 | `Ctrl+Shift+O` | 작업 폴더 바꾸기 |
 | `Ctrl+Z` / `Ctrl+Y` | 실행 취소 / 다시 실행 |
@@ -74,8 +78,12 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | `Ctrl+P` | 인쇄 (PDF로 저장 가능) |
 | `Ctrl+Q` | 종료 |
 | `/` | 블록 삽입 메뉴 |
-| `Enter` / `Backspace` | 블록 나누기 / 앞 블록과 합치기 |
-| `Tab` / `Shift+Tab` | 들여쓰기 / 내어쓰기 |
+| `Shift+방향키` / `Shift+클릭` | 블록 경계를 넘어 다중 블록 범위 선택 |
+| `Alt+↑` / `Alt+↓` | 현재 블록 또는 선택된 블록 위·아래로 이동 |
+| `Ctrl+D` | 현재 블록 또는 선택된 블록 아래에 복제 |
+| `Ctrl+Home` / `Ctrl+End` | 문서 맨 처음 / 맨 끝 블록으로 이동 |
+| `Enter` / `Backspace` | 빈 줄·블록 나누기 / 앞 블록과 합치기 |
+| `Tab` / `Shift+Tab` | 들여쓰기 / 내어쓰기 (다중 블록 지원) |
 | `Esc` | 편집 끝내기, 찾기 막대·창 닫기 |
 | `F1` / `F2` | 도움말 / 이름 변경 |
 
@@ -134,7 +142,7 @@ package.ps1        배포 빌드: 테스트 → 릴리즈 → 설치 파일 → 
 ## 🧪 테스트
 
 ```bash
-cargo test                                    # 19개
+cargo test                                    # 24개
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

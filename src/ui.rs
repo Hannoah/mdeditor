@@ -67,6 +67,14 @@ impl eframe::App for App {
                     .inner_margin(Margin::symmetric(16, 8)),
             )
             .show(ui, |ui| self.header(ui, &p));
+        egui::Panel::top("tab_bar")
+            .frame(Frame::new().fill(p.surface).inner_margin(Margin {
+                left: 12,
+                right: 12,
+                top: 2,
+                bottom: 0,
+            }))
+            .show(ui, |ui| self.tab_bar(ui, &p));
         egui::Panel::bottom("status")
             .frame(
                 Frame::new()
@@ -98,7 +106,7 @@ impl eframe::App for App {
         let file = self
             .current
             .as_deref()
-            .filter(|n| *n != SCRATCH_KEY)
+            .filter(|n| !is_scratch_key(n))
             .unwrap_or("");
         storage.set_string("file", file.to_string());
         storage.set_string("draft", self.draft_text().to_string());
@@ -426,7 +434,7 @@ struct EditorOut {
 impl App {
     fn title_bar(&mut self, ctx: &egui::Context) {
         let title = match self.current.as_deref() {
-            Some(SCRATCH_KEY) => "새 문서 — MDEditor".into(),
+            Some(n) if is_scratch_key(n) => format!("{} — MDEditor", self.tab_title(n)),
             Some(n) if self.docs.get(n).is_some_and(Doc::dirty) => format!("● {n} — MDEditor"),
             Some(n) => format!("{n} — MDEditor"),
             None => "MDEditor".into(),
@@ -460,8 +468,8 @@ impl App {
             let is_scratch = self.is_scratch();
             let dirty = !is_scratch && self.doc().is_some_and(Doc::dirty);
             let display_name = match name.as_deref() {
-                Some(SCRATCH_KEY) | None => "새 문서",
-                Some(n) => n,
+                None => std::borrow::Cow::Borrowed("새 문서"),
+                Some(n) => self.tab_title(n),
             };
             let badge_tip = if is_scratch {
                 "클릭하여 파일로 저장 (Ctrl+S)"
@@ -478,8 +486,12 @@ impl App {
                     ui.set_max_width(220.0);
                     ui.add(img(theme::FILE, 14.0, p.muted));
                     ui.add(
-                        egui::Label::new(RichText::new(display_name).size(12.5).color(p.text))
-                            .truncate(),
+                        egui::Label::new(
+                            RichText::new(display_name.as_ref())
+                                .size(12.5)
+                                .color(p.text),
+                        )
+                        .truncate(),
                     );
                     if dirty {
                         dot(ui, AMBER, 3.5, false);
@@ -506,8 +518,8 @@ impl App {
             if icon_btn(ui, p, theme::UPLOAD, "로컬 파일 열기 (OS 탐색기)").clicked() {
                 self.open_local_file();
             }
-            if icon_btn(ui, p, theme::PLUS, "새 문서 (Ctrl+N)").clicked() {
-                self.new_scratch();
+            if icon_btn(ui, p, theme::PLUS, "새 탭 열기 (Ctrl+N)").clicked() {
+                self.new_tab();
             }
             if icon_btn(ui, p, theme::SAVE, "문서 저장 (Ctrl+S)").clicked() {
                 self.trigger_save();
@@ -546,6 +558,174 @@ impl App {
             let settings = icon_btn(ui, p, theme::SETTINGS, "설정");
             egui::Popup::menu(&settings).show(|ui| self.settings_menu(ui, p, &ctx));
         });
+    }
+
+    fn tab_bar(&mut self, ui: &mut egui::Ui, p: &Pal) {
+        let active_key = self.current.as_deref();
+        let scroll_active = std::mem::take(&mut self.scroll_tab_to_active);
+        let mut switch_to: Option<String> = None;
+        let mut close_target: Option<String> = None;
+        let mut add_new_tab = false;
+        let mut focus_current = false;
+
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::horizontal()
+                .id_salt("tab-bar")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        for idx in 0..self.tabs.len() {
+                            let key = &self.tabs[idx];
+                            let is_active = active_key == Some(key.as_str());
+                            let dirty = self
+                                .docs
+                                .get(key)
+                                .is_some_and(|d| !is_scratch_key(key) && d.dirty());
+                            let title = self.tab_title(key);
+                            let fill = if is_active {
+                                p.bg
+                            } else {
+                                p.elevated.gamma_multiply(0.55)
+                            };
+                            let stroke = if is_active {
+                                Stroke::new(1.0, p.border)
+                            } else {
+                                Stroke::NONE
+                            };
+                            let frame_out = Frame::new()
+                                .fill(fill)
+                                .stroke(stroke)
+                                .corner_radius(egui::CornerRadius {
+                                    nw: 8,
+                                    ne: 8,
+                                    sw: 0,
+                                    se: 0,
+                                })
+                                .inner_margin(Margin {
+                                    left: 10,
+                                    right: 6,
+                                    top: 5,
+                                    bottom: 5,
+                                })
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 5.0;
+                                        let body_resp = ui
+                                            .horizontal(|ui| {
+                                                ui.set_max_width(160.0);
+                                                ui.add(img(
+                                                    theme::FILE,
+                                                    12.5,
+                                                    if is_active { p.accent } else { p.muted },
+                                                ));
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(title.as_ref())
+                                                            .size(12.0)
+                                                            .color(if is_active {
+                                                                p.text
+                                                            } else {
+                                                                p.muted
+                                                            }),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                if dirty {
+                                                    dot(ui, AMBER, 3.0, false);
+                                                }
+                                            })
+                                            .response
+                                            .interact(Sense::click())
+                                            .on_hover_cursor(CursorIcon::PointingHand);
+                                        let body_resp = if body_resp.hovered() {
+                                            let tip = if is_scratch_key(key) {
+                                                let preview = self
+                                                    .docs
+                                                    .get(key)
+                                                    .and_then(|d| {
+                                                        d.text
+                                                            .lines()
+                                                            .map(str::trim)
+                                                            .find(|l| !l.is_empty())
+                                                    })
+                                                    .unwrap_or("빈 임시 메모");
+                                                format!("{title} — {preview}\n(Ctrl+S: 파일로 저장, Ctrl+W: 닫기)")
+                                            } else {
+                                                format!("{key}\n(가운데 클릭 / Ctrl+W: 탭 닫기)")
+                                            };
+                                            body_resp.on_hover_text(tip)
+                                        } else {
+                                            body_resp
+                                        };
+                                        let close_resp = small_icon_btn(
+                                            ui,
+                                            p,
+                                            theme::X,
+                                            p.muted,
+                                            "탭 닫기 (Ctrl+W)",
+                                        );
+                                        (body_resp, close_resp)
+                                    })
+                                    .inner
+                                });
+                            let (body_resp, close_resp) = frame_out.inner;
+                            if is_active {
+                                let r = frame_out.response.rect;
+                                ui.painter().line_segment(
+                                    [
+                                        pos2(r.left() + 6.0, r.top() + 1.0),
+                                        pos2(r.right() - 6.0, r.top() + 1.0),
+                                    ],
+                                    Stroke::new(2.0, p.accent),
+                                );
+                                if scroll_active {
+                                    frame_out.response.scroll_to_me(Some(Align::Center));
+                                }
+                            }
+                            if close_resp.clicked() || body_resp.middle_clicked() {
+                                close_target = Some(key.clone());
+                            } else if body_resp.clicked() {
+                                if is_active {
+                                    focus_current = true;
+                                } else {
+                                    switch_to = Some(key.clone());
+                                }
+                            }
+                        }
+                        ui.add_space(2.0);
+                        if small_icon_btn(
+                            ui,
+                            p,
+                            theme::PLUS,
+                            p.muted,
+                            "새 탭 추가 (Ctrl+N / Ctrl+T)",
+                        )
+                        .clicked()
+                        {
+                            add_new_tab = true;
+                        }
+                        let rest = ui.available_width().max(24.0);
+                        let (_, empty_resp) =
+                            ui.allocate_exact_size(vec2(rest, 26.0), Sense::click());
+                        if empty_resp.double_clicked() {
+                            add_new_tab = true;
+                        }
+                    });
+                });
+            hline(ui, p);
+        });
+
+        if add_new_tab {
+            self.new_tab();
+        } else if let Some(key) = close_target {
+            self.close_tab(&key);
+        } else if let Some(key) = switch_to {
+            self.switch_to_tab(&key);
+        } else if focus_current && self.active.is_some() {
+            self.focus_editor = true;
+        }
     }
 
     fn settings_menu(&mut self, ui: &mut egui::Ui, p: &Pal, ctx: &egui::Context) {
@@ -797,22 +977,24 @@ impl App {
         if let Some(r) = &active {
             self.active = Some(r.start);
         }
+        let mut slots = std::mem::take(&mut self.canvas_slots);
+        {
+            let doc = &self.docs[&name];
+            collect_doc_slots_into(
+                &doc.text,
+                &doc.blocks,
+                active.as_ref().filter(|r| r.is_empty()).map(|r| r.start),
+                &mut slots,
+            );
+        }
         let mut items = std::mem::take(&mut self.canvas_items);
         items.clear();
-        {
-            let blocks = &self.docs[&name].blocks;
-            items.reserve(blocks.len() + 1);
-            for b in blocks {
-                items.push((b.clone(), active.as_ref() == Some(b)));
-            }
-            if let Some(r) = active.filter(|r| r.is_empty() && !blocks.contains(r)) {
-                let at = items
-                    .iter()
-                    .position(|(b, _)| b.start > r.start)
-                    .unwrap_or(items.len());
-                items.insert(at, (r, true));
-            }
+        items.reserve(slots.len());
+        for slot in slots.drain(..) {
+            let is_act = active.as_ref() == Some(&slot);
+            items.push((slot, is_act));
         }
+        self.canvas_slots = slots;
         // 전체 문서 String 복제 없이 잠시 꺼내 쓰고 프레임 끝에 되돌린다 (Zero-Copy)
         let (text, doc_rev) = {
             let doc = self.docs.get_mut(&name).unwrap();
@@ -823,10 +1005,18 @@ impl App {
             "file:///{}/",
             to_slash(&self.doc_dir()).trim_start_matches('/')
         );
-        let clicked = ctx.input(|i| i.pointer.primary_clicked());
+        let (clicked, click_pos, shift_held) = ctx.input(|i| {
+            (
+                i.pointer.primary_clicked(),
+                i.pointer.interact_pos(),
+                i.modifiers.shift,
+            )
+        });
         let cmds_before = ctx.output(|o| o.commands.len());
         let mut change: Option<(Range<usize>, String)> = None;
         let mut go_to: Option<(usize, usize)> = None;
+        let mut go_click_pos: Option<egui::Pos2> = None;
+        let mut shift_click_block: Option<Range<usize>> = None;
         let mut consumed = false;
         let mut below = false;
         let mut fmt = None;
@@ -871,6 +1061,7 @@ impl App {
                                     doc_rev,
                                     r.clone(),
                                     body,
+                                    area,
                                 );
                                 if out.changed.is_some() {
                                     change = out.changed.map(|s| (r.clone(), s));
@@ -887,41 +1078,47 @@ impl App {
                                 );
                                 block_rects.push((r.clone(), full_row));
                             } else {
-                                let h_key = egui::Id::unique((
-                                    &text[r.clone()],
-                                    w.to_bits(),
-                                    body.to_bits(),
-                                ));
-                                let cursor_y = ui.cursor().top();
-                                let cached_h = self.block_heights.get(&h_key).copied();
-                                let margin = 600.0;
-                                let offscreen = self.scroll_to != Some(r.start)
-                                    && cached_h.is_some_and(|h| {
-                                        cursor_y + h < clip.top() - margin
-                                            || cursor_y > clip.bottom() + margin
-                                    });
-                                let block_rect = if offscreen {
-                                    let h = cached_h.unwrap_or(body * 1.65);
+                                let block_rect = if r.is_empty() {
                                     let (rect, _) =
-                                        ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                                        ui.allocate_exact_size(vec2(w, body * 1.6), Sense::hover());
                                     rect
                                 } else {
-                                    let out = self.render_block(
-                                        ui,
-                                        p,
-                                        &text,
-                                        r.clone(),
-                                        body,
-                                        w,
-                                        &scheme,
-                                    );
-                                    self.block_heights.insert(h_key, out.rect.height());
-                                    if let Some(s) = out.changed {
-                                        change = Some((r.clone(), s));
-                                        consumed = true;
+                                    let h_key = egui::Id::unique((
+                                        &text[r.clone()],
+                                        w.to_bits(),
+                                        body.to_bits(),
+                                    ));
+                                    let cursor_y = ui.cursor().top();
+                                    let cached_h = self.block_heights.get(&h_key).copied();
+                                    let margin = 600.0;
+                                    let offscreen = self.scroll_to != Some(r.start)
+                                        && cached_h.is_some_and(|h| {
+                                            cursor_y + h < clip.top() - margin
+                                                || cursor_y > clip.bottom() + margin
+                                        });
+                                    if offscreen {
+                                        let h = cached_h.unwrap_or(body * 1.65);
+                                        let (rect, _) =
+                                            ui.allocate_exact_size(vec2(w, h), Sense::hover());
+                                        rect
+                                    } else {
+                                        let out = self.render_block(
+                                            ui,
+                                            p,
+                                            &text,
+                                            r.clone(),
+                                            body,
+                                            w,
+                                            &scheme,
+                                        );
+                                        self.block_heights.insert(h_key, out.rect.height());
+                                        if let Some(s) = out.changed {
+                                            change = Some((r.clone(), s));
+                                            consumed = true;
+                                        }
+                                        consumed |= out.consumed;
+                                        out.rect
                                     }
-                                    consumed |= out.consumed;
-                                    out.rect
                                 };
                                 let full_row = Rect::from_x_y_ranges(
                                     ui.max_rect().x_range(),
@@ -929,13 +1126,20 @@ impl App {
                                 );
                                 block_rects.push((r.clone(), full_row));
                                 if clicked && !consumed && ui.rect_contains_pointer(full_row) {
-                                    go_to = Some((r.start, r.end));
-                                    consumed = true;
+                                    if shift_held && !r.is_empty() {
+                                        shift_click_block = Some(r.clone());
+                                        consumed = true;
+                                    } else {
+                                        go_to = Some((r.start, r.end));
+                                        go_click_pos = click_pos.filter(|_| !r.is_empty());
+                                        consumed = true;
+                                    }
                                 }
                                 if ui.rect_contains_pointer(full_row) {
                                     ctx.set_cursor_icon(CursorIcon::Text);
                                 }
-                                if heading_level(text[r.clone()].trim_start()).is_some()
+                                if !r.is_empty()
+                                    && heading_level(text[r.clone()].trim_start()).is_some()
                                     && block_rect.top() <= view_top + 80.0
                                 {
                                     toc_active = Some(r.start);
@@ -963,6 +1167,20 @@ impl App {
                                     .layer_id_at(origin)
                                     .is_some_and(|l| l.order == Order::Foreground);
                                 if area.contains(origin) && !on_fg {
+                                    let edge = 32.0;
+                                    if pos.y < area.top() + edge {
+                                        ui.scroll_with_delta(vec2(
+                                            0.0,
+                                            (area.top() + edge - pos.y).min(18.0),
+                                        ));
+                                        ctx.request_repaint();
+                                    } else if pos.y > area.bottom() - edge {
+                                        ui.scroll_with_delta(vec2(
+                                            0.0,
+                                            -(pos.y - (area.bottom() - edge)).min(18.0),
+                                        ));
+                                        ctx.request_repaint();
+                                    }
                                     let y_min = origin.y.min(pos.y);
                                     let y_max = origin.y.max(pos.y);
                                     let mut first_hit: Option<Range<usize>> = None;
@@ -983,6 +1201,9 @@ impl App {
                                     if hit_count == 1 {
                                         let b = first_hit.unwrap();
                                         self.block_sel = None;
+                                        self.block_sel_anchor = None;
+                                        self.block_sel_head = None;
+                                        go_click_pos = None;
                                         if self.active != Some(b.start) {
                                             self.drag_anchor = Some((b.start, origin));
                                             self.drag_last_pos = Some(pos);
@@ -994,14 +1215,24 @@ impl App {
                                             consumed = true;
                                         }
                                     } else if hit_count >= 2 {
-                                        let start = first_hit.unwrap().start;
-                                        let end = last_hit.unwrap().end;
+                                        let first = first_hit.unwrap();
+                                        let last = last_hit.unwrap();
+                                        let start = first.start;
+                                        let end = last.end;
+                                        let (anchor_blk, head_blk) = if pos.y >= origin.y {
+                                            (first, last)
+                                        } else {
+                                            (last, first)
+                                        };
                                         self.leave_blank();
                                         self.active = None;
                                         self.drag_anchor = None;
                                         self.drag_last_pos = None;
+                                        self.block_sel_anchor = Some(anchor_blk.start);
+                                        self.block_sel_head = Some(head_blk.start);
                                         self.block_sel = Some(start..end);
                                         go_to = None;
+                                        go_click_pos = None;
                                         consumed = true;
                                     }
                                 }
@@ -1037,8 +1268,7 @@ impl App {
                         if let Some(sr) =
                             first_sel_rect.filter(|_| !ctx.input(|i| i.pointer.primary_down()))
                         {
-                            let (f, bar_hit) =
-                                self.show_format_bar(&ctx, p, sr.left_top() - vec2(0.0, 40.0));
+                            let (f, bar_hit) = self.show_format_bar(&ctx, p, sr, area);
                             fmt = fmt.or(f);
                             consumed |= bar_hit;
                         }
@@ -1064,6 +1294,8 @@ impl App {
         // 링크·복사 버튼을 누른 클릭은 블록 편집으로 넘어가지 않는다
         if ctx.output(|o| o.commands.len()) > cmds_before {
             go_to = None;
+            go_click_pos = None;
+            shift_click_block = None;
         }
         if let Some((r, s)) = change.take() {
             let s = if s.len() < r.len() && s.starts_with('\n') {
@@ -1096,12 +1328,43 @@ impl App {
                 doc.refresh_meta();
             }
             go_to = None;
+            go_click_pos = None;
+            shift_click_block = None;
         }
         self.toc_active = toc_active;
-        if let Some((s, c)) = go_to {
+        if let Some(target) = shift_click_block {
+            let anchor_start = self
+                .block_sel_anchor
+                .or_else(|| {
+                    self.active_block()
+                        .filter(|b| !b.is_empty())
+                        .map(|b| b.start)
+                })
+                .unwrap_or(target.start);
+            let anchor_blk = self
+                .docs
+                .get(&name)
+                .and_then(|d| d.blocks.iter().find(|b| b.start == anchor_start).cloned())
+                .unwrap_or_else(|| target.clone());
+            let start = anchor_blk.start.min(target.start);
+            let end = anchor_blk.end.max(target.end);
+            self.leave_blank();
+            self.active = None;
+            self.drag_anchor = None;
+            self.drag_last_pos = None;
+            self.pending_click_pos = None;
+            self.block_sel_anchor = Some(anchor_blk.start);
+            self.block_sel_head = Some(target.start);
+            self.block_sel = Some(start..end);
+        } else if let Some((s, c)) = go_to {
             self.go(s, c);
+            if let (Some(pos), Some(act)) = (go_click_pos, self.active) {
+                self.pending_click_pos = Some((act, pos));
+            }
         } else if below {
             self.block_sel = None;
+            self.block_sel_anchor = None;
+            self.block_sel_head = None;
             let last_is_blank = self.active_block().is_some_and(|r| r.is_empty());
             if !last_is_blank {
                 self.append_block();
@@ -1149,8 +1412,8 @@ impl App {
                 egui::Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    if primary(ui, p, "새 문서  Ctrl+N").clicked() {
-                        self.dialog = Some(Dialog::NewFile(String::new()));
+                    if primary(ui, p, "새 탭  Ctrl+N").clicked() {
+                        self.new_tab();
                     }
                     if ghost(ui, p, "폴더 열기", None).clicked() {
                         self.pick_folder();
@@ -1203,16 +1466,36 @@ impl App {
         )));
         egui::TextEdit::store_state(ctx, id, st);
         self.block_sel = None;
+        self.block_sel_anchor = None;
+        self.block_sel_head = None;
         self.active = Some(start);
         self.last_sel = Some(sel);
-        self.scroll_cursor = true;
+        self.scroll_cursor = Some(None);
     }
 
-    fn show_format_bar(&self, ctx: &egui::Context, p: &Pal, at: egui::Pos2) -> (Option<Fmt>, bool) {
+    fn show_format_bar(
+        &self,
+        ctx: &egui::Context,
+        p: &Pal,
+        sel_rect: Rect,
+        bounds: Rect,
+    ) -> (Option<Fmt>, bool) {
+        let bar_w = 276.0;
+        let bar_h = 34.0;
+        let x = sel_rect.left().clamp(
+            bounds.left() + 8.0,
+            (bounds.right() - bar_w).max(bounds.left() + 8.0),
+        );
+        let above = sel_rect.top() - bar_h - 6.0;
+        let y = if above >= bounds.top() + 4.0 {
+            above
+        } else {
+            (sel_rect.bottom() + 6.0).min((bounds.bottom() - bar_h - 4.0).max(bounds.top() + 4.0))
+        };
         let mut fmt = None;
         let area_resp = egui::Area::new(egui::Id::unique("format-bar"))
             .order(Order::Foreground)
-            .fixed_pos(at)
+            .fixed_pos(pos2(x, y))
             .show(ctx, |ui| {
                 Frame::new()
                     .fill(p.elevated)
@@ -1313,6 +1596,7 @@ impl App {
         doc_rev: u64,
         r: Range<usize>,
         body: f32,
+        canvas_area: Rect,
     ) -> EditorOut {
         let id = Self::editor_id(name, r.start);
         let mut buf = text[r.clone()].to_string();
@@ -1333,6 +1617,22 @@ impl App {
             .layouter(&mut layouter)
             .show(ui);
         let mut sel = out.cursor_range.map(|c| c.as_sorted_char_range());
+        let mut primary_cursor = out.cursor_range.map(|c| c.primary);
+        if let Some((target_start, click_pos)) = self.pending_click_pos {
+            if target_start == r.start {
+                self.pending_click_pos = None;
+                if self.drag_anchor.is_none() {
+                    let c = out.galley.cursor_from_pos(click_pos - out.galley_pos);
+                    let cr = CCursorRange::one(c);
+                    let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                    st.cursor.set_char_range(Some(cr));
+                    egui::TextEdit::store_state(ctx, id, st);
+                    sel = Some(cr.as_sorted_char_range());
+                    primary_cursor = Some(cr.primary);
+                    ctx.request_repaint();
+                }
+            }
+        }
         if let Some((anchor_start, origin)) = self.drag_anchor {
             if anchor_start == r.start {
                 let (down, i_pos) =
@@ -1348,6 +1648,7 @@ impl App {
                 st.cursor.set_char_range(Some(cr));
                 egui::TextEdit::store_state(ctx, id, st);
                 sel = Some(cr.as_sorted_char_range());
+                primary_cursor = Some(cr.primary);
                 out.response.request_focus();
                 ctx.request_repaint();
                 if !down {
@@ -1383,14 +1684,33 @@ impl App {
                 self.last_sel = Some((base + s.start.0.min(blen), base + s.end.0.min(blen)));
             }
         }
+        self.cursor_info = primary_cursor.map(|pc| {
+            let rows = &out.galley.rows;
+            if rows.len() <= 1 {
+                EditorCursorInfo {
+                    block_start: r.start,
+                    doc_rev,
+                    on_first_row: true,
+                    on_last_row: true,
+                }
+            } else {
+                let cy = out.galley.pos_from_cursor(pc).center().y;
+                EditorCursorInfo {
+                    block_start: r.start,
+                    doc_rev,
+                    on_first_row: cy <= rows[0].rect().bottom() + 0.5,
+                    on_last_row: cy >= rows[rows.len() - 1].rect().top() - 0.5,
+                }
+            }
+        });
         let cursor_of = |c: usize| {
             out.galley
                 .pos_from_cursor(CCursor::new(c))
                 .translate(out.galley_pos.to_vec2())
         };
-        if std::mem::take(&mut self.scroll_cursor) {
+        if let Some(align) = self.scroll_cursor.take() {
             let c = sel.as_ref().map_or(0, |s| s.end.0);
-            ui.scroll_to_rect(cursor_of(c), Some(Align::Center));
+            ui.scroll_to_rect(cursor_of(c), align);
         }
 
         // 선택 영역 위 서식 막대 (드래그 중에는 띄우지 않음)
@@ -1399,8 +1719,7 @@ impl App {
         if let Some(s) =
             sel.filter(|s| s.start.0 != s.end.0 && !ctx.input(|i| i.pointer.primary_down()))
         {
-            let at = cursor_of(s.start.0).left_top() - vec2(0.0, 40.0);
-            let (f, hit) = self.show_format_bar(ctx, p, at);
+            let (f, hit) = self.show_format_bar(ctx, p, cursor_of(s.start.0), canvas_area);
             fmt = f;
             interacted |= hit;
         }
@@ -1994,16 +2313,24 @@ impl App {
                     }
                     Dialog::Unsaved(after) => {
                         dialog_title(ui, p, AMBER, "저장되지 않은 변경사항");
-                        let names: Vec<String> = self
-                            .docs
-                            .iter()
-                            .filter(|(_, d)| !d.scratch && d.dirty())
-                            .map(|(n, _)| n.clone())
-                            .collect();
-                        let what = if matches!(after, After::Close) {
-                            "종료하기"
-                        } else {
-                            "폴더를 바꾸기"
+                        let names: Vec<String> = match &after {
+                            After::CloseTab(target) => self
+                                .docs
+                                .get(target)
+                                .filter(|d| !d.scratch && d.dirty())
+                                .map(|_| vec![target.clone()])
+                                .unwrap_or_default(),
+                            _ => self
+                                .docs
+                                .iter()
+                                .filter(|(_, d)| !d.scratch && d.dirty())
+                                .map(|(n, _)| n.clone())
+                                .collect(),
+                        };
+                        let what = match &after {
+                            After::Close => "종료하기",
+                            After::CloseTab(_) => "탭을 닫기",
+                            After::Switch(..) => "폴더를 바꾸기",
                         };
                         message(
                             ui,
@@ -2014,17 +2341,34 @@ impl App {
                             if primary(ui, p, "저장 후 계속").clicked()
                                 || ui.input(|i| i.key_pressed(Key::Enter))
                             {
-                                if self.save_all() {
+                                let ok = match &after {
+                                    After::CloseTab(target) => self.save_quiet(target),
+                                    _ => self.save_all(),
+                                };
+                                if ok {
                                     close = true;
                                 } else {
                                     error = Some(self.status.clone());
                                 }
                             }
                             if ghost(ui, p, "저장 안 함", Some(RED)).clicked() {
-                                for d in self.docs.values_mut() {
-                                    d.text = d.saved.clone();
-                                    d.edited_at = None;
-                                    d.refresh_meta();
+                                match &after {
+                                    After::CloseTab(target) => {
+                                        if let Some(d) = self.docs.get_mut(target) {
+                                            d.text = d.saved.clone();
+                                            d.edited_at = None;
+                                            d.dirty_flag = false;
+                                            d.refresh_meta();
+                                        }
+                                    }
+                                    _ => {
+                                        for d in self.docs.values_mut() {
+                                            d.text = d.saved.clone();
+                                            d.edited_at = None;
+                                            d.dirty_flag = false;
+                                            d.refresh_meta();
+                                        }
+                                    }
                                 }
                                 close = true;
                             }
@@ -2514,7 +2858,9 @@ fn help_body(ui: &mut egui::Ui, p: &Pal) {
                         ("단축키", "동작 설명"),
                         &[
                             ("Ctrl + S", "현재 파일 원자적 저장 (입력 2초 후 자동 저장)"),
-                            ("Ctrl + N", "새 파일 만들기"),
+                            ("Ctrl + N / T", "새 편집 탭 열기"),
+                            ("Ctrl + W", "현재 탭 닫기"),
+                            ("Ctrl + Tab / 1~9", "다음 탭 · 번호별 탭으로 전환"),
                             ("Ctrl + O", "작업 폴더 파일 탐색기 열기"),
                             ("Ctrl + Shift + O", "작업 폴더 바꾸기"),
                             (
@@ -2532,9 +2878,16 @@ fn help_body(ui: &mut egui::Ui, p: &Pal) {
                             ("Ctrl + P", "인쇄 (PDF로 저장 가능)"),
                             ("Ctrl + Q", "프로그램 안전 종료"),
                             ("/", "빈 블록에서 블록 삽입 명령어 메뉴 열기"),
-                            ("마우스 드래그", "선택 영역 위에 서식 툴바 표시"),
-                            ("Enter / Backspace", "블록 나누기 / 앞 블록과 합치기"),
-                            ("Tab / Shift + Tab", "들여쓰기 / 내어쓰기"),
+                            (
+                                "마우스 드래그 / Shift+클릭",
+                                "선택 영역 위 서식 툴바 표시 · 범위 선택",
+                            ),
+                            ("Shift + 방향키", "블록 경계를 넘어 연속 선택"),
+                            ("Alt + ↑ / ↓", "현재 블록 또는 선택된 블록 위·아래로 이동"),
+                            ("Ctrl + D", "현재 블록 또는 선택된 블록 복제"),
+                            ("Ctrl + Home / End", "문서 맨 처음 / 맨 끝 블록으로 이동"),
+                            ("Enter / Backspace", "빈 줄·블록 나누기 / 앞 블록과 합치기"),
+                            ("Tab / Shift + Tab", "들여쓰기 / 내어쓰기 (다중 블록 지원)"),
                             ("Enter (목록 중)", "번호·체크박스 자동 이어쓰기"),
                             ("Esc", "편집 끝내기 · 모달 / 찾기 막대 닫기"),
                             ("F1 / F2", "도움말 / 파일 이름 변경"),

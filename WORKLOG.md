@@ -1,5 +1,28 @@
 # MDEditor 작업 기록
 
+## 2026-11-15 — v0.6.0: 멀티 탭 편집, 빈 줄 Enter 지원, 커서·블록 지정 UX 고도화 및 무할당 최적화
+
+### 1. 멀티 탭 편집 (`src/main.rs`, `src/ui.rs`)
+- **상단 탭 바(`tab_bar`)**: 여러 임시 메모(`새 문서`, `새 문서 2`…)와 로컬 `.md` 파일을 동시에 열어 전환·편집할 수 있는 가로 스크롤 탭 바 추가. `+` 버튼, 탭 바 빈 영역 더블클릭, `Ctrl+N`/`Ctrl+T`로 새 탭 생성, `×` 버튼·가운데 클릭·`Ctrl+W`로 탭 닫기, `Ctrl+Tab`/`Ctrl+Shift+Tab`/`Ctrl+PageUp`/`Ctrl+PageDown` 및 `Ctrl+1~9`로 탭 전환 지원.
+- **탭별 뷰 상태 보존**: 각 탭(`Doc`)마다 활성 블록(`view_active`), 빈 줄 카운트(`view_blank`), 다중 블록 선택(`view_block_sel`, `view_block_sel_anchor`, `view_block_sel_head`), 마지막 커서 선택(`view_last_sel`)을 독립 보존·복원하며, 빈 보조 메모 탭이 열려 있어도 내용이 있는 메모 탭의 `draft`가 우선 보관되도록 개선.
+
+### 2. 빈 문서·빈 블록에서 `Enter` 빈 줄 생성 및 탐색 (`src/main.rs`, `src/ui.rs`)
+- **빈 줄 슬롯 모델(`collect_doc_slots_into`)**: 비어 있지 않은 블록 사이의 `\n\n` 간격과 문서 앞·뒤의 빈 줄을 `start..start` 슬롯으로 함께 구성하여, 아무 내용을 입력하지 않고 `Enter`를 여러 번 눌러도 빈 줄이 시각적으로 즉시 늘어나고 커서가 아래 줄로 내려가도록 수정.
+- 빈 줄 슬롯에서도 `↑`/`↓`/`←`/`→` 커서 진입·이탈과 `Backspace`/`Delete`를 통한 빈 줄 한 줄씩 삭제가 자연스럽게 동작하도록 개선.
+
+### 3. 커서 이동 및 다중 블록 지정 UX 개선 (`src/main.rs`, `src/ui.rs`)
+- **클릭 위치 정밀 커서 배치(`pending_click_pos`)**: 비활성 블록 클릭 시 무조건 블록 끝으로 이동하던 방식 대신 `galley.cursor_from_pos`로 실제 클릭한 글자 위치에 커서를 배치.
+- **시각적 줄(자동 줄바꿈) 인식 및 블록 경계 방향키(`EditorCursorInfo`, `arrow`, `arrow_lr`)**: 블록의 실제 첫 번째/마지막 레이아웃 행에 있을 때만 열(column) 위치를 보존한 채 이웃 블록으로 이동하며, 블록 시작/끝에서 `←`/`→`로 이전/다음 블록 이동, `Ctrl+Home`/`Ctrl+End`로 문서 처음/끝 이동 지원.
+- **교차 블록 선택·재배치·복제(`shift_arrow`, `move_blocks`, `duplicate_blocks`)**: `Shift+방향키`, `Shift+클릭`, 마우스 드래그(상·하단 가장자리 자동 스크롤 포함)로 여러 블록을 연속 선택하고, `Tab`/`Shift+Tab` 일괄 들여쓰기·내어쓰기(편집 후 바이트 범위 자동 갱신), `Alt+↑`/`Alt+↓` 블록 순서 이동, `Ctrl+D` 블록 복제, 서식 막대 화면 경계 클램핑·반전을 지원.
+
+### 4. 프레임 경로 무할당 및 탐색 최적화 (`src/main.rs`, `src/ui.rs`)
+- `canvas_slots` 버퍼 재사용으로 캔버스 슬롯 계산 시 프레임당 힙 할당 0회 달성.
+- `tab_bar`에서 `tabs` 벡터 복제를 제거하고 `tab_base_name`/`tab_title`을 `Cow<'_, str>` 무할당 빌림으로 전환, 호버 툴팁은 마우스 호버 시에만 지연 생성.
+- `slot_index` 이진 탐색(`O(log N)`) 및 `active_char_cache` 기반 `block_char_bounds`/`block_byte_of`로 방향키·편집 키 입력 시 문서 전체 UTF-8 재스캔 제거.
+
+### 5. 검증 및 배포
+- `cargo test` 24개 통과(멀티 탭·빈 줄 Enter·교차 블록 선택 및 이동 UI 테스트 포함), `cargo clippy --all-targets -- -D warnings` 무경고 통과, `cargo fmt --check` 통과.
+
 ## 2026-11-13 — v0.5.0: 메모 앱 모드(새 문서 자동 보관) 및 메모리·반응 속도 극강 최적화
 
 ### 1. 메모장 / Notepad++ 스타일 새 문서(임시 메모) 모드 (`src/main.rs`, `src/ui.rs`)
