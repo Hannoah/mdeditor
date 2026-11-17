@@ -73,8 +73,12 @@ fn main() -> eframe::Result {
         // 기본값 HighPerformance는 듀얼 GPU Mac에서 외장 GPU를 깨워 배터리·발열을 늘린다. 편집기는 내장 GPU로 충분.
         #[cfg(target_os = "macos")]
         wgpu_options: {
-            let mut w = eframe::WgpuConfiguration::default()
-                .with_surface_config(eframe::SurfaceConfig::LOW_LATENCY);
+            // vsync 끔(Immediate): ProMotion 화면에서 입력 직후 다음 vsync까지 기다리지 않는다.
+            // 측정(백스페이스 연타): 입력→다음 프레임 p99 9ms → 5ms, vsync 켬에서 60ms 멈춤 1회 관찰
+            let mut w = eframe::WgpuConfiguration::default().with_surface_config(eframe::SurfaceConfig {
+                present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+                ..eframe::SurfaceConfig::LOW_LATENCY
+            });
             if let eframe::egui_wgpu::WgpuSetup::CreateNew(c) = &mut w.wgpu_setup {
                 c.power_preference = eframe::wgpu::PowerPreference::LowPower;
             }
