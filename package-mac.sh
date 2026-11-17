@@ -60,8 +60,18 @@ codesign --force --deep -s - "$app"
 zip="MDEditor-v$version-macos-$arch.zip"
 rm -f "$dist/$zip"
 ditto -c -k --keepParent "$app" "$dist/$zip"
-(cd "$dist" && shasum -a 256 "$zip" > "SHA256SUMS-macos.txt")
+# 설치 파일(.dmg): 열면 MDEditor.app을 Applications 바로가기로 끌어다 놓아 설치한다
+dmg="MDEditor-Setup-v$version-macos-$arch.dmg"
+stage=$(mktemp -d)
+cp -R "$app" "$stage/"
+ln -s /Applications "$stage/Applications"
+rm -f "$dist/$dmg"
+hdiutil create -volname "MDEditor $version" -srcfolder "$stage" -format UDZO -ov "$dist/$dmg" >/dev/null
+rm -rf "$stage"
+
+(cd "$dist" && shasum -a 256 "$dmg" "$zip" > "SHA256SUMS-macos.txt")
 
 echo ""
 echo "완료: $app"
-echo "배포: $dist/$zip   설치: 압축 해제 후 MDEditor.app을 응용 프로그램 폴더로 옮기기"
+echo "설치 파일: $dist/$dmg   (열고 MDEditor를 Applications로 끌어다 놓기)"
+echo "포터블: $dist/$zip"

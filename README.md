@@ -141,7 +141,7 @@ cargo run --release -- memo.md      # 파일 열기 (상위 폴더가 작업 폴
 
 ### macOS
 
-`./package-mac.sh`를 실행하면 `dist/MDEditor.app`과 `dist/MDEditor-v<버전>-macos-<arch>.zip`이 만들어집니다. `MDEditor.app`을 응용 프로그램 폴더로 옮기면 됩니다. 단축키의 `Ctrl`은 macOS에서 `Cmd`입니다. 설치 마법사는 Windows 전용이고, 글꼴은 Apple SD Gothic Neo와 Menlo를 씁니다. 개발자 인증서 서명이 없으므로 다른 Mac에서 처음 열 때는 우클릭 > 열기를 사용하세요.
+`./package-mac.sh`를 실행하면 `dist/`에 설치 파일 `MDEditor-Setup-v<버전>-macos-<arch>.dmg`와 포터블 `MDEditor-v<버전>-macos-<arch>.zip`이 만들어집니다. `.dmg`를 열고 MDEditor를 Applications 폴더로 끌어다 놓으면 설치됩니다. 단축키의 `Ctrl`은 macOS에서 `Cmd`입니다. 설치 마법사는 Windows 전용이고, 글꼴은 Apple SD Gothic Neo와 Menlo를 씁니다. 개발자 인증서 서명이 없으므로 다른 Mac에서 처음 열 때는 우클릭 > 열기를 사용하세요.
 
 ---
 
