@@ -280,6 +280,68 @@ mod win_mem {
     }
 }
 
+// macOS·Linux: 같은 이유로 시스템 폰트(AppleSDGothicNeo.ttc ~55MB)를 mmap으로 읽기 전용 매핑한다
+#[cfg(unix)]
+mod unix_mem {
+    use std::os::unix::io::AsRawFd;
+    use std::path::Path;
+    use std::ptr::NonNull;
+
+    extern "C" {
+        fn mmap(
+            addr: *mut core::ffi::c_void,
+            len: usize,
+            prot: i32,
+            flags: i32,
+            fd: i32,
+            offset: i64,
+        ) -> *mut core::ffi::c_void;
+        fn munmap(addr: *mut core::ffi::c_void, len: usize) -> i32;
+    }
+
+    pub struct MappedFile {
+        ptr: NonNull<u8>,
+        len: usize,
+    }
+
+    unsafe impl Send for MappedFile {}
+    unsafe impl Sync for MappedFile {}
+
+    impl MappedFile {
+        pub fn open(path: &Path) -> Option<Self> {
+            let file = std::fs::File::open(path).ok()?;
+            let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
+            if len == 0 {
+                return None;
+            }
+            const PROT_READ: i32 = 1;
+            const MAP_PRIVATE: i32 = 2;
+            // 매핑은 fd를 닫아도 유지된다
+            let p = unsafe {
+                mmap(core::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, file.as_raw_fd(), 0)
+            };
+            if p as isize == -1 {
+                return None; // MAP_FAILED
+            }
+            Some(Self { ptr: NonNull::new(p.cast())?, len })
+        }
+    }
+
+    impl AsRef<[u8]> for MappedFile {
+        fn as_ref(&self) -> &[u8] {
+            unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+        }
+    }
+
+    impl Drop for MappedFile {
+        fn drop(&mut self) {
+            unsafe {
+                munmap(self.ptr.as_ptr().cast(), self.len);
+            }
+        }
+    }
+}
+
 pub fn clipboard_text() -> Option<String> {
     #[cfg(windows)]
     return win_mem::clipboard_text();
@@ -287,12 +349,26 @@ pub fn clipboard_text() -> Option<String> {
     None
 }
 
-fn load_font_data(path: &std::path::Path) -> Option<egui::FontData> {
+// index: .ttc 글꼴 모음 안의 글꼴 번호 (단일 .ttf/.otf는 0)
+fn load_font_data(path: &std::path::Path, index: u32) -> Option<egui::FontData> {
     #[cfg(windows)]
     if let Some(mapped) = win_mem::MappedFile::open(path) {
-        return Some(egui::FontData::from_blob(std::sync::Arc::new(mapped), 0));
+        return Some(egui::FontData::from_blob(std::sync::Arc::new(mapped), index));
     }
-    std::fs::read(path).ok().map(egui::FontData::from_owned)
+    #[cfg(unix)]
+    if let Some(mapped) = unix_mem::MappedFile::open(path) {
+        return Some(egui::FontData::from_blob(std::sync::Arc::new(mapped), index));
+    }
+    let mut fd = egui::FontData::from_owned(std::fs::read(path).ok()?);
+    fd.index = index;
+    Some(fd)
+}
+
+// "AppleSDGothicNeo.ttc#6" → ("AppleSDGothicNeo.ttc", 6)
+fn split_face(pre: &str) -> (&str, u32) {
+    pre.rsplit_once('#')
+        .and_then(|(name, i)| Some((name, i.parse().ok()?)))
+        .unwrap_or((pre, 0))
 }
 
 pub struct FontPreset {
@@ -354,13 +430,13 @@ const FONT_PRESETS: &[FontPreset] = &[
         id: "arial",
         label: "Arial + 맑은 고딕",
         regular: &["arial.ttf"],
-        bold: &["arialbd.ttf"],
+        bold: &["arialbd.ttf", "Arial Bold.ttf"],
     },
     FontPreset {
         id: "georgia",
         label: "Georgia (세리프) + 맑은 고딕",
         regular: &["georgia.ttf"],
-        bold: &["georgiab.ttf"],
+        bold: &["georgiab.ttf", "Georgia Bold.ttf"],
     },
     FontPreset {
         id: "consolas",
@@ -370,11 +446,28 @@ const FONT_PRESETS: &[FontPreset] = &[
     },
 ];
 
+#[cfg(not(target_os = "macos"))]
 fn font_dirs() -> Vec<std::path::PathBuf> {
     let win = std::path::PathBuf::from(r"C:\Windows\Fonts");
     let user = std::env::var_os("LOCALAPPDATA")
         .map(|d| std::path::PathBuf::from(d).join(r"Microsoft\Windows\Fonts"));
     user.into_iter().chain([win]).collect()
+}
+
+#[cfg(target_os = "macos")]
+fn font_dirs() -> Vec<std::path::PathBuf> {
+    let user = std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join("Library/Fonts"));
+    user.into_iter()
+        .chain(
+            [
+                "/Library/Fonts",
+                "/System/Library/Fonts",
+                "/System/Library/Fonts/Supplemental",
+            ]
+            .map(std::path::PathBuf::from),
+        )
+        .collect()
 }
 
 fn scan_font_entries() -> &'static Vec<(String, std::path::PathBuf)> {
@@ -388,7 +481,8 @@ fn scan_font_entries() -> &'static Vec<(String, std::path::PathBuf)> {
             .flatten()
             .filter_map(|e| {
                 let n = e.file_name().to_string_lossy().to_lowercase();
-                (n.ends_with(".ttf") || n.ends_with(".otf")).then(|| (n, e.path()))
+                (n.ends_with(".ttf") || n.ends_with(".otf") || n.ends_with(".ttc"))
+                    .then(|| (n, e.path()))
             })
             .collect()
     })
@@ -398,8 +492,9 @@ fn find_font_path(prefixes: &[&str]) -> Option<(usize, std::path::PathBuf)> {
     let dirs = font_dirs();
     let entries = scan_font_entries();
     prefixes.iter().enumerate().find_map(|(idx, pre)| {
+        let pre = split_face(pre).0;
         let lower = pre.to_lowercase();
-        if lower.ends_with(".ttf") || lower.ends_with(".otf") {
+        if lower.ends_with(".ttf") || lower.ends_with(".otf") || lower.ends_with(".ttc") {
             if let Some(p) = dirs.iter().map(|d| d.join(pre)).find(|p| p.is_file()) {
                 return Some((idx, p));
             }
@@ -444,7 +539,7 @@ pub fn font_display_name(choice: &str) -> std::borrow::Cow<'static, str> {
 fn build_fonts(choice: &str) -> egui::FontDefinitions {
     let find = |prefixes: &[&str]| -> Option<(usize, egui::FontData)> {
         let (idx, path) = find_font_path(prefixes)?;
-        load_font_data(&path).map(|fd| (idx, fd))
+        load_font_data(&path, split_face(prefixes[idx]).1).map(|fd| (idx, fd))
     };
     let mut fonts = egui::FontDefinitions::empty();
     let mut add = |key: &str, found: Option<(usize, egui::FontData)>| -> Option<(usize, String)> {
@@ -458,37 +553,43 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     let preset = FONT_PRESETS.iter().find(|p| p.id == choice);
 
     let reg_found = if let Some(path) = custom_path {
-        add("regular", load_font_data(path).map(|fd| (0, fd)))
+        add("regular", load_font_data(path, 0).map(|fd| (0, fd)))
     } else if let Some(p) = preset {
         add("regular", find(p.regular))
     } else {
-        add("regular", find(&["KoPubWorld Dotum Medium", "segoeui.ttf"]))
+        add(
+            "regular",
+            find(&["KoPubWorld Dotum Medium", "segoeui.ttf", "AppleSDGothicNeo.ttc#0"]),
+        )
     };
     let bold_found = if custom_path.is_some() {
         None
     } else if let Some(p) = preset {
         add("bold", find(p.bold))
     } else {
-        add("bold", find(&["KoPubWorld Dotum Bold", "segoeuib.ttf"]))
+        add(
+            "bold",
+            find(&["KoPubWorld Dotum Bold", "segoeuib.ttf", "AppleSDGothicNeo.ttc#6"]),
+        )
     };
 
     let regular = reg_found.as_ref().map(|(_, k)| k.clone());
     let bold_f = bold_found.as_ref().map(|(_, k)| k.clone());
-    let ko = add("malgun", find(&["malgun.ttf"])).map(|(_, k)| k);
+    let ko = add("malgun", find(&["malgun.ttf", "AppleSDGothicNeo.ttc#0"])).map(|(_, k)| k);
     let ko_bold = if (preset.is_none() && bold_found.as_ref().is_some_and(|(idx, _)| *idx == 0))
         || (choice == "kopub" && bold_f.is_some())
         || (choice == "malgun" && bold_f.is_some())
     {
         None
     } else {
-        add("malgunbd", find(&["malgunbd.ttf"])).map(|(_, k)| k)
+        add("malgunbd", find(&["malgunbd.ttf", "AppleSDGothicNeo.ttc#6"])).map(|(_, k)| k)
     };
     let mono = if choice == "d2coding" {
-        add("mono", find(&["D2Coding", "consola.ttf"])).map(|(_, k)| k)
+        add("mono", find(&["D2Coding", "consola.ttf", "Menlo.ttc#0"])).map(|(_, k)| k)
     } else {
-        add("mono", find(&["consola.ttf"])).map(|(_, k)| k)
+        add("mono", find(&["consola.ttf", "Menlo.ttc#0"])).map(|(_, k)| k)
     };
-    let sym = add("symbol", find(&["seguisym.ttf"])).map(|(_, k)| k);
+    let sym = add("symbol", find(&["seguisym.ttf", "Apple Symbols.ttf"])).map(|(_, k)| k);
     let emoji = add("emoji", find(&["seguiemj.ttf"])).map(|(_, k)| k);
     let chain = |list: &[&Option<String>]| -> Vec<String> {
         list.iter().filter_map(|o| (*o).clone()).collect()
@@ -509,6 +610,7 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
 }
 
 // 웹과 같은 글꼴: KoPubWorld 돋움(설치돼 있으면) → Segoe UI → 맑은 고딕, 코드는 Consolas
+#[cfg_attr(not(windows), allow(dead_code))] // 설치 마법사(Windows 전용)와 테스트에서만 쓴다
 pub fn install_fonts(ctx: &egui::Context) {
     install_fonts_with(ctx, "auto");
 }

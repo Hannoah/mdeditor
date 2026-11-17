@@ -47,9 +47,7 @@ pub fn install_dir() -> PathBuf {
         .join("mdeditor")
 }
 
-pub fn home() -> PathBuf {
-    std::env::var_os("USERPROFILE").map_or_else(|| PathBuf::from("."), PathBuf::from)
-}
+use crate::home;
 
 // 실행 인자·파일 이름으로 설치/제거 모드인지 판별한다. 일반 앱 실행이면 None.
 pub fn mode(exe: &Path, args: &[String]) -> Option<Mode> {

@@ -12,6 +12,7 @@ use egui::{Key, Modifiers};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 mod mermaid;
+#[cfg(windows)] // 설치·제거 마법사는 Windows 전용 (PowerShell 엔진)
 mod setup;
 mod theme;
 mod ui;
@@ -39,6 +40,7 @@ fn tab_base_name(key: &str) -> std::borrow::Cow<'_, str> {
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().unwrap_or_default();
+    #[cfg(windows)]
     if let Some(mode) = setup::mode(&exe, &args) {
         return setup::run(mode, &args);
     }
@@ -46,9 +48,11 @@ fn main() -> eframe::Result {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // 시작 메뉴·탐색기에서 인자 없이 실행하면(작업 디렉토리가 홈 또는 실행 파일 폴더)
     // 홈 폴더 전체를 뒤지는 대신 문서\MDEditor를 기본 작업 폴더로 쓴다. 터미널에서 실행하면 그 폴더.
-    let launched_bare = cwd == setup::home() || exe.parent() == Some(cwd.as_path());
+    // macOS Finder/Dock에서 .app을 실행하면 작업 디렉토리가 "/"다
+    let launched_bare =
+        cwd == home() || cwd == Path::new("/") || exe.parent() == Some(cwd.as_path());
     let cwd = if arg.is_none() && launched_bare {
-        let dir = setup::home().join("Documents").join("MDEditor");
+        let dir = home().join("Documents").join("MDEditor");
         let _ = std::fs::create_dir_all(&dir);
         dir
     } else {
@@ -74,6 +78,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(App::new(cc, arg, &cwd)))),
     )
+}
+
+fn home() -> PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
 fn app_icon() -> egui::IconData {
