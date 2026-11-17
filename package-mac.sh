@@ -70,7 +70,8 @@ stage=$(mktemp -d)
 cp -R "$app" "$stage/"
 ln -s /Applications "$stage/Applications"
 rm -f "$dist/$dmg"
-hdiutil create -volname "MDEditor $version" -srcfolder "$stage" -format UDZO -ov "$dist/$dmg" >/dev/null
+# ULMO(LZMA): UDZO 대비 ~28% 작다. macOS 10.15+에서 열림 (그 이전은 zip 사용)
+hdiutil create -volname "MDEditor $version" -srcfolder "$stage" -format ULMO -ov "$dist/$dmg" >/dev/null
 rm -rf "$stage"
 
 (cd "$dist" && shasum -a 256 "$dmg" "$zip" > "SHA256SUMS-macos.txt")
