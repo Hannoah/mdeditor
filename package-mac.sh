@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-arch=$(uname -m)
+arch=universal # Apple Silicon(arm64) + Intel(x86_64) 한 바이너리
 echo "MDEditor v$version 패키징 (macOS $arch)"
 
 if [[ "${1:-}" != "--skip-tests" ]]; then
@@ -13,15 +13,19 @@ if [[ "${1:-}" != "--skip-tests" ]]; then
     cargo test
 fi
 
-echo "[2/3] 릴리즈 빌드"
-cargo build --release
+echo "[2/3] 릴리즈 빌드 (arm64 + x86_64)"
+rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
 
 echo "[3/3] dist 구성"
 dist=dist
 app="$dist/MDEditor.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/mdeditor "$app/Contents/MacOS/mdeditor"
+lipo -create -output "$app/Contents/MacOS/mdeditor" \
+    target/aarch64-apple-darwin/release/mdeditor \
+    target/x86_64-apple-darwin/release/mdeditor
 
 # app.ico(256px) → AppIcon.icns
 iconset=$(mktemp -d)/AppIcon.iconset
@@ -47,7 +51,7 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleExecutable</key><string>mdeditor</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSMinimumSystemVersion</key><string>10.13</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>Copyright (c) 2026 MDEditor Team</string>
 </dict>
