@@ -1,5 +1,118 @@
 # MDEditor 작업 기록
 
+## 2026-11-16 — v0.8.0: 코드 블록 모드(` ``` `) 대폭 강화, 노션식 가운데·전체 너비·집중 보기 모드, 우클릭 메뉴 컴팩트화 및 설치 안정화
+
+### 1. 코드 블록 모드·구문 강조 및 편집 UX 개선 (`src/main.rs`, `src/ui.rs`)
+- **즉시 코드 모드 진입 및 탈출(`fence_opener_line`, `enter`, `canvas`)**:
+  - 빈 블록이나 문단에서 ` ``` ` + `Space`, 또는 ` ```언어 ` / `~~~언어` + `Enter`를 입력하면 즉시 닫힌 코드 블록(`"```lang\n\n```"`)으로 확장하고 커서를 본문 줄에 배치(문단 중간에서도 앞 문단과 자동 분리).
+  - 코드 본문 줄에서 `Enter` 시 현재 줄의 들여쓰기를 자동 유지하고, 닫는 ` ``` ` 줄 위/끝에서 `Enter`를 누르면 코드 블록 아래에 새 빈 블록을 생성해 빠져나옴.
+- **전용 코드 블록 에디터 및 뷰어(`block_editor`, `render_block`, `md_job`, `build_code_layout_job`)**:
+  - 편집 중인 코드 블록을 전용 `code_bg` 프레임으로 감싸고 상단 헤더(언어 선택 드롭다운·`복사`·`완료 (Esc)`)와 편집 중 실시간 구문 강조를 제공.
+  - 읽기 모드 코드 블록 카드에 언어 배지·줄 수·`복사` 버튼과 `galley.rows` 기반 줄 번호 여백(`gutter`)을 추가하고 공통 언어 별칭(`go`, `java`, `kotlin`, `cs`, `powershell`, `zig` 등) 강조 매핑 지원.
+
+### 2. 노션식 가운데·전체 너비·집중 보기 모드 & 빈 문서 단순화 (`src/main.rs`, `src/ui.rs`, `src/theme.rs`)
+- **빈 문서 `빠른 시작` 안내 카드 제거**: 빈 문서 진입 시 불필요한 카드 없이 바로 깔끔한 캔버스에서 작성을 시작하도록 단순화.
+- **가운데 ↔ 전체 너비 ↔ 집중 크게 보기**:
+  - 기본 **가운데 편집** 폭을 노션 표준인 `708px`로 맞추고, 상단 헤더(`theme::WIDTH`)·하단 상태바(`"가운데"` / `"전체 너비"`)·설정 메뉴·`Ctrl+Alt+W`로 즉시 전환 가능.
+  - 상단 헤더(`theme::MAXIMIZE`) 및 `F11` / `Ctrl+Shift+F`로 상·하단 바와 목차를 숨기는 **집중 크게 보기**(`focus_mode`)와 우상단 플로팅 제어 바 추가.
+
+### 3. 우클릭 메뉴 컴팩트화, 설치 엔진 수정 및 Teams 배포 (`src/ui.rs`, `src/main.rs`, `src/setup.rs`, `src/install.ps1`, `package.ps1`)
+- **본문 우클릭 메뉴 컴팩트화**: 세로 스크롤(`ScrollArea`)과 중복 메뉴를 제거해 상단 글자 서식 아이콘 바 + 핵심 8개 행(`잘라내기`·`복사`·`붙여넣기`·`전체 선택`, `블록 전환 ▸` 하위 메뉴, `삽입 ▸` 하위 메뉴, `블록 복제`·`블록 삭제`)으로 정리.
+- **설치 엔진 이중 BOM 버그 수정**: `src/install.ps1`/`src/uninstall.ps1` 선두 BOM 제거, `run_script` BOM 정규화, `-LiteralPath` 경로 대응, `shell32.dll` `SHChangeNotify` 직접 호출로 설치 오류 해결.
+- **메신저 공유용 zip 추가**: `package.ps1`이 `MDEditor-Setup-v<버전>.zip`을 함께 생성·검증하도록 개선(PowerShell 5.1 UTF-8 BOM 파싱 오류 방지 포함).
+
+### 4. 한글 IME Enter 버그 수정, 표 직접 편집, 왼쪽 TOC 및 글꼴 선택 (`src/main.rs`, `src/ui.rs`, `src/theme.rs`)
+- **한글 IME 조합 중 Enter 버그 수정 (`handle_shortcuts`, `enter`, `App::ui`, `App::canvas`)**:
+  - Windows 한글 IME에서 `"하이"` 입력 시 `"이"` 조합 상태에서 `Enter`를 누르면 `handle_shortcuts`가 `TextEdit`의 `Ime::Commit`보다 먼저 블록을 분할하거나 조합 중인 음절 범위를 선택 삭제로 오인해 `"이"`가 다음 줄로 넘어가던 문제를 해결 (`pending_enter`로 `TextEdit` 커밋 직후 같은 프레임에서 분할 + `ime_composing` 상태 보존 및 조합 중 서식 막대 깜빡임 억제).
+- **표(Table) 직접 편집 UI (`parse_md_table`, `serialize_md_table`, `render_table_editor`)**:
+  - 표 블록을 클릭·삽입하면 마크다운 원문 대신 격자 표 에디터가 열려 셀 직접 입력, `+ 행`/`+ 열`/`- 행`/`- 열`, `Tab`/`Shift+Tab`/`Enter` 셀 이동(마지막 셀 `Tab`/`Enter` 시 행 자동 추가) 및 `마크다운 보기` ↔ `표 직접 편집` 전환을 지원.
+- **문서 목차(TOC) 왼쪽 패널 배치 (`egui::Panel::left("toc")`)** 및 **글꼴 선택 기능 (`theme::available_fonts`, `install_fonts_with`, `font_picker_menu`)**:
+  - 시스템 설치 글꼴(기본 자동, 맑은 고딕, KoPubWorld 돋움, Pretendard, 나눔고딕, 나눔명조, Noto Sans KR, D2Coding, Arial, Georgia, Consolas) 및 `.ttf`/`.otf` 파일 직접 선택·저장 지원(설정 메뉴·하단 상태바).
+
+### 5. 표 디자인 전면 개편 및 앱 컴포넌트 UI 다듬기 (`src/ui.rs`, `src/theme.rs`, `src/main.rs`)
+- **표 뷰어·에디터 통합 디자인 (`render_table_editor`, `render_table_view`, `paint_table_chrome`)**:
+  - 이중 외곽선·분리된 입력 상자(`4px` 간격 둥근 박스) 대신 하나의 `8px` 라운드 외곽선 안에 `0px` 간격으로 이어지는 `1px` 실선 격자 표로 전면 재설계.
+  - 캔버스 전체 폭(`table_col_width`)을 균등 분할해 비활성 읽기 뷰(`render_table_view`)와 편집 뷰(`render_table_editor`) 간 전환 시 레이아웃 점프가 없도록 통일.
+  - 상단 분리형 툴바 스트립(차원 배지 `cols×rows`, `+ 행`/`+ 열`/`- 행`/`- 열`, 열별 정렬 전환 `정렬: 기본`/`왼쪽`/`가운데`/`오른쪽`, `마크다운 보기`, `완료 (Esc)`, `표 삭제` 통삭제 버튼), 헤더 행 틴트·짝수/홀수 은은한 줄무늬·포커스 셀 단독 액센트 아웃라인 적용(원문 마크다운 편집 모드 상단에도 `표 삭제` 버튼 제공).
+- **전반적인 컴포넌트 디자인 폴리싱 (`theme.rs`, `ui.rs`)**:
+  - `theme::pal` 및 `theme::apply`: 라이트/다크 테두리 대비·그림자·버튼 라운드(`7px`) 및 호버 상태 정돈.
+  - 탭 바·TOC·상태바: 활성 탭 하단 선을 캔버스 배경과 자연스럽게 연결하고, 왼쪽 TOC 서랍 우측 경계선 및 활성 항목 액센트 막대·상태바 상단 경계선과 필 버튼을 정리.
+  - 코드 블록·토글(`:::toggle`)·카드(`card`): `8px` 라운드와 일관된 헤더 스트립·복사/완료 버튼·토글 펼침 가이드 선 적용.
+
+### 6. 굵은 글씨(`**bold**`) 렌더링 및 편집 강조 수정 (`src/theme.rs`, `src/ui.rs`, `src/main.rs`)
+- **근본 원인**: `egui`의 `RichText::strong()`은 글꼴 굵기를 바꾸지 않고 색상만 조절하기 때문에, `egui_commonmark`의 `**bold**`/`__bold__`가 일반 굵기(`Proportional`)로 렌더링되던 문제와 편집 중 `md_job` 및 표 셀(`render_table_view`)에서 인라인 굵기 처리가 빠져 있던 문제를 수정.
+- **`theme::bold()` 글꼴 폴백 순서 수정 (`build_fonts`)**: `&ko_bold`(`malgunbd.ttf`)를 `&regular`보다 먼저 배치해 한글이 일반 굵기로 빠지지 않도록 보완.
+- **네이티브 인라인/블록 마크다운 렌더러 (`render_markdown_native`, `inline_md_view_job`, `append_inline_md_source`)**:
+  - 읽기 뷰(문단·목록·할 일 체크박스·인용문·GFM 알림·제목 인라인·표 셀)와 편집 중 블록(`md_job`) 모두에서 `**굵게**`, `__굵게__`, `==강조==`에 실제 `theme::bold()`를 적용.
+  - 한국어 문장부호+조사가 결합된 경우(`**굵은 글씨!**입니다`)에도 `**`가 풀리지 않고 굵게 렌더링되도록 잔여 `**...**` 쌍 처리 추가(`bold_text_uses_bold_font_in_view_edit_and_tables` 테스트 추가).
+
+### 7. 반응속도·렌더링 캐시·증분 편집 및 네이티브 기능 최적화 (`src/main.rs`, `src/ui.rs`, `src/mermaid.rs`)
+- **뷰포트 지연 가상화 및 탭 전환 캐시 유지**: `canvas`에서 미측정(`cached_h == None`)이더라도 뷰포트 아래 블록은 `estimate_block_height` + `ui.allocate_space`로 건너뛰어 대용량 문서(3,000블록) 초기 렌더링·리사이즈를 가속화하고, 탭 전환 시 `block_heights`를 보존(상한 `16_384`)하며, `toc`·`files_modal`을 `ScrollArea::show_rows`로 가상화.
+- **비활성 블록 파싱·Galley 캐시 및 Mermaid 다중 캐시**:
+  - `code_galley_cache`(코드 블록 `Galley`+줄 번호 좌표 재사용), `inline_galley_cache`(문단·목록·제목·표 셀 `Galley` 재사용), `table_cache`(`MdTable` 파싱 캐시)를 도입해 재페인트 비용 제거.
+  - `mermaid.rs`의 1-엔트리 `FlowchartCache`를 16-엔트리 LRU 캐시로 확장하고 `sequenceDiagram`/`pie` 파싱 캐시 및 `fonts_mut` 일괄 측정 적용.
+- **다중 줄 블록 증분 갱신 및 대량 치환 최적화**: `Doc::apply_block_edit`가 목록·인용구·표·닫힌 코드 블록 등 자기 완결적 다중 줄 블록도 `O(|block|)` 증분 갱신(목차 줄 번호 `item.2` 포함)하도록 확장하고, `replace_all` 단일 패스화 및 확장자·목차 스캔 무할당화 적용.
+- **기능·UX 개선**: 네이티브 렌더러(`render_markdown_native`)의 각주 참조(`[1]`)·정의(`[^1]:`)·인라인/블록 수식·내부 표 지원, 로컬 `.md` 링크 앱 내 열기 및 `#제목` 앵커 스크롤 이동, `$$`/`:::toggle` 닫는 줄 `Enter` 탈출, 찾기·바꾸기 중앙 스크롤 및 바꾸기 입력창 `Enter` 실행, 슬래시 메뉴 화면 하단 반전 배치, 빈 줄 제거 후 클릭 Y보정 적용.
+
+### 8. 검증
+- `cargo test` 37개 통과(`incremental_block_edit_multiline_and_code_blocks`, `replace_all_and_heading_slug_accuracy`, `native_renderer_handles_links_footnotes_math_and_anchors`, `large_document_virtualization_and_cache_perf` 추가), `cargo clippy --all-targets -- -D warnings` 무경고 통과, `cargo fmt --check` 통과, `cargo build --release` 통과.
+
+## 2026-11-16 — v0.7.0: 우클릭 컨텍스트 메뉴(캔버스·탭·파일 탐색기), 전방위 키보드 단축키 및 네이티브 Mermaid 그래프 렌더러 추가
+
+### 1. 우클릭 컨텍스트 메뉴 (`src/main.rs`, `src/ui.rs`, `src/theme.rs`)
+- **노션 라이브 캔버스 우클릭 메뉴(`canvas_context_menu`)**:
+  - 편집 중인 블록, 렌더링된 비활성 블록(우클릭 시 자동 활성화 및 클릭 위치 커서 배치), 다중 블록 선택(`block_sel`), 캔버스 하단 빈 영역 어디서든 우클릭 시 화면 경계에 맞춰 클램핑된 컨텍스트 메뉴 표시.
+  - 우클릭 시 기존 블록 내 텍스트 선택(`last_sel`)이 해제되지 않도록 보존하며, 메뉴가 열려 있을 때는 떠 있는 서식 막대와의 중첩을 방지.
+  - **구성**: 메인 메뉴는 상단 인라인 글자 서식 8종 아이콘 바 + 잘라내기/복사/붙여넣기/전체 선택 + `블록 전환 ▸` 하위 메뉴(블록 배지 8종·할 일 완료 토글·코드/콜아웃/토글 전환·블록 위/아래 이동) + `삽입 ▸` 하위 메뉴(빈 블록 추가·표·Mermaid·구분선·이미지) + 블록 복제/삭제의 컴팩트 구조로 정리(실행 취소·찾기·목차·저장 등은 상단 바/단축키로 일원화).
+- **상단 탭 바 우클릭 메뉴(`tab_context_menu`)**:
+  - 새 탭 열기, 탭 내용 복제하여 새 탭으로 열기, 파일로 저장/이름 변경, 파일 전체 경로 복사, 탭 닫기, 다른 탭 모두 닫기, 오른쪽 탭 모두 닫기, 파일 영구 삭제 지원.
+- **파일 탐색기 모달 항목 우클릭 메뉴(`file_context_menu`)**:
+  - 파일 열기(`Enter`), 이름 변경(`F2`), 파일 전체 경로 복사, 파일 삭제(`Delete`) 지원.
+
+### 2. 블록 유형 전환·편집 연산 및 신규 키보드 단축키 (`src/main.rs`, `src/ui.rs`)
+- **인라인 서식 단축키 확장**: 취소선(`Ctrl+Shift+S`), 형광펜 강조(`Ctrl+Shift+H`), 인라인 코드(`Ctrl+E`), 키보드 키캡(`Ctrl+Shift+K`), 선택 영역 서식 지우기(`Ctrl+\`).
+- **블록 유형 전환 단축키(`convert_block`, `toggle_todo`)**: 일반 텍스트(`Ctrl+Alt+0`), 제목 1~3(`Ctrl+Alt+1~3`), 할 일 목록(`Ctrl+Alt+4`), 글머리 목록(`Ctrl+Alt+5`), 번호 목록(`Ctrl+Alt+6`), 인용구(`Ctrl+Alt+7`), 코드 블록(`Ctrl+Alt+8`), 콜아웃 박스(`Ctrl+Alt+9`), 접기 토글(`Ctrl+Alt+G`), 할 일 체크박스 완료/미완료 토글(`Ctrl+Enter`). 이미 같은 블록 유형이면 일반 텍스트로 토글 해제.
+- **블록 삽입 및 조작 단축키**: 표 삽입(`Ctrl+Alt+T`), 구분선 삽입(`Ctrl+Alt+-`), 현재 블록 아래에 새 빈 블록 추가(`Ctrl+Shift+Enter`), 현재/선택 블록 삭제(`Ctrl+Shift+D`, 마지막 블록 삭제 시 앞 줄바꿈 정리 버그 수정 포함).
+- **파일·보기·복사 단축키**: 작업 폴더에 새 파일 만들기(`Ctrl+Shift+N`), OS 탐색기로 로컬 파일 열기(`Ctrl+Alt+O`), 문서 목차 토글(`Ctrl+Shift+L`), HTML 내보내기(`Ctrl+Shift+E`), 마크다운 원본 복사(`Ctrl+Shift+C`), HTML 코드 복사(`Ctrl+Alt+C`), 테마 전환(`Ctrl+Alt+D`), 전체 너비 전환(`Ctrl+Alt+W`), 글꼴 크기 전환(`Ctrl+Alt+F`).
+
+### 3. 순수 네이티브 Mermaid 다이어그램 그래프 렌더러 (`src/mermaid.rs`, `src/ui.rs`)
+- 브라우저나 외부 엔진 없이 `egui::Painter`로 직접 그리는 순수 네이티브 Mermaid 렌더러(`src/mermaid.rs`) 구현:
+  - **순서도 / 방향 그래프 (`graph` / `flowchart` TD·TB·BT·LR·RL)**: 사각형(`[ ]`), 둥근 사각형(`( )`), 스타디움(`([ ])`), 서브루틴(`[[ ]]`), 원통(`[( )]`), 원/이중원(`(( ))`/`((( )))`), 마름모(`{ }`), 육각형(`{{ }}`), 평행사변형(`[/ /]`), 비대칭(`> ]`) 도형과 실선/점선/굵은선 화살표(`-->`, `-.->`, `==>`, `<-->`), 간선 라벨(`-->|텍스트|`, `-- 텍스트 -->`), 체인 연결(`A --> B --> C`), 병렬 연결(`A & B --> C`), `subgraph ... end` 그룹 박스, `style`/`classDef` 색상 지정, Sugiyama 계층 배치 및 Barycenter 교차 최소화 지원.
+  - **시퀀스 다이어그램 (`sequenceDiagram`)**: `participant`/`actor` 헤더·푸터 박스, 점선 생명선(Lifeline), 실선/점선 메시지 화살표(`->>`, `-->>`, `->`, `-->`), 자기 호출(Self-Call) 루프 화살표, `Note over/left/right` 카드 렌더링.
+  - **상태·클래스·ER 다이어그램 (`stateDiagram`, `classDiagram`, `erDiagram`)**: 시작/종료 상태(`[*]`) 불스아이 노드, 멤버/메서드 구획이 나뉜 클래스 박스 및 관계선 렌더링.
+  - **파이 차트 (`pie`)**: 도넛형 부채꼴 폴리곤 차트 및 퍼센트 범례 렌더링.
+- **편집 중 실시간 미리보기**: ` ```mermaid ` 블록을 편집할 때도 코드 입력창 바로 아래에 실시간으로 그래프 미리보기 카드를 함께 표시하고, `Esc`로 편집을 마치면 그래프 카드만 깔끔하게 표시. 단축키 `Ctrl+Alt+M` 및 우클릭 메뉴 항목 추가.
+
+### 4. 설치·제거 마법사 및 첫 실행·편집 UX 전면 최적화 (`src/setup.rs`, `src/ui.rs`, `src/main.rs`, `src/theme.rs`)
+- **설치·제거 마법사 UI/UX 개편(`src/setup.rs`)**:
+  - 창 크기를 `[540.0, 480.0]`으로 확장하고 상단 헤더 상태 배지 및 3단계 진행 표시(`stepper`)를 배치.
+  - 진행 중(`Page::Working`) 40ms 주기 자동 갱신(`request_repaint_after`)과 8px 진행률 막대·퍼센트·단계 체크리스트 카드 표시.
+  - 완료 화면(`Page::Done`)에 `"100% 완료"` 배너, `"폴더 열기"` 포함 요약 카드, `"지금 MDEditor 실행 (Enter)"` 및 `"닫기"` / `"확인 및 닫기 (Enter)"` 버튼을 제공해 완료 상태와 다음 동작을 명확히 구분.
+- **첫 실행 및 편집 사용성 개선(`src/main.rs`, `src/ui.rs`, `src/theme.rs`)**:
+  - 인자 없이 실행 시 `Documents\MDEditor` 작업 폴더를 자동 생성하고, 빈 문서 진입 시 빠른 시작 액션(`QuickAction`) 카드를 표시.
+  - 상단 헤더에 임시 메모 배지(`"임시 메모 · 저장"`), 실행 취소/다시 실행/표/테마(`MOON` 아이콘) 버튼 및 목차·찾기 토글 강조(`toggle_icon_btn`)를 추가.
+  - 코드·Mermaid 블록 카드에 원클릭 `복사` 버튼을 추가하고, 하단 상태 표시줄(`status_bar`)에서 상태·작업 폴더·`전체 너비`/`기본 너비`·`글꼴: 보통`/`작게`를 클릭으로 전환할 수 있게 개선.
+
+### 5. 연속 타이핑 지연·프레임 드랍 근본 해소 및 렌더링·설치 최적화 (`src/main.rs`, `src/ui.rs`, `src/theme.rs`, `src/mermaid.rs`, `src/install.ps1`)
+- **OpenGL VSync 스왑 블로킹 및 워킹셋 강제 축출 제거(`src/main.rs`, `src/theme.rs`, `src/ui.rs`)**:
+  - `GlowConfiguration { vsync: false, ..Default::default() }`로 설정해 이벤트 기반 타이핑 시 `SwapBuffers` VSync가 Win32 메시지 루프를 16~33ms씩 블로킹하지 않도록 개선.
+  - 시작 3프레임·포커스 전환(한글 IME·창 전환)마다 메모리 매핑된 시스템 폰트 페이지를 RAM에서 강제 축출하던 `trim_working_set()`(`SetProcessWorkingSetSize(-1, -1)`)을 제거하고, `App::ui` 상단 입력 이벤트 조회를 단일 `ctx.input` 호출로 통합.
+- **키 입력 경로 `O(|block|)` 증분화 및 캐시 수정(`src/main.rs`, `src/ui.rs`)**:
+  - `Doc::apply_block_edit`을 도입해 단일 줄·일반 블록 타이핑 시 전체 문서 `String` 비교·복제·재분할·목차 스캔 없이 `undo` 패치, `lines`, `chars`, `blocks`, `outline`만 `O(|block|)`/`O(log B)`로 증분 갱신.
+  - `block_editor`에서 `edit_buf` 버퍼 재사용, `editor_galley_cache` 도입(`DefaultHasher` + `pixels_per_point`·`wrap`·`dark`·원문 일치 검증), `active_char_cache` 갱신 버그 수정, `md_job`의 무할당 `list_marker_bytes` 적용, `split_blocks_into` 빈 블록 첫 공백(`" "`) 보존 수정.
+  - `render_block` 위젯 ID를 `r.start` 바이트 오프셋에서 블록 순번 `("blk", block_idx)`으로 안정화하고, 비활성 블록 가상화 마진을 240px로 축소하며, `handle_shortcuts`를 단일 `ctx.input` 검사 고속 경로로 전환.
+- **커서 반응 속도 극강화 (`src/main.rs`, `src/ui.rs`)**:
+  - 비활성 블록 클릭 시 `go_click` + `block_editor` 사전 클릭 커서 계산(`editor_galley_cached`) + `TextEdit::show` 직전 조건부 포커스(`request_focus`)를 결합해, 블록 끝 점프나 다중 프레임 지연 없이 첫 활성화 프레임에 클릭한 글자 위치에 즉시 커서를 표시.
+  - 블록 이동·분할·복제·편집 경로를 바이트 오프셋 기반 `pending_byte_caret` / `place_byte_caret`으로 전환해 방향키 블록 경계 이동 시 전체 문서 UTF-8 5회 중복 스캔을 제거(동일 `doc.rev`에서는 이전 블록 시작과의 차이 구간만 증분 계산).
+  - 블록 내 `↑`/`↓`/`←`/`→`/`Backspace`/`Delete`/`Alt+↑↓`가 `local_cursor`로 `O(1)`/`O(|block|)` 판정되도록 개선하고, `apply_block_edit` 직후 `cursor_info.doc_rev`를 동기화해 연속 타이핑 직후에도 자동 줄바꿈(Soft-Wrap) 행 이동이 풀리지 않도록 수정.
+  - `block_editor` 내 이미 포커스된 상태에서의 `ctx.memory` 조회와 선택 범위 부재 시의 우클릭 `ctx.input` 조회를 생략하고, 화면 상하단 근처 타이핑 시 커서 가시 영역 자동 스크롤(`scroll_to_rect`) 및 순수 한 줄 문단(`plain_para`) 고속 레이블 렌더링을 추가.
+- **Mermaid 레이아웃 캐시 및 업데이트 복사 재시도(`src/mermaid.rs`, `src/install.ps1`)**:
+  - `render_flowchart`에서 파싱·Sugiyama 계층 배치 결과를 `Arc<Graph>` 캐시(`FlowchartCache`)에 보관해 재페인트 시 레이아웃 재계산을 생략.
+  - `src/install.ps1`에서 실행 중인 `mdeditor` 종료 대기 및 복사 재시도 보강.
+
+### 6. 검증
+- `cargo test` 30개 통과(`click_caret_softwrap_and_block_arrow_navigation`, `incremental_block_edit_and_leading_space_stay_consistent`, `setup_wizard_pages_render_clear_status_and_actions`, Mermaid 파서·렌더러 테스트, 블록 유형 전환·할 일 토글 테스트, 우클릭 컨텍스트 메뉴·신규 단축키 헤드리스 UI 테스트 포함), `cargo clippy --all-targets -- -D warnings` 무경고 통과, `cargo fmt --check` 통과.
+
 ## 2026-11-15 — v0.6.0: 멀티 탭 편집, 빈 줄 Enter 지원, 커서·블록 지정 UX 고도화 및 무할당 최적화
 
 ### 1. 멀티 탭 편집 (`src/main.rs`, `src/ui.rs`)

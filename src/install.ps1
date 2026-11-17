@@ -24,18 +24,29 @@ $exts = @(".md", ".markdown")
 # 1. 설치된 MDEditor가 실행 중이면 먼저 정상 종료를 요청한다 (앱이 닫히면서 문서를 저장한다)
 Step 1
 $procs = @(Get-Process -Name mdeditor -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -ne $KeepPid -and $_.Path -eq $targetExe })
+    Where-Object { $_.Id -ne $KeepPid })
 foreach ($p in $procs) { [void]$p.CloseMainWindow() }
 foreach ($p in $procs) {
-    if (-not $p.WaitForExit(4000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    if (-not $p.WaitForExit(1000)) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        [void]$p.WaitForExit(2000)
+    }
 }
 
 # 2. 프로그램 파일
 Step 2
 try {
     New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
-    if ((Resolve-Path $SourceExe).Path -ne $targetExe) {
-        Copy-Item -Path $SourceExe -Destination $targetExe -Force
+    if ([System.IO.Path]::GetFullPath($SourceExe) -ne [System.IO.Path]::GetFullPath($targetExe)) {
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            try {
+                Copy-Item -LiteralPath $SourceExe -Destination $targetExe -Force -ErrorAction Stop
+                break
+            } catch {
+                if ($attempt -eq 10) { throw }
+                Start-Sleep -Milliseconds 150
+            }
+        }
     }
     # 이전 버전 설치 프로그램이 남긴 파일
     foreach ($old in @("app.ico", "install.bat", "install.ps1", "uninstall.bat", "uninstall.ps1")) {
@@ -136,14 +147,12 @@ Set-ItemProperty -Path $uninstall -Name "DisplayIcon" -Value $icon
 Set-ItemProperty -Path $uninstall -Name "InstallLocation" -Value $InstallDir
 Set-ItemProperty -Path $uninstall -Name "UninstallString" -Value "`"$targetExe`" --uninstall"
 Set-ItemProperty -Path $uninstall -Name "QuietUninstallString" -Value "`"$targetExe`" --uninstall --quiet"
-Set-ItemProperty -Path $uninstall -Name "EstimatedSize" -Value ([int]((Get-Item $targetExe).Length / 1KB)) -Type DWord
+Set-ItemProperty -Path $uninstall -Name "EstimatedSize" -Value ([int]((Get-Item -LiteralPath $targetExe).Length / 1KB)) -Type DWord
 Set-ItemProperty -Path $uninstall -Name "NoModify" -Value 1 -Type DWord
 Set-ItemProperty -Path $uninstall -Name "NoRepair" -Value 1 -Type DWord
 
-# 6. 탐색기에 아이콘·연결 변경 알림
+# 6. 탐색기에 아이콘·연결 변경 알림 (SHChangeNotify는 setup.rs가 직접 호출)
 Step 6
-Add-Type -Namespace MDEditor -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, int f, IntPtr a, IntPtr b);' -ErrorAction SilentlyContinue
-try { [MDEditor.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero) } catch {}
 
-if (-not (Test-Path $targetExe) -or -not (Test-Path $uninstall)) { Fail "설치 결과를 확인하지 못했습니다." }
+if (-not (Test-Path -LiteralPath $targetExe) -or -not (Test-Path -LiteralPath $uninstall)) { Fail "설치 결과를 확인하지 못했습니다." }
 exit 0

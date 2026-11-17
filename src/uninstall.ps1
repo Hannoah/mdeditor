@@ -61,7 +61,4 @@ if (Test-Path $InstallDir) {
 if ($RemoveSettings) {
     Remove-Item -Path (Join-Path $env:APPDATA "mdeditor") -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-Add-Type -Namespace MDEditor -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int e, int f, IntPtr a, IntPtr b);' -ErrorAction SilentlyContinue
-try { [MDEditor.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero) } catch {}
 exit 0

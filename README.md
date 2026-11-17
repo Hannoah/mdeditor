@@ -2,7 +2,7 @@
 
 **Rust로 만든 순수 로컬 Markdown 편집기 — 브라우저·웹뷰·로컬 서버 없이 네이티브 창 하나로 동작합니다.**
 
-![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-24%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-37%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
@@ -23,7 +23,13 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 - 문서가 렌더링된 상태로 보이고, **블록을 클릭하면 클릭한 글자 위치에 바로 커서가 놓여 편집**됩니다 (편집 중인 블록만 원문 표시, 제목은 크기·굵기 유지).
 - 아무 내용 없이 `Enter`를 눌러도 **빈 줄이 그대로 생성·유지**되며, `Enter`로 블록 나누기, 블록 맨 앞 `Backspace`/끝 `Delete`로 빈 줄 정리 및 이웃 블록 합치기, 자동 줄바꿈 행을 인식하는 `↑`/`↓`(열 위치 유지) 및 `←`/`→` 블록 간 이동을 지원합니다.
 - **교차 블록 선택 및 블록 이동·복제**: 마우스 드래그, `Shift+클릭`, `Shift+방향키`로 여러 블록을 연속 선택해 일괄 삭제·복사·서식·들여쓰기(`Tab`/`Shift+Tab`)를 적용하고, `Alt+↑`/`Alt+↓`로 블록 순서를 바꾸거나 `Ctrl+D`로 복제할 수 있습니다.
+- **코드 블록 모드 (` ``` ` + Space/Enter)**: 빈 줄이나 문단에서 ` ``` ` 후 `Space` 또는 ` ```언어 ` 후 `Enter`를 누르면 즉시 닫힌 코드 블록으로 전환되며, 편집 중에도 전용 코드 카드·언어 선택기·실시간 구문 강조·들여쓰기 유지·닫는 ` ``` ` 줄 `Enter` 탈출·읽기 모드 줄 번호 여백을 지원합니다.
+- **노션식 본문 너비 & 집중 크게 보기**: 상단 바·상태바(`Ctrl+Alt+W`)로 **가운데(708px)** 편집과 **전체 너비**를 전환하고, `F11` / `Ctrl+Shift+F` 또는 상단 바 버튼으로 상·하단 바를 숨긴 **집중 크게 보기** 모드를 사용할 수 있습니다.
 - **슬래시(`/`) 메뉴**: 빈 블록에서 `/`를 입력하면 텍스트·제목·할 일·목록·인용·구분선·콜아웃·코드·표·토글·수식·Mermaid·이미지·각주 블록을 삽입합니다.
+- **우클릭 컨텍스트 메뉴**:
+  - **캔버스(본문·블록) 우클릭**: 상단 글자 서식 아이콘 바(굵게·기울임·취소선·형광펜·코드·키캡·링크·서식 지우기), 잘라내기/복사/붙여넣기/전체 선택, **`블록 전환 ▸`** 하위 메뉴(일반 텍스트·제목 1~3·할 일·글머리·번호·인용구·할 일 완료 토글·코드·콜아웃·토글·블록 위/아래 이동), **`삽입 ▸`** 하위 메뉴(빈 블록·표·Mermaid 그래프·구분선·이미지), 블록 복제/삭제만 깔끔하게 정리한 컴팩트 메뉴 제공.
+  - **상단 탭 우클릭**: 새 탭, 탭 내용 복제, 파일 저장/이름 변경, 파일 전체 경로 복사, 탭 닫기, 다른 탭 모두 닫기, 오른쪽 탭 모두 닫기, 파일 삭제를 지원합니다.
+  - **파일 탐색기 항목 우클릭**: 파일 열기, 이름 변경(`F2`), 경로 복사, 파일 삭제(`Delete`)를 지원합니다.
 - **떠 있는 서식 막대**: 글자를 선택하면 굵게·기울임·취소선·형광펜·코드·키캡·링크·서식 지우기 막대가 나타납니다.
 - **스마트 목록**: 목록에서 `Enter`를 누르면 다음 기호·번호를 이어 쓰고, 빈 항목에서 `Enter`를 누르면 목록이 끝납니다. `Tab`/`Shift+Tab` 들여쓰기.
 - 렌더링된 **할 일 체크박스를 클릭하면 원문이 바로 바뀝니다.**
@@ -34,11 +40,12 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 ### 화면 구성 (웹 버전과 동일)
 - **상단 바**: 로고, 파일 이름 배지(클릭하면 이름 변경, 저장 안 됨 표시 점), 파일 탐색기·열기·새 파일·저장, 목차·찾기·이미지, 인쇄·HTML 내보내기, 설정.
 - **작업 폴더 파일 탐색기** (`Ctrl+O`): 필터, `↑↓`/`Enter` 이동·열기, 파일 삭제, 새 파일, 폴더 변경.
-- **목차 서랍**: 오른쪽에서 열리는 제목 목록. 현재 위치 강조, 클릭하면 해당 제목으로 이동.
+- **표 직접 편집**: 표 블록을 클릭하거나 삽입하면 마크다운(`| |`) 원문 대신 격자 표 에디터로 열려 셀을 바로 수정하고 `+ 행`/`+ 열`/`Tab`/`Enter` 이동이 가능합니다 (필요 시 `마크다운 보기` 전환 가능).
+- **목차 서랍**: 왼쪽에서 열리는 제목 목록. 현재 위치 강조, 클릭하면 해당 제목으로 이동.
 - **찾기·바꾸기 막대** (`Ctrl+F`/`Ctrl+H`): 오른쪽 위에 떠 있는 막대, 대소문자 구분, 일치 개수. 선택한 글자가 검색어로 들어가고 `F3`/`Shift+F3`으로 이동합니다.
 - **시작 화면**: 열린 문서가 없으면 새 문서·폴더 열기·파일 열기 버튼을 보여 줍니다. 시작 메뉴에서 처음 실행하면 `문서\MDEditor`가 기본 작업 폴더입니다.
 - **상태 알약**: 저장됨/저장되지 않음 표시와 글자·줄·읽기 시간.
-- **설정 메뉴**: 라이트/다크 테마, 전체 너비, 글꼴 크기, 마크다운 원본/HTML 복사, 도움말, 종료.
+- **설정 메뉴 & 글꼴 선택**: 라이트/다크 테마, 가운데/전체 너비, 글꼴 종류 선택(시스템 기본·맑은 고딕·Pretendard·나눔고딕·직접 `.ttf`/`.otf` 파일 선택 등), 글꼴 크기, 마크다운 원본/HTML 복사, 도움말, 종료.
 - 웹과 같은 색상 토큰(Notion 팔레트)과 글꼴(KoPubWorld 돋움 → Segoe UI → 맑은 고딕, 코드는 Consolas), Lucide 아이콘.
 
 ### 이미지
@@ -48,7 +55,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 
 ### Markdown
 - CommonMark + GFM: 제목, 강조, 표, 할 일 목록, 각주, 코드 구문 강조, GitHub 알림(`> [!NOTE]`, `[!TIP]`, `[!WARNING]` 등).
-- 확장 문법: `==형광펜==`(굵게로 표시), `[[Ctrl]]` 키캡, `:::toggle 제목 … :::` 접고 펴는 토글 카드, `$$ … $$` 수식 카드·Mermaid 카드(원문 표시).
+- 확장 문법: `==형광펜==`(굵게로 표시), `[[Ctrl]]` 키캡, `:::toggle 제목 … :::` 접고 펴는 토글 카드, **순수 네이티브 `Mermaid` 다이어그램 그래프 렌더링**(순서도 `graph`/`flowchart` TD·TB·BT·LR·RL, 시퀀스 다이어그램 `sequenceDiagram`, 상태 다이어그램 `stateDiagram`, 클래스/ER 다이어그램, 파이 차트 `pie` 및 편집 중 실시간 미리보기), `$$ … $$` 수식 카드.
 - 문서 안의 `.md` 링크를 클릭하면 앱 안에서 열고, 웹 링크는 기본 브라우저로 엽니다.
 
 ### 저장과 안전장치
@@ -66,25 +73,43 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 |---|---|
 | `Ctrl+S` | 저장 |
 | `Ctrl+N` / `Ctrl+T` | 새 편집 탭 열기 |
+| `Ctrl+Shift+N` | 작업 폴더에 새 마크다운 파일 만들기 |
 | `Ctrl+W` | 현재 탭 닫기 |
 | `Ctrl+Tab` / `Ctrl+1~9` | 다음 탭 순환 / 번호별 탭 전환 |
 | `Ctrl+O` | 작업 폴더 파일 탐색기 |
+| `Ctrl+Alt+O` | OS 탐색기로 로컬 `.md` 파일 열기 |
 | `Ctrl+Shift+O` | 작업 폴더 바꾸기 |
 | `Ctrl+Z` / `Ctrl+Y` | 실행 취소 / 다시 실행 |
 | `Ctrl+F` / `Ctrl+H` | 찾기 / 바꾸기 (`Enter`·`F3` 다음, `Shift+Enter`·`Shift+F3` 이전) |
 | `Ctrl+B` / `Ctrl+I` / `Ctrl+K` | 굵게 / 기울임 / 링크 (다시 누르면 해제) |
+| `Ctrl+Shift+S` / `Ctrl+Shift+H` | 취소선 (`~~`) / 형광펜 강조 (`==`) (다시 누르면 해제) |
+| `Ctrl+E` / `Ctrl+Shift+K` | 인라인 코드 (`` ` ``) / 키보드 키캡 (`[[키]]`) (다시 누르면 해제) |
+| `Ctrl+\` | 선택 영역의 인라인 서식 지우기 |
+| `Ctrl+Alt+0` | 일반 텍스트(문단) 블록으로 전환 |
+| `Ctrl+Alt+1` / `2` / `3` | 제목 1 / 제목 2 / 제목 3 블록으로 전환 (다시 누르면 해제) |
+| `Ctrl+Alt+4` / `5` / `6` / `7` | 할 일 목록 / 글머리 목록 / 번호 목록 / 인용구로 전환 |
+| `Ctrl+Alt+8` / `9` / `G` | 코드 블록 / 콜아웃 박스 / 접기(토글) 블록으로 전환 |
+| `Ctrl+Enter` | 할 일 체크박스 완료(`[x]`) / 미완료(`[ ]`) 토글 |
+| `Ctrl+Alt+T` / `M` / `-` | 표(Table) 삽입 / Mermaid 다이어그램 삽입 / 구분선(`---`) 삽입 |
 | `Ctrl+Shift+I` | 이미지 삽입 |
 | `Ctrl+V` (이미지) | 스크린샷 저장 후 삽입 |
+| `Ctrl+Shift+L` | 왼쪽 문서 목차(TOC) 서랍 열기 / 닫기 |
+| `Ctrl+Shift+E` | HTML 파일로 내보내기 |
+| `Ctrl+Shift+C` / `Ctrl+Alt+C` | 마크다운 원본 복사 / HTML 코드 복사 |
+| `Ctrl+Alt+D` / `W` / `F` | 라이트·다크 테마 / 가운데↔전체 너비 / 글꼴 크기 전환 |
+| `F11` / `Ctrl+Shift+F` | 집중 크게 보기 (상·하단 바 숨기기 토글) |
 | `Ctrl+P` | 인쇄 (PDF로 저장 가능) |
 | `Ctrl+Q` | 종료 |
 | `/` | 블록 삽입 메뉴 |
+| `마우스 우클릭` | 캔버스·상단 탭·파일 탐색기 컨텍스트 메뉴 열기 |
 | `Shift+방향키` / `Shift+클릭` | 블록 경계를 넘어 다중 블록 범위 선택 |
 | `Alt+↑` / `Alt+↓` | 현재 블록 또는 선택된 블록 위·아래로 이동 |
-| `Ctrl+D` | 현재 블록 또는 선택된 블록 아래에 복제 |
+| `Ctrl+D` / `Ctrl+Shift+D` | 현재·선택 블록 아래에 복제 / 블록 삭제 |
+| `Ctrl+Shift+Enter` | 현재 블록 아래에 새 빈 블록 추가 |
 | `Ctrl+Home` / `Ctrl+End` | 문서 맨 처음 / 맨 끝 블록으로 이동 |
 | `Enter` / `Backspace` | 빈 줄·블록 나누기 / 앞 블록과 합치기 |
 | `Tab` / `Shift+Tab` | 들여쓰기 / 내어쓰기 (다중 블록 지원) |
-| `Esc` | 편집 끝내기, 찾기 막대·창 닫기 |
+| `Esc` | 우클릭 메뉴·찾기 막대·창 닫기 / 편집 끝내기 |
 | `F1` / `F2` | 도움말 / 이름 변경 |
 
 ---
@@ -121,6 +146,7 @@ cargo run --release -- memo.md      # 파일 열기 (상위 폴더가 작업 폴
 ```
 src/main.rs        파일 I/O, 편집 연산, 블록 분할, 앱 상태·단축키, HTML 내보내기
 src/ui.rs          화면: 상단 바, 노션 캔버스, 목차 서랍, 찾기 막대, 상태바, 모달
+src/mermaid.rs     순수 네이티브 Mermaid 그래프 렌더러 (순서도·시퀀스·상태·클래스·파이 차트)
 src/theme.rs       웹 버전 디자인 토큰(색상), 글꼴, Lucide 아이콘
 src/setup.rs       설치·제거 마법사 화면 (같은 실행 파일이 설치 프로그램을 겸함)
 src/install.ps1    설치 엔진: 파일 복사, 파일 연결, 바로가기, 설치된 앱 등록 (실행 파일에 내장)
@@ -142,7 +168,7 @@ package.ps1        배포 빌드: 테스트 → 릴리즈 → 설치 파일 → 
 ## 🧪 테스트
 
 ```bash
-cargo test                                    # 24개
+cargo test                                    # 37개
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -154,7 +180,7 @@ cargo fmt --check
 ## ⚠️ 알려진 한계
 
 - 편집 중인 블록은 Markdown 원문으로 보입니다 (노션처럼 서식이 적용된 채 글자 단위로 편집하지는 않음).
-- **수식(KaTeX)·Mermaid 다이어그램은 렌더링하지 않고** 원문 카드로 표시합니다 (브라우저 엔진이 필요한 기능).
+- **수식(KaTeX)은 렌더링하지 않고** 원문 카드로 표시합니다 (Mermaid 다이어그램은 네이티브 그래픽 렌더러로 직접 그립니다).
 - 원격(http) 이미지는 표시하지 않습니다 (오프라인 우선). 로컬 이미지만 지원합니다.
 - 인쇄(`Ctrl+P`)는 임시 HTML을 기본 브라우저로 열어 인쇄 대화상자를 띄웁니다.
 - 설치 파일에 **코드 서명이 없어** 처음 실행할 때 Windows SmartScreen 경고가 뜹니다. 판매·배포하려면 코드 서명 인증서로 서명해야 합니다.

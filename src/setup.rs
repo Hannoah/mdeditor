@@ -7,9 +7,10 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
+use std::time::Duration;
 
 use eframe::egui;
-use egui::{vec2, Align, Color32, FontId, Frame, Margin, RichText, Sense, Stroke};
+use egui::{pos2, vec2, Align, Align2, Color32, FontId, Frame, Margin, RichText, Sense, Stroke};
 
 use crate::theme::{self, img, Pal, GREEN, RED};
 use crate::ui::{ghost, primary};
@@ -114,7 +115,7 @@ fn window(mode: Mode) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
-            .with_inner_size([520.0, 450.0])
+            .with_inner_size([540.0, 480.0])
             .with_resizable(false)
             .with_maximize_button(false)
             .with_icon(crate::app_icon()),
@@ -166,7 +167,7 @@ impl Default for Options {
 fn execute(mode: Mode, o: &Options, on_step: impl FnMut(usize)) -> Result<(), String> {
     let dir = install_dir();
     let dir = dir.to_string_lossy();
-    match mode {
+    let res = match mode {
         Mode::Install => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let pid = std::process::id().to_string();
@@ -199,6 +200,26 @@ fn execute(mode: Mode, o: &Options, on_step: impl FnMut(usize)) -> Result<(), St
             }
             run_script(UNINSTALL_PS1, &args, on_step)
         }
+    };
+    if res.is_ok() {
+        notify_shell_assoc_changed();
+    }
+    res
+}
+
+fn notify_shell_assoc_changed() {
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHChangeNotify(
+            event_id: i32,
+            flags: u32,
+            item1: *const std::ffi::c_void,
+            item2: *const std::ffi::c_void,
+        );
+    }
+    // SHCNE_ASSOCCHANGED = 0x0800_0000, SHCNF_IDLIST = 0
+    unsafe {
+        SHChangeNotify(0x0800_0000, 0, std::ptr::null(), std::ptr::null());
     }
 }
 
@@ -206,8 +227,9 @@ fn execute(mode: Mode, o: &Options, on_step: impl FnMut(usize)) -> Result<(), St
 fn run_script(script: &str, args: &[String], mut on_step: impl FnMut(usize)) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
     let path = std::env::temp_dir().join(format!("mdeditor-setup-{}.ps1", std::process::id()));
-    // BOM이 없으면 Windows PowerShell 5.1이 한글을 ANSI로 읽는다
-    std::fs::write(&path, format!("\u{feff}{script}"))
+    let clean = script.trim_start_matches('\u{feff}');
+    // BOM이 없으면 Windows PowerShell 5.1이 한글을 ANSI로 읽는다 (이중 BOM 방지)
+    std::fs::write(&path, format!("\u{feff}{clean}"))
         .map_err(|e| format!("임시 파일을 만들 수 없습니다: {e}"))?;
     let spawned = hidden("powershell.exe")
         .args([
@@ -408,59 +430,280 @@ impl Setup {
             }
             Page::Working => {
                 let steps = self.steps();
-                let label = steps[self.step.clamp(1, steps.len()) - 1];
-                ui.add_space(36.0);
-                ui.label(RichText::new(format!("{label}…")).size(13.5).color(p.text));
-                ui.add_space(10.0);
-                let (track, _) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
-                let target = self.step as f32 / (steps.len() + 1) as f32;
+                let active_idx = self.step.saturating_sub(1).min(steps.len() - 1);
+                let label = steps[active_idx];
+                let target = (self.step.max(1) as f32 / steps.len() as f32).clamp(0.08, 0.96);
                 let shown =
                     ui.ctx()
-                        .animate_value_with_time(egui::Id::unique("progress"), target, 0.4);
-                ui.painter().rect_filled(track, 3.0, p.hover);
-                let mut bar = track;
-                bar.set_width(track.width() * shown.max(0.03));
-                ui.painter().rect_filled(bar, 3.0, p.accent);
+                        .animate_value_with_time(egui::Id::unique("progress"), target, 0.35);
+                let pct = (shown * 100.0).round().clamp(5.0, 99.0) as u32;
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{label}…"))
+                            .font(FontId::new(13.5, theme::bold()))
+                            .color(p.text),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{pct}%"))
+                                .family(egui::FontFamily::Monospace)
+                                .size(13.0)
+                                .strong()
+                                .color(p.accent),
+                        );
+                    });
+                });
                 ui.add_space(10.0);
-                ui.label(
-                    RichText::new("잠시만 기다려 주세요. 몇 초면 끝납니다.")
-                        .size(12.0)
-                        .color(p.faint),
-                );
+                let (track, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+                ui.painter().rect_filled(track, 4.0, p.hover);
+                let mut bar = track;
+                bar.set_width(track.width() * shown.max(0.04));
+                ui.painter().rect_filled(bar, 4.0, p.accent);
+                ui.add_space(16.0);
+
+                Frame::new()
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(10)
+                    .inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        for (i, step_label) in steps.iter().enumerate() {
+                            let done_step = i < active_idx;
+                            let cur_step = i == active_idx;
+                            let (row_rect, _) = ui.allocate_exact_size(
+                                vec2(ui.available_width(), 24.0),
+                                Sense::hover(),
+                            );
+                            let icon_c = pos2(row_rect.left() + 10.0, row_rect.center().y);
+                            if done_step {
+                                ui.painter()
+                                    .circle_filled(icon_c, 8.0, GREEN.gamma_multiply(0.18));
+                                check_mark(ui, icon_c, 3.8, Stroke::new(1.8, GREEN));
+                            } else if cur_step {
+                                ui.painter().circle_filled(
+                                    icon_c,
+                                    8.0,
+                                    p.accent.gamma_multiply(0.18),
+                                );
+                                ui.painter().circle_filled(icon_c, 3.5, p.accent);
+                            } else {
+                                ui.painter().circle_filled(icon_c, 3.0, p.faint);
+                            }
+                            let text_color = if done_step {
+                                p.muted
+                            } else if cur_step {
+                                p.text
+                            } else {
+                                p.faint
+                            };
+                            let font = if cur_step {
+                                FontId::new(12.5, theme::bold())
+                            } else {
+                                FontId::proportional(12.5)
+                            };
+                            ui.painter().text(
+                                pos2(row_rect.left() + 26.0, row_rect.center().y),
+                                Align2::LEFT_CENTER,
+                                step_label,
+                                font,
+                                text_color,
+                            );
+                            let (badge_txt, badge_col) = if done_step {
+                                ("완료", GREEN)
+                            } else if cur_step {
+                                ("진행 중...", p.accent)
+                            } else {
+                                ("대기", p.faint)
+                            };
+                            ui.painter().text(
+                                pos2(row_rect.right() - 4.0, row_rect.center().y),
+                                Align2::RIGHT_CENTER,
+                                badge_txt,
+                                FontId::proportional(11.5),
+                                badge_col,
+                            );
+                        }
+                    });
             }
             Page::Done => {
-                ui.add_space(20.0);
-                let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
-                ui.painter()
-                    .circle_filled(r.center(), 22.0, GREEN.gamma_multiply(0.16));
-                check_mark(ui, r.center(), 8.0, Stroke::new(2.5, GREEN));
-                ui.add_space(14.0);
-                let (title, detail) = if install {
-                    (
-                        "설치가 완료되었습니다",
-                        "시작 메뉴에서 MDEditor를 찾거나 .md 파일을 열어 보세요.",
-                    )
-                } else {
+                let (title, detail) = if !install {
                     (
                         "MDEditor가 제거되었습니다",
                         "그동안 사용해 주셔서 감사합니다. 문서 파일은 그대로 남아 있습니다.",
                     )
+                } else if self.upgrade {
+                    (
+                        "업데이트가 완료되었습니다!",
+                        "최신 버전의 MDEditor를 바로 사용하실 수 있습니다.",
+                    )
+                } else {
+                    (
+                        "설치가 완료되었습니다!",
+                        "이제 바로 실행하거나 탐색기에서 .md 파일을 열어 보세요.",
+                    )
                 };
-                ui.label(
-                    RichText::new(title)
-                        .font(FontId::new(17.0, theme::bold()))
-                        .color(p.text),
-                );
-                ui.add_space(4.0);
-                ui.label(RichText::new(detail).size(13.0).color(p.muted));
-                if install {
-                    ui.add_space(18.0);
-                    check_row(ui, p, &mut self.launch, "지금 MDEditor 실행", "");
-                }
+                // 상단 완료 배너 카드
+                Frame::new()
+                    .fill(GREEN.gamma_multiply(0.10))
+                    .stroke(Stroke::new(1.0, GREEN.gamma_multiply(0.4)))
+                    .corner_radius(10)
+                    .inner_margin(Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
+                            ui.painter().circle_filled(
+                                r.center(),
+                                20.0,
+                                GREEN.gamma_multiply(0.20),
+                            );
+                            check_mark(ui, r.center(), 7.5, Stroke::new(2.5, GREEN));
+                            ui.add_space(10.0);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 3.0;
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(if install {
+                                            format!("MDEditor v{VERSION} {title}")
+                                        } else {
+                                            title.to_string()
+                                        })
+                                        .font(FontId::new(15.0, theme::bold()))
+                                        .color(p.text),
+                                    );
+                                });
+                                ui.label(RichText::new(detail).size(12.5).color(p.muted));
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                pill_badge(ui, "100% 완료", GREEN);
+                            });
+                        });
+                    });
+                ui.add_space(14.0);
+
+                // 설치 / 제거 결과 요약 카드
+                Frame::new()
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(10)
+                    .inner_margin(Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 8.0;
+                        if install {
+                            let dir = install_dir();
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("설치 위치").size(12.0).color(p.muted));
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(dir.display().to_string())
+                                            .family(egui::FontFamily::Monospace)
+                                            .size(11.5)
+                                            .color(p.text),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("폴더 열기")
+                                                    .size(11.5)
+                                                    .color(p.accent),
+                                            )
+                                            .fill(p.accent.gamma_multiply(0.10))
+                                            .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.35)))
+                                            .corner_radius(5)
+                                            .min_size(vec2(64.0, 24.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        let _ = Command::new("explorer.exe").arg(&dir).spawn();
+                                    }
+                                });
+                            });
+                            summary_row(
+                                ui,
+                                p,
+                                "파일 연결",
+                                ".md / .markdown 기본 연결",
+                                if self.opts.assoc {
+                                    "✓ 적용됨"
+                                } else {
+                                    "건너뜀"
+                                },
+                                if self.opts.assoc { GREEN } else { p.faint },
+                            );
+                            summary_row(
+                                ui,
+                                p,
+                                "탐색기 메뉴",
+                                "우클릭 컨텍스트 메뉴",
+                                if self.opts.menu {
+                                    "✓ 적용됨"
+                                } else {
+                                    "건너뜀"
+                                },
+                                if self.opts.menu { GREEN } else { p.faint },
+                            );
+                            let mut shortcuts = vec!["시작 메뉴"];
+                            if self.opts.desktop {
+                                shortcuts.push("바탕화면");
+                            }
+                            if self.opts.path {
+                                shortcuts.push("터미널 PATH");
+                            }
+                            summary_row(
+                                ui,
+                                p,
+                                "바로가기 / PATH",
+                                &shortcuts.join(" · "),
+                                "✓ 등록됨",
+                                GREEN,
+                            );
+                        } else {
+                            summary_row(
+                                ui,
+                                p,
+                                "프로그램 제거",
+                                "실행 파일 및 레지스트리 정리",
+                                "✓ 완료",
+                                GREEN,
+                            );
+                            summary_row(
+                                ui,
+                                p,
+                                "사용자 문서",
+                                "작성한 Markdown 파일",
+                                "✓ 그대로 보존됨",
+                                GREEN,
+                            );
+                            summary_row(
+                                ui,
+                                p,
+                                "앱 설정",
+                                "테마 · 최근 폴더 · 창 크기",
+                                if self.opts.remove_settings {
+                                    "삭제됨"
+                                } else {
+                                    "보존됨"
+                                },
+                                if self.opts.remove_settings {
+                                    p.muted
+                                } else {
+                                    GREEN
+                                },
+                            );
+                        }
+                    });
             }
             Page::Failed(e) => {
-                ui.add_space(20.0);
+                ui.add_space(12.0);
                 ui.label(
                     RichText::new(if install {
                         "설치하지 못했습니다"
@@ -528,12 +771,48 @@ impl Setup {
                     self.finish(&ctx);
                 }
             }
-            Page::Working => {}
+            Page::Working => {
+                ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(if install {
+                            "설치 진행 중입니다. 잠시만 기다려 주세요…"
+                        } else {
+                            "제거 진행 중입니다. 잠시만 기다려 주세요…"
+                        })
+                        .size(12.0)
+                        .color(p.muted),
+                    );
+                });
+            }
             Page::Done => {
-                let done =
-                    ui.add_sized(vec2(88.0, 32.0), |ui: &mut egui::Ui| primary(ui, p, "완료"));
-                if done.clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.finish(&ctx);
+                if install {
+                    let launch_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new("지금 MDEditor 실행 (Enter)")
+                                .size(13.0)
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(GREEN)
+                        .stroke(Stroke::NONE)
+                        .corner_radius(6)
+                        .min_size(vec2(180.0, 34.0)),
+                    );
+                    if launch_btn.clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.launch = true;
+                        self.finish(&ctx);
+                    }
+                    if ghost(ui, p, "닫기", None).clicked() {
+                        self.launch = false;
+                        self.finish(&ctx);
+                    }
+                } else {
+                    let done = ui.add_sized(vec2(140.0, 34.0), |ui: &mut egui::Ui| {
+                        primary(ui, p, "확인 및 닫기 (Enter)")
+                    });
+                    if done.clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.finish(&ctx);
+                    }
                 }
             }
             Page::Failed(_) => {
@@ -552,11 +831,16 @@ impl eframe::App for Setup {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll();
-        // 작업 도중에는 창을 닫지 못하게 한다 (반쯤 설치된 상태 방지)
-        if matches!(self.page, Page::Working) && ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if matches!(self.page, Page::Working) {
+            // 작업 스레드 완료/단계 전환이 마우스 입력 없이도 즉시 반영되게 한다
+            ctx.request_repaint_after(Duration::from_millis(40));
+            if ctx.input(|i| i.viewport().close_requested()) {
+                // 작업 도중에는 창을 닫지 못하게 한다 (반쯤 설치된 상태 방지)
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
         }
         let p = theme::pal(self.dark);
+        let install = self.mode == Mode::Install;
         ui.painter().rect_filled(ui.max_rect(), 0.0, p.bg); // 패널 구분선 자리까지 배경색으로
         egui::Panel::bottom("buttons")
             .frame(
@@ -567,38 +851,77 @@ impl eframe::App for Setup {
             .show(ui, |ui| {
                 ui.spacing_mut().button_padding = vec2(16.0, 6.0);
                 ui.allocate_ui_with_layout(
-                    vec2(ui.available_width(), 32.0),
+                    vec2(ui.available_width(), 34.0),
                     egui::Layout::right_to_left(Align::Center),
                     |ui| self.buttons(ui, &p),
                 );
             });
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(p.bg).inner_margin(Margin::same(28)))
+            .frame(
+                Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(Margin::symmetric(28, 22)),
+            )
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(vec2(42.0, 42.0), Sense::hover());
                     ui.painter().rect_filled(r, 11.0, p.accent);
-                    img(theme::BRAND, 24.0, Color32::WHITE).paint_at(
+                    img(theme::BRAND, 22.0, Color32::WHITE).paint_at(
                         ui,
-                        egui::Rect::from_center_size(r.center(), vec2(24.0, 24.0)),
+                        egui::Rect::from_center_size(r.center(), vec2(22.0, 22.0)),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
                     ui.vertical(|ui| {
                         ui.add_space(2.0);
                         ui.label(
                             RichText::new("MDEditor")
-                                .font(FontId::new(20.0, theme::bold()))
+                                .font(FontId::new(19.0, theme::bold()))
                                 .color(p.text),
                         );
                         ui.label(
                             RichText::new(format!("버전 {VERSION}"))
-                                .size(12.0)
+                                .size(11.5)
                                 .color(p.faint),
                         );
                     });
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let (status_txt, status_col) = match &self.page {
+                            Page::Ready if !install => ("제거 준비", RED),
+                            Page::Ready if self.upgrade => ("업데이트 준비", p.accent),
+                            Page::Ready => ("설치 준비", p.accent),
+                            Page::Working => ("진행 중…", p.accent),
+                            Page::Done if !install => ("제거 완료", GREEN),
+                            Page::Done if self.upgrade => ("업데이트 완료", GREEN),
+                            Page::Done => ("설치 완료", GREEN),
+                            Page::Failed(_) => ("오류 발생", RED),
+                        };
+                        pill_badge(ui, status_txt, status_col);
+                    });
                 });
-                ui.add_space(22.0);
+                ui.add_space(14.0);
+                let active_stage = match &self.page {
+                    Page::Ready => 0,
+                    Page::Working => 1,
+                    Page::Done | Page::Failed(_) => 2,
+                };
+                let failed = matches!(self.page, Page::Failed(_));
+                stepper(
+                    ui,
+                    &p,
+                    [
+                        "옵션 선택",
+                        if install {
+                            "설치 진행"
+                        } else {
+                            "제거 진행"
+                        },
+                        "완료",
+                    ],
+                    active_stage,
+                    failed,
+                );
+                ui.add_space(18.0);
                 self.body(ui, &p);
             });
     }
@@ -606,6 +929,116 @@ impl eframe::App for Setup {
     fn persist_egui_memory(&self) -> bool {
         false
     }
+}
+
+fn pill_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+    Frame::new()
+        .fill(color.gamma_multiply(0.14))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.35)))
+        .corner_radius(255)
+        .inner_margin(Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(11.5).strong().color(color));
+        });
+}
+
+fn stepper(ui: &mut egui::Ui, p: &Pal, labels: [&str; 3], active_stage: usize, failed: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+    let seg_w = rect.width() / 3.0;
+    for (i, label) in labels.iter().enumerate() {
+        let done = i < active_stage || (active_stage == 2 && !failed && i == 2);
+        let current = i == active_stage && !(active_stage == 2 && !failed);
+        let color = if i == active_stage && failed {
+            RED
+        } else if done {
+            GREEN
+        } else if current {
+            p.accent
+        } else {
+            p.faint
+        };
+        let x0 = rect.left() + seg_w * (i as f32);
+        let cy = rect.center().y;
+        let cx = x0 + 10.0;
+        if done {
+            ui.painter().circle_filled(pos2(cx, cy), 9.0, GREEN);
+            check_mark(ui, pos2(cx, cy), 4.0, Stroke::new(1.8, Color32::WHITE));
+        } else if current {
+            ui.painter().circle_filled(pos2(cx, cy), 9.0, color);
+            ui.painter().text(
+                pos2(cx, cy),
+                Align2::CENTER_CENTER,
+                format!("{}", i + 1),
+                FontId::proportional(10.5),
+                Color32::WHITE,
+            );
+        } else {
+            ui.painter().circle(
+                pos2(cx, cy),
+                9.0,
+                p.surface,
+                Stroke::new(1.0, p.border_hover),
+            );
+            ui.painter().text(
+                pos2(cx, cy),
+                Align2::CENTER_CENTER,
+                format!("{}", i + 1),
+                FontId::proportional(10.5),
+                p.faint,
+            );
+        }
+        let galley = ui.ctx().fonts_mut(|f| {
+            f.layout_no_wrap(
+                (*label).to_string(),
+                if current || (active_stage == 2 && i == 2) {
+                    FontId::new(12.0, theme::bold())
+                } else {
+                    FontId::proportional(12.0)
+                },
+                if current || done { p.text } else { p.muted },
+            )
+        });
+        let text_x = cx + 15.0;
+        let text_w = galley.size().x;
+        ui.painter()
+            .galley(pos2(text_x, cy - galley.size().y * 0.5), galley, p.text);
+        if i < 2 {
+            let line_start = text_x + text_w + 10.0;
+            let line_end = rect.left() + seg_w * ((i + 1) as f32) - 8.0;
+            if line_end > line_start {
+                let line_col = if i < active_stage {
+                    GREEN.gamma_multiply(0.6)
+                } else {
+                    p.border
+                };
+                ui.painter()
+                    .hline(line_start..=line_end, cy, Stroke::new(1.5, line_col));
+            }
+        }
+    }
+}
+
+fn summary_row(
+    ui: &mut egui::Ui,
+    p: &Pal,
+    key: &str,
+    desc: &str,
+    status: &str,
+    status_color: Color32,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(key).size(12.0).color(p.muted));
+        ui.add_space(8.0);
+        ui.label(RichText::new(desc).size(12.0).color(p.text));
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(status)
+                    .size(12.0)
+                    .strong()
+                    .color(status_color),
+            );
+        });
+    });
 }
 
 fn check_mark(ui: &egui::Ui, c: egui::Pos2, s: f32, stroke: Stroke) {
@@ -684,10 +1117,20 @@ mod tests {
     // 숨김 PowerShell 실행, BOM(한글), 진행/오류 줄 해석까지 실제로 돌려 본다 (시스템은 건드리지 않음)
     #[test]
     fn script_reports_steps_and_errors() {
+        assert!(!INSTALL_PS1.starts_with('\u{feff}'));
+        assert!(!UNINSTALL_PS1.starts_with('\u{feff}'));
+
         let mut steps = Vec::new();
         let ok = run_script(
-            "param([string]$Name)\ntry { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}\nWrite-Output '@@1'\nWrite-Output \"잡음 $Name\"\nWrite-Output '@@2'\nexit 0",
-            &["-Name".into(), "a b".into()],
+            "\u{feff}# leading comment\nparam([Parameter(Mandatory)][string]$SourceExe, [Parameter(Mandatory)][string]$InstallDir, [int]$KeepPid = 0)\ntry { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}\nif ($SourceExe -eq '0') { Write-Output '@@ERR SourceExe=0'; exit 1 }\nWrite-Output '@@1'\nWrite-Output \"잡음 $SourceExe $InstallDir\"\nWrite-Output '@@2'\nexit 0",
+            &[
+                "-SourceExe".into(),
+                "C:\\Program Files\\Test [1]\\mdeditor.exe".into(),
+                "-InstallDir".into(),
+                "C:\\Users\\a b\\Local".into(),
+                "-KeepPid".into(),
+                "42".into(),
+            ],
             |n| steps.push(n),
         );
         assert_eq!((ok, steps), (Ok(()), vec![1, 2]));
@@ -697,5 +1140,42 @@ mod tests {
             |_| {},
         );
         assert_eq!(err, Err("한글 오류".to_string()));
+    }
+
+    #[test]
+    fn setup_wizard_pages_render_clear_status_and_actions() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(vec2(540.0, 480.0))
+            .with_accessibility_check(false)
+            .build_eframe(|cc| Setup::new(cc, Mode::Install));
+        h.run_steps(2);
+        assert!(h.query_by_label("취소").is_some());
+
+        // 진행 중 화면: 단계 체크리스트 + 진행 안내 문구
+        h.state_mut().page = Page::Working;
+        h.state_mut().step = 3;
+        h.run_steps(2);
+        assert!(h
+            .query_by_label("설치 진행 중입니다. 잠시만 기다려 주세요…")
+            .is_some());
+
+        // 설치 완료 화면: 100% 완료 배지, 요약 카드, 명확한 실행/닫기 버튼
+        h.state_mut().page = Page::Done;
+        h.run_steps(2);
+        assert!(h.query_by_label("100% 완료").is_some());
+        assert!(h.query_by_label("지금 MDEditor 실행 (Enter)").is_some());
+        assert!(h.query_by_label("닫기").is_some());
+        assert!(h.query_by_label("폴더 열기").is_some());
+
+        // 제거 완료 화면: 확인 및 닫기 버튼
+        h.state_mut().mode = Mode::Uninstall;
+        h.run_steps(2);
+        assert!(h.query_by_label("확인 및 닫기 (Enter)").is_some());
+
+        // 실패 화면
+        h.state_mut().page = Page::Failed("테스트 오류".into());
+        h.run_steps(2);
+        assert!(h.query_by_label("다시 시도").is_some());
     }
 }
