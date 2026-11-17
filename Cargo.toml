@@ -6,14 +6,22 @@ description = "A native Markdown editor & previewer desktop app in Rust (eframe/
 
 [dependencies]
 # 순수 네이티브 데스크톱 앱(mdeditor) — 브라우저/웹뷰/로컬 서버 없음
-# glow(OpenGL) 렌더러: wgpu 대비 메모리·바이너리 크기 절반 수준
-eframe = { version = "0.37", default-features = false, features = ["glow", "persistence", "default_fonts", "clipboard", "links", "accesskit", "wayland", "x11"] }
 egui_extras = { version = "0.37", features = ["image", "file", "svg"] }
 egui_commonmark = { version = "0.26", default-features = false, features = ["load-images", "pulldown_cmark"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 rfd = "0.18"
 # HTML 내보내기 (egui_commonmark가 이미 쓰는 파서, html 기능만 추가)
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+# Windows·Linux: glow(OpenGL) 렌더러 — wgpu 대비 메모리·바이너리 크기 절반 수준
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "persistence", "default_fonts", "clipboard", "links", "accesskit", "wayland", "x11"] }
+
+# macOS: OpenGL은 폐기 예정 계층을 거치며 창 버퍼(IOSurface)만 ~73MB를 쓴다.
+# wgpu Metal 백엔드만 켜면 전체 메모리 122MB → 54MB (빈 창 기준 측정)
+[target.'cfg(target_os = "macos")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["wgpu_no_default_features", "persistence", "default_fonts", "clipboard", "links", "accesskit"] }
+egui-wgpu = { version = "0.37", default-features = false, features = ["macos-window-resize-jitter-fix"] } # = wgpu/metal
 
 [[bin]]
 name = "mdeditor"

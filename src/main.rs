@@ -65,6 +65,7 @@ fn main() -> eframe::Result {
             .with_min_inner_size([640.0, 420.0])
             .with_icon(app_icon())
             .with_drag_and_drop(true),
+        #[cfg(not(target_os = "macos"))]
         glow_options: eframe::egui_glow::GlowConfiguration {
             vsync: false,
             ..Default::default()

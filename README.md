@@ -141,7 +141,7 @@ cargo run --release -- memo.md      # 파일 열기 (상위 폴더가 작업 폴
 
 ### macOS
 
-`./package-mac.sh`를 실행하면 `dist/`에 설치 파일 `MDEditor-Setup-v<버전>-macos-universal.dmg`와 포터블 `MDEditor-v<버전>-macos-universal.zip`이 만들어집니다. `.dmg`를 열고 MDEditor를 Applications 폴더로 끌어다 놓으면 설치됩니다. 단축키의 `Ctrl`은 macOS에서 `Cmd`입니다. 설치 마법사는 Windows 전용이고, 글꼴은 Apple SD Gothic Neo와 Menlo를 씁니다. Apple Silicon과 Intel Mac 모두 실행됩니다. 개발자 인증서 서명이 없으므로 다른 Mac에서 처음 열 때는 우클릭 > 열기를 사용하세요.
+`./package-mac.sh`를 실행하면 `dist/`에 설치 파일 `MDEditor-Setup-v<버전>-macos-universal.dmg`와 포터블 `MDEditor-v<버전>-macos-universal.zip`이 만들어집니다. `.dmg`를 열고 MDEditor를 Applications 폴더로 끌어다 놓으면 설치됩니다. 단축키의 `Ctrl`은 macOS에서 `Cmd`입니다. 설치 마법사는 Windows 전용이고, 글꼴은 Apple SD Gothic Neo와 Menlo를 씁니다. 렌더러는 macOS에서만 OpenGL 대신 Metal(wgpu)을 써서 메모리가 약 136MB에서 70MB로 줄었습니다. Apple Silicon과 Intel Mac 모두 실행됩니다. 개발자 인증서 서명이 없으므로 다른 Mac에서 처음 열 때는 우클릭 > 열기를 사용하세요.
 
 ---
 
