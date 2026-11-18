@@ -611,6 +611,11 @@ fn build_code_layout_job(
     use egui::text::{LayoutJob, LayoutSection, TextFormat};
     let alias = highlight_lang_alias(lang);
     let font_id = FontId::new(font_size, FontFamily::Monospace);
+    if alias.eq_ignore_ascii_case("sas") {
+        let mut job = crate::sas::highlight(code, font_id, line_height, dark, p.text);
+        job.wrap.max_width = wrap_w;
+        return job;
+    }
     let mut job = if alias.is_empty() {
         LayoutJob::default()
     } else {
@@ -702,127 +707,49 @@ fn append_inline_md_source(
     } else {
         Color32::from_rgba_unmultiplied(0xf5, 0x9e, 0x0b, 72)
     };
-    let b = line.as_bytes();
-    let mut i = 0usize;
-    let mut plain_start = 0usize;
-    let flush_plain = |job: &mut egui::text::LayoutJob, start: &mut usize, end: usize| {
-        if *start < end {
-            job.append(
-                &line[*start..end],
-                0.0,
-                mk_fmt(size, FontFamily::Proportional, p.text),
-            );
-            *start = end;
-        }
+    // 서식 기호(** ` ~~ == *)는 폭 0·투명으로 숨긴다. 텍스트에는 남아 있어 복사·저장은 마크다운 그대로.
+    let hidden = TextFormat {
+        font_id: FontId::new(0.1, FontFamily::Proportional),
+        color: Color32::TRANSPARENT,
+        line_height: Some(size * 1.6),
+        ..Default::default()
     };
-    while i < b.len() {
-        if b[i] == b'\\' && i + 1 < b.len() {
-            i += 1;
-            i += line[i..].chars().next().map_or(1, char::len_utf8);
-            continue;
+    let mut at = 0usize;
+    for (s, bs, be, e, kind) in inline_spans(line) {
+        if at < s {
+            job.append(&line[at..s], 0.0, mk_fmt(size, FontFamily::Proportional, p.text));
         }
-        if b[i] == b'`' {
-            let run = b[i..].iter().take_while(|&&c| c == b'`').count();
-            let fence = &line[i..i + run];
-            let body_start = i + run;
-            if let Some(off) = line[body_start..].find(fence) {
-                if off > 0 && !line[body_start..body_start + off].contains('\n') {
-                    flush_plain(job, &mut plain_start, i);
-                    job.append(fence, 0.0, mk_fmt(size, FontFamily::Monospace, p.faint));
-                    let mut code_f = mk_fmt(size * 0.9, FontFamily::Monospace, p.text);
-                    code_f.background = p.code_bg;
-                    job.append(&line[body_start..body_start + off], 0.0, code_f);
-                    job.append(fence, 0.0, mk_fmt(size, FontFamily::Monospace, p.faint));
-                    i = body_start + off + run;
-                    plain_start = i;
-                    continue;
-                }
+        job.append(&line[s..bs], 0.0, hidden.clone());
+        let f = match kind {
+            Inline::Code => {
+                let mut f = mk_fmt(size * 0.9, FontFamily::Monospace, p.text);
+                f.background = p.code_bg;
+                f
             }
-            i += run;
-            continue;
-        }
-        let two = b.get(i..i + 2);
-        if matches!(two, Some(b"**" | b"__" | b"~~" | b"==")) {
-            let mark = &line[i..i + 2];
-            let prev_alnum = mark == "__"
-                && line[..i]
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_alphanumeric);
-            let inner = &line[i + 2..];
-            if !prev_alnum && !inner.starts_with(char::is_whitespace) {
-                if let Some(off) = inner.find(mark) {
-                    let body_s = &inner[..off];
-                    if !body_s.is_empty()
-                        && !body_s.contains('\n')
-                        && !body_s.ends_with(char::is_whitespace)
-                    {
-                        flush_plain(job, &mut plain_start, i);
-                        job.append(mark, 0.0, mk_fmt(size, FontFamily::Proportional, p.faint));
-                        let inner_fmt = match mark {
-                            "**" | "__" => mk_fmt(size, theme::bold(), p.text),
-                            "==" => {
-                                let mut f = mk_fmt(size, theme::bold(), p.text);
-                                f.background = hl_bg;
-                                f
-                            }
-                            _ => {
-                                let mut f = mk_fmt(size, FontFamily::Proportional, p.muted);
-                                f.strikethrough = Stroke::new(1.0, p.muted);
-                                f
-                            }
-                        };
-                        job.append(body_s, 0.0, inner_fmt);
-                        job.append(mark, 0.0, mk_fmt(size, FontFamily::Proportional, p.faint));
-                        i = i + 2 + off + 2;
-                        plain_start = i;
-                        continue;
-                    }
-                }
+            Inline::Bold => mk_fmt(size, theme::bold(), p.text),
+            Inline::Mark => {
+                let mut f = mk_fmt(size, theme::bold(), p.text);
+                f.background = hl_bg;
+                f
             }
-            i += 2;
-            continue;
-        }
-        if b[i] == b'*' {
-            let inner = &line[i + 1..];
-            if !inner.is_empty() && !inner.starts_with(char::is_whitespace) {
-                let mut search_from = 0usize;
-                let mut matched_end = None;
-                while let Some(rel) = inner[search_from..].find('*') {
-                    let pos = search_from + rel;
-                    if inner[pos..].starts_with("**") {
-                        let run = inner.as_bytes()[pos..]
-                            .iter()
-                            .take_while(|&&c| c == b'*')
-                            .count();
-                        search_from = pos + run;
-                        continue;
-                    }
-                    let candidate = &inner[..pos];
-                    if !candidate.is_empty()
-                        && !candidate.contains('\n')
-                        && !candidate.ends_with(char::is_whitespace)
-                    {
-                        matched_end = Some(pos);
-                    }
-                    break;
-                }
-                if let Some(off) = matched_end {
-                    flush_plain(job, &mut plain_start, i);
-                    job.append("*", 0.0, mk_fmt(size, FontFamily::Proportional, p.faint));
-                    let mut em_f = mk_fmt(size, FontFamily::Proportional, p.text);
-                    em_f.italics = true;
-                    job.append(&inner[..off], 0.0, em_f);
-                    job.append("*", 0.0, mk_fmt(size, FontFamily::Proportional, p.faint));
-                    i = i + 1 + off + 1;
-                    plain_start = i;
-                    continue;
-                }
+            Inline::Strike => {
+                let mut f = mk_fmt(size, FontFamily::Proportional, p.muted);
+                f.strikethrough = Stroke::new(1.0, p.muted);
+                f
             }
-        }
-        i += line[i..].chars().next().map_or(1, char::len_utf8);
+            Inline::Italic => {
+                let mut f = mk_fmt(size, FontFamily::Proportional, p.text);
+                f.italics = true;
+                f
+            }
+        };
+        job.append(&line[bs..be], 0.0, f);
+        job.append(&line[be..e], 0.0, hidden.clone());
+        at = e;
     }
-    flush_plain(job, &mut plain_start, line.len());
+    if at < line.len() {
+        job.append(&line[at..], 0.0, mk_fmt(size, FontFamily::Proportional, p.text));
+    }
 }
 
 // 편집 중인 블록의 원문 서식: 제목은 크기·굵기, 코드는 고정폭+구문 강조, 기호는 흐리게
@@ -845,27 +772,19 @@ pub(crate) fn md_job(
     if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
         let code_size = body * 0.86;
         let code_lh = code_size * 1.55;
-        let code_fmt = |color: Color32| TextFormat {
-            font_id: FontId::new(code_size, FontFamily::Monospace),
-            color,
-            line_height: Some(code_lh),
-            ..Default::default()
-        };
         let fence = &trimmed[..3];
         let lead = text.len() - trimmed.len();
         let line0_end = text.find('\n').map_or(text.len(), |i| i + 1);
         let line0_body = text[lead..line0_end].trim_end_matches(['\n', '\r']);
-        let fence_end = (lead + 3).min(line0_end);
         let lang_str = line0_body.get(3..).unwrap_or("").trim();
-        job.append(&text[..fence_end], 0.0, code_fmt(p.faint));
-        if fence_end < line0_end {
-            let lang_color = if lang_str.is_empty() {
-                p.faint
-            } else {
-                p.accent
-            };
-            job.append(&text[fence_end..line0_end], 0.0, code_fmt(lang_color));
-        }
+        // ``` 줄은 접어서 숨긴다 (언어는 카드 머리에 표시). 텍스트에는 남아 있어 복사·저장은 마크다운 그대로.
+        let hidden = TextFormat {
+            font_id: FontId::new(0.1, FontFamily::Monospace),
+            color: Color32::TRANSPARENT,
+            line_height: Some(0.0),
+            ..Default::default()
+        };
+        job.append(&text[..line0_end], 0.0, hidden.clone());
         if line0_end < text.len() {
             let rest = &text[line0_end..];
             let last_line_start = rest
@@ -898,7 +817,7 @@ pub(crate) fn md_job(
                 }
             }
             if close_start < text.len() {
-                job.append(&text[close_start..], 0.0, code_fmt(p.faint));
+                job.append(&text[close_start..], 0.0, hidden);
             }
         }
         debug_assert_eq!(job.text, text);
@@ -906,6 +825,7 @@ pub(crate) fn md_job(
     }
 
     let mut fence = false;
+    let mut list_stack = Vec::new();
     for line in text.split_inclusive('\n') {
         let t = line.trim_start();
         let is_fence = t.starts_with("```") || t.starts_with("~~~");
@@ -918,14 +838,44 @@ pub(crate) fn md_job(
         if let Some(level) = heading_level(t) {
             let size = body * HEADING_SCALE[level - 1];
             let m = (line.len() - t.len() + level + 1).min(line.len());
-            job.append(&line[..m], 0.0, fmt(size, theme::bold(), p.faint));
+            // "## " 기호는 폭 0·투명으로 숨긴다 (노션식). 줄 높이는 제목 크기 그대로
+            let mut hf = fmt(0.1, theme::bold(), Color32::TRANSPARENT);
+            hf.line_height = Some(size * 1.6);
+            job.append(&line[..m], 0.0, hf);
             job.append(&line[m..], 0.0, fmt(size, theme::bold(), p.text));
             continue;
         }
         let bare = line.trim_end_matches(['\n', '\r']);
-        let marker = if let Some(len) = list_marker_bytes(bare) {
-            len
-        } else if let Some(rest) = t.strip_prefix('>') {
+        if let (Some(len), Some((depth, _))) =
+            (list_marker_bytes(bare), list_item_step(&mut list_stack, bare))
+        {
+            // 노션식: 들여쓰기·기호(- / 1. / - [ ])는 투명하게 두고 렌더링 화면과 같은 자리에서 내용이 시작한다.
+            // 기호 자리의 글머리·번호·체크박스는 paint_list_markers가 그린다. 텍스트는 마크다운 그대로.
+            let len = len.min(line.len());
+            let lh = body * 1.6 + LIST_ROW_GAP;
+            // 숨긴 기호는 작은 글자로 둬서 "- [ ] "처럼 긴 기호도 내용 열 안에 들어가게 한다
+            let hidden_size = body * 0.4;
+            let font = FontId::new(hidden_size, FontFamily::Proportional);
+            let w = ctx
+                .fonts_mut(|f| {
+                    f.layout_no_wrap(line[..len].to_owned(), font, Color32::TRANSPARENT)
+                })
+                .size()
+                .x;
+            let content_x = LIST_STEP * (depth + 1) as f32;
+            let mut f = fmt(hidden_size, FontFamily::Proportional, Color32::TRANSPARENT);
+            f.line_height = Some(lh);
+            f.valign = Align::TOP;
+            job.append(&line[..len], (content_x - w).max(0.0), f);
+            let s0 = job.sections.len();
+            append_inline_md_source(&mut job, &line[len..], body, p, dark);
+            for sec in &mut job.sections[s0..] {
+                sec.format.line_height = Some(lh);
+                sec.format.valign = Align::TOP;
+            }
+            continue;
+        }
+        let marker = if let Some(rest) = t.strip_prefix('>') {
             line.len() - t.len() + 1 + usize::from(rest.starts_with(' '))
         } else {
             0
@@ -942,6 +892,79 @@ pub(crate) fn md_job(
     }
     debug_assert_eq!(job.text, text);
     job
+}
+
+// 목록 배치 (렌더링·편집 화면 공용): [여백 PAD][기호 칸 MARKER_W][GAP] 내용. 한 단계 = LIST_STEP
+const LIST_PAD: f32 = 4.0;
+const LIST_MARKER_W: f32 = 18.0;
+const LIST_GAP: f32 = 6.0;
+const LIST_STEP: f32 = LIST_PAD + LIST_MARKER_W + LIST_GAP;
+const LIST_ROW_GAP: f32 = 6.0; // 렌더링 화면의 항목 사이 간격(item_spacing.y)
+const BULLETS: [&str; 3] = ["•", "◦", "▪"];
+
+// egui 기본 체크박스와 같은 모양 (렌더링·편집 화면 공용)
+fn paint_checkbox(painter: &egui::Painter, c: egui::Pos2, checked: bool) {
+    let style = painter.ctx().global_style();
+    let w = &style.visuals.widgets.inactive;
+    let r = Rect::from_center_size(c, egui::Vec2::splat(style.spacing.icon_width));
+    painter.rect(r, w.corner_radius, w.bg_fill, w.bg_stroke, egui::StrokeKind::Inside);
+    if checked {
+        let r = r.shrink(3.0);
+        painter.add(egui::Shape::line(
+            vec![
+                pos2(r.left(), r.center().y),
+                pos2(r.center().x, r.bottom()),
+                pos2(r.right(), r.top()),
+            ],
+            w.fg_stroke,
+        ));
+    }
+}
+
+// 편집 중인 블록에서 투명하게 둔 목록 기호 자리에 렌더링 화면과 같은 글머리·번호·체크박스를 그린다
+fn paint_list_markers(
+    painter: &egui::Painter,
+    g: &egui::Galley,
+    origin: egui::Pos2,
+    text: &str,
+    body: f32,
+    p: &Pal,
+) {
+    use egui::text::CCursor;
+    let mut stack = Vec::new();
+    let (mut ci, mut fence) = (0, false);
+    for line in text.split('\n') {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fence = !fence;
+        } else if !fence {
+            if let (Some(len), Some((depth, num))) =
+                (list_marker_bytes(line), list_item_step(&mut stack, line))
+            {
+                let row_top = g.pos_from_cursor(CCursor::new(ci + len)).top();
+                let c = origin
+                    + vec2(
+                        LIST_STEP * depth as f32 + LIST_PAD + LIST_MARKER_W * 0.5,
+                        row_top + body * 0.75,
+                    );
+                let m = line[..len].trim_start();
+                if m.ends_with("] ") {
+                    paint_checkbox(painter, c, m.contains(['x', 'X']));
+                } else {
+                    let label =
+                        num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
+                    painter.text(
+                        c,
+                        Align2::CENTER_CENTER,
+                        label,
+                        FontId::proportional(body),
+                        p.muted,
+                    );
+                }
+            }
+        }
+        ci += line.chars().count() + 1;
+    }
 }
 
 struct BlockOut {
@@ -2682,6 +2705,10 @@ impl App {
                 };
             }
         }
+        // 제목은 렌더링 화면처럼 위 여백을 둬서 편집을 시작해도 자리가 움직이지 않게 한다
+        if let Some(lv) = heading_level(buf.trim_start()) {
+            ui.add_space(HEADING_TOP[lv - 1]);
+        }
         let mut pre_click = None;
         let pre_pos = ui.cursor().min;
         if let Some((target_start, click_pos)) = self.pending_click_pos {
@@ -2832,6 +2859,7 @@ impl App {
                                 "json",
                                 "bash",
                                 "sql",
+                                "sas",
                                 "c",
                                 "cpp",
                                 "go",
@@ -2990,6 +3018,9 @@ impl App {
             self.status = "코드를 복사했습니다".into();
         }
         self.editor_galley_cache = galley_cache;
+        if code_frame_rect.is_none() {
+            paint_list_markers(ui.painter(), &out.galley, out.galley_pos, &buf, body, &pal);
+        }
         let mut sel = out.cursor_range.map(|c| c.as_sorted_char_range());
         let mut primary_cursor = out.cursor_range.map(|c| c.primary);
         if let Some((pre_pos, click_pos)) = pre_click {
@@ -3046,6 +3077,19 @@ impl App {
                 self.drag_last_pos = None;
             }
         }
+        // 숨긴 ``` 줄이 지워지거나 바뀌었으면 그 부분만 되돌린다 (전체 선택 후 입력, 맨 앞 Backspace 등)
+        if code_frame_rect.is_some() {
+            if let Some((fixed, caret)) = keep_code_fences(&text[r.clone()], &buf) {
+                buf = fixed;
+                let cr = CCursorRange::one(CCursor::new(caret));
+                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                st.cursor.set_char_range(Some(cr));
+                egui::TextEdit::store_state(ctx, id, st);
+                sel = Some(cr.as_sorted_char_range());
+                primary_cursor = Some(cr.primary);
+                ctx.request_repaint();
+            }
+        }
         let is_changed = buf != text[r.clone()];
         let (base, blen) =
             if self.active_char_cache.0 == r.start && self.active_char_cache.1 == doc_rev {
@@ -3062,6 +3106,28 @@ impl App {
                 let l = if is_changed { char_len(&buf) } else { orig_l };
                 (b, l)
             };
+        // 커서가 숨긴 목록 기호·코드 펜스 안으로 들어가면 보이는 자리로 옮긴다
+        if let Some(s) = sel.clone().filter(|s| s.start == s.end && !self.ime_composing) {
+            let c = s.start.0;
+            let to = match code_body_range(&buf) {
+                Some((a, b)) if code_frame_rect.is_some() => c.clamp(a, b),
+                _ => {
+                    let prev = self
+                        .last_sel
+                        .and_then(|(a, b)| (a == b && a >= base).then(|| a - base));
+                    clamp_hidden(&buf, c, prev)
+                }
+            };
+            if to != c {
+                let cr = CCursorRange::one(CCursor::new(to));
+                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                st.cursor.set_char_range(Some(cr));
+                egui::TextEdit::store_state(ctx, id, st);
+                sel = Some(cr.as_sorted_char_range());
+                primary_cursor = Some(cr.primary);
+                ctx.request_repaint();
+            }
+        }
         let has_range_sel = self
             .last_sel
             .is_some_and(|(la, lb)| la < lb && la >= base && lb <= base + blen);
@@ -3089,7 +3155,8 @@ impl App {
             }
         }
         self.cursor_info = primary_cursor.map(|pc| {
-            let rows = &out.galley.rows;
+            // 접어 둔(높이 0) ``` 줄은 빼고 보이는 줄 기준으로 첫·마지막 줄을 판단
+            let rows: Vec<_> = out.galley.rows.iter().filter(|r| r.rect().height() > 1.0).collect();
             if rows.len() <= 1 {
                 EditorCursorInfo {
                     block_start: r.start,
@@ -6325,15 +6392,31 @@ fn render_md_stream<'a, I>(
                                     iter.next();
                                 }
                             }
-                            let indent = if list_depth > 0 { 16.0 } else { 4.0 };
-                            let marker_w = 18.0;
-                            let item_w = (width - indent - marker_w - 6.0).max(80.0);
+                            // 편집 화면(md_job·paint_list_markers)과 같은 배치 상수를 쓴다
+                            let indent = LIST_PAD;
+                            let marker_w = LIST_MARKER_W;
+                            let item_w = (width - LIST_STEP).max(80.0);
                             ui.horizontal_top(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.spacing_mut().item_spacing.x = LIST_GAP;
                                 ui.add_space(indent);
                                 if let Some((mspan, chk)) = task {
+                                    // 체크박스도 기호 칸 안에 두어 글머리 항목과 내용 열을 맞춘다
                                     let mut val = chk;
-                                    if ui.checkbox(&mut val, "").changed() {
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        vec2(marker_w, ctx.body * 1.5),
+                                        Sense::click(),
+                                    );
+                                    paint_checkbox(ui.painter(), rect.center(), val);
+                                    resp.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::accesskit::Role::CheckBox,
+                                            true,
+                                            val,
+                                            "",
+                                        )
+                                    });
+                                    if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                        val = !val;
                                         *toggled = Some((mspan, val));
                                     }
                                 } else {

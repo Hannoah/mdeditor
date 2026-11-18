@@ -12,6 +12,7 @@ use egui::{Key, Modifiers};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 mod mermaid;
+mod sas;
 #[cfg(windows)] // 설치·제거 마법사는 Windows 전용 (PowerShell 엔진)
 mod setup;
 mod theme;
@@ -824,6 +825,432 @@ fn indent_lines(s: &str, (a, b): Sel, outdent: bool) -> (String, Sel) {
         (b as isize + (new_le as isize - le as isize)) as usize
     };
     (out, (na, nb))
+}
+
+// 목록 줄의 (들여쓰기, 내용 시작 열). CommonMark에서 하위 항목은 부모의 "내용 시작 열"까지
+// 들여써야 자식이 된다: "- a" → 2칸, "1. a" → 3칸, "10. a" → 4칸. (할 일 "- [ ] "도 2칸 기준)
+fn list_cols(line: &str) -> Option<(usize, usize)> {
+    let ind = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[ind..];
+    if ["- ", "* ", "+ "].iter().any(|b| rest.starts_with(b)) {
+        return Some((ind, ind + 2));
+    }
+    let d = rest.bytes().take_while(u8::is_ascii_digit).count();
+    ((1..10).contains(&d) && (rest[d..].starts_with(". ") || rest[d..].starts_with(") ")))
+        .then_some((ind, ind + d + 2))
+}
+
+// 목록 줄 하나를 읽어 (깊이, 표시 번호)를 낸다. stack: 열린 상위 항목들의 (내용 열, 번호).
+// 렌더러(pulldown-cmark)와 같은 규칙: 부모 내용 열 이상 들여써야 자식, 번호는 같은 목록 앞 항목 + 1.
+fn list_item_step(stack: &mut Vec<(usize, Option<u64>)>, line: &str) -> Option<(usize, Option<u64>)> {
+    let (ind, col) = list_cols(line)?;
+    let digits = &line[ind..col - 2];
+    let mut sib = None;
+    while stack.last().is_some_and(|t| ind < t.0) {
+        sib = stack.pop();
+    }
+    let num = (!digits.is_empty()).then(|| match sib {
+        Some((_, Some(n))) => n + 1,
+        _ => digits.parse().unwrap_or(1),
+    });
+    let depth = stack.len();
+    stack.push((col, num));
+    Some((depth, num))
+}
+
+// 코드 블록의 코드 부분(여는·닫는 ``` 줄 제외) 문자 구간. 펜스 블록이 아니면 None.
+fn code_body_range(block: &str) -> Option<(usize, usize)> {
+    let t = block.trim_start();
+    if !(t.starts_with("```") || t.starts_with("~~~")) {
+        return None;
+    }
+    let fence = &t[..3];
+    let nl = block.find('\n')?;
+    let start = char_len(&block[..=nl]);
+    let last = block.rfind('\n').map_or(0, |i| i + 1);
+    let end = if last > nl && block[last..].trim_start().starts_with(fence) {
+        char_len(&block[..last - 1]).max(start)
+    } else {
+        char_len(block)
+    };
+    Some((start, end))
+}
+
+// 편집 화면에서 숨기는 줄머리 기호(목록 "- ", "1. ", "- [ ] " / 제목 "## ")의 바이트 길이
+fn hidden_prefix(line: &str) -> usize {
+    if let Some(m) = list_marker_bytes(line) {
+        return m;
+    }
+    let t = line.trim_start();
+    heading_level(t).map_or(0, |lv| (line.len() - t.len() + lv + 1).min(line.len()))
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Inline {
+    Code,
+    Bold,
+    Mark,
+    Strike,
+    Italic,
+}
+
+// 줄 안의 인라인 서식 (**굵게**, __굵게__, *기울임*, ~~취소선~~, ==강조==, `코드`):
+// (여는 기호 시작, 내용 시작, 내용 끝, 닫는 기호 끝, 종류) 바이트 위치.
+// 편집 화면 서식(append_inline_md_source)과 커서 이동(hidden_runs)이 함께 쓴다.
+fn inline_spans(line: &str) -> Vec<(usize, usize, usize, usize, Inline)> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 1 < b.len() {
+            i += 1;
+            i += line[i..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        if b[i] == b'`' {
+            let run = b[i..].iter().take_while(|&&c| c == b'`').count();
+            let fence = &line[i..i + run];
+            let bs = i + run;
+            if let Some(off) = line[bs..].find(fence) {
+                if off > 0 && !line[bs..bs + off].contains('\n') {
+                    out.push((i, bs, bs + off, bs + off + run, Inline::Code));
+                    i = bs + off + run;
+                    continue;
+                }
+            }
+            i += run;
+            continue;
+        }
+        let two = b.get(i..i + 2);
+        if matches!(two, Some(b"**" | b"__" | b"~~" | b"==")) {
+            let mark = &line[i..i + 2];
+            let prev_alnum = mark == "__"
+                && line[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphanumeric);
+            let inner = &line[i + 2..];
+            if !prev_alnum && !inner.starts_with(char::is_whitespace) {
+                if let Some(off) = inner.find(mark) {
+                    let body = &inner[..off];
+                    if !body.is_empty() && !body.contains('\n') && !body.ends_with(char::is_whitespace)
+                    {
+                        let kind = match mark {
+                            "**" | "__" => Inline::Bold,
+                            "==" => Inline::Mark,
+                            _ => Inline::Strike,
+                        };
+                        out.push((i, i + 2, i + 2 + off, i + 4 + off, kind));
+                        i += 4 + off;
+                        continue;
+                    }
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if b[i] == b'*' {
+            let inner = &line[i + 1..];
+            if !inner.is_empty() && !inner.starts_with(char::is_whitespace) {
+                let mut from = 0usize;
+                let mut end = None;
+                while let Some(rel) = inner[from..].find('*') {
+                    let pos = from + rel;
+                    if inner[pos..].starts_with("**") {
+                        from = pos + inner.as_bytes()[pos..].iter().take_while(|&&c| c == b'*').count();
+                        continue;
+                    }
+                    let cand = &inner[..pos];
+                    if !cand.is_empty() && !cand.contains('\n') && !cand.ends_with(char::is_whitespace) {
+                        end = Some(pos);
+                    }
+                    break;
+                }
+                if let Some(off) = end {
+                    out.push((i, i + 1, i + 1 + off, i + 2 + off, Inline::Italic));
+                    i += 2 + off;
+                    continue;
+                }
+            }
+        }
+        i += line[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    out
+}
+
+// 줄에서 인라인 서식을 읽기 시작하는 바이트 위치 (md_job과 같은 규칙). 제목 줄은 인라인 서식 없음(None).
+fn inline_start(line: &str) -> Option<usize> {
+    let t = line.trim_start();
+    if heading_level(t).is_some() {
+        return None;
+    }
+    if let Some(m) = list_marker_bytes(line) {
+        return Some(m);
+    }
+    Some(t.strip_prefix('>').map_or(0, |r| line.len() - t.len() + 1 + usize::from(r.starts_with(' '))))
+}
+
+// 블록 안 인라인 서식들의 문자 위치 [여는 시작, 내용 시작, 내용 끝, 닫는 끝]
+fn block_inline_spans(block: &str) -> Vec<[usize; 4]> {
+    let mut out = Vec::new();
+    let (mut ci, mut fence) = (0, false);
+    for line in block.split('\n') {
+        let t = line.trim_start();
+        let is_fence = t.starts_with("```") || t.starts_with("~~~");
+        if is_fence || fence {
+            fence ^= is_fence;
+        } else if let Some(st) = inline_start(line) {
+            let base = ci + char_len(&line[..st]);
+            let rest = &line[st..];
+            let cc = |b: usize| base + char_len(&rest[..b]);
+            for (a, bs, be, e, _) in inline_spans(rest) {
+                out.push([cc(a), cc(bs), cc(be), cc(e)]);
+            }
+        }
+        ci += char_len(line) + 1;
+    }
+    out
+}
+
+// 편집 화면에서 숨긴 기호 구간(문자 위치): (시작, 끝, 줄머리 기호인지)
+fn hidden_runs(block: &str) -> Vec<(usize, usize, bool)> {
+    let mut out = Vec::new();
+    let (mut ci, mut fence) = (0, false);
+    for line in block.split('\n') {
+        let t = line.trim_start();
+        let is_fence = t.starts_with("```") || t.starts_with("~~~");
+        if is_fence || fence {
+            fence ^= is_fence;
+        } else {
+            let pre = hidden_prefix(line);
+            if pre > 0 {
+                out.push((ci, ci + char_len(&line[..pre]), true));
+            }
+        }
+        ci += char_len(line) + 1;
+    }
+    for [a, bs, be, e] in block_inline_spans(block) {
+        out.push((a, bs, false));
+        out.push((be, e, false));
+    }
+    out
+}
+
+// 편집 화면에서 커서가 갈 수 있는 블록 안 범위 (숨긴 줄머리 기호·코드 펜스 바깥)
+fn visible_bounds(block: &str) -> (usize, usize) {
+    code_body_range(block).unwrap_or_else(|| {
+        let first = block.split('\n').next().unwrap_or("");
+        (char_len(&first[..hidden_prefix(first)]), char_len(block))
+    })
+}
+
+// 커서가 숨긴 기호 안에 들어가면 보이는 자리로 옮긴다.
+// 줄머리 기호: 내용 시작으로 (내용 시작에서 왼쪽으로 온 거라면 윗줄 끝으로).
+// 인라인 기호: 움직이던 방향의 끝으로, 화면상 제자리걸음이면 한 글자 더 간다.
+fn clamp_hidden(s: &str, c: usize, prev: Option<usize>) -> usize {
+    let runs = hidden_runs(s);
+    let len = char_len(s);
+    let mut c = c;
+    for _ in 0..4 {
+        if let Some(&(a, e, _)) = runs.iter().find(|&&(a, e, pre)| pre && c >= a && c < e) {
+            c = if prev == Some(e) && a > 0 { a - 1 } else { e };
+            continue;
+        }
+        if let Some(&(a, e, _)) = runs.iter().find(|&&(a, e, pre)| !pre && c > a && c < e) {
+            c = if prev.is_some_and(|p| p >= e) { a } else { e };
+            continue;
+        }
+        let stuck = prev.filter(|&p| p != c).and_then(|p| {
+            runs.iter()
+                .find(|&&(a, e, pre)| !pre && (a..=e).contains(&c) && (a..=e).contains(&p))
+                .map(|&(a, e, _)| if c > p { (e + 1).min(len) } else { a.saturating_sub(1) })
+        });
+        match stuck {
+            Some(n) if n != c => c = n,
+            _ => break,
+        }
+    }
+    c
+}
+
+// 숨긴 인라인 기호 옆 Backspace/Delete: 화면에 보이는 이웃 글자를 지운다 (내용이 한 글자뿐이면 서식째).
+// Some(Ok((블록, 커서))) = 직접 처리, Some(Err(c)) = 커서만 c로 옮기고 기본 동작에 맡김.
+fn delete_near_hidden(block: &str, c: usize, back: bool) -> Option<Result<(String, usize), usize>> {
+    for [os, bs, be, ce] in block_inline_spans(block) {
+        let (at_start, at_end) = (c == os || c == bs, c == be || c == ce);
+        let target = match (back, at_start, at_end) {
+            (true, _, true) => be - 1,  // 뒤에서 Backspace → 내용 마지막 글자
+            (false, true, _) => bs,     // 앞에서 Delete → 내용 첫 글자
+            (true, true, _) => return (c != os).then_some(Err(os)),
+            (false, _, true) => return (c != ce).then_some(Err(ce)),
+            _ => continue,
+        };
+        if be - bs == 1 {
+            return Some(Ok((replace_range(block, (os, ce), ""), os)));
+        }
+        return Some(Ok((replace_range(block, (target, target + 1), ""), target)));
+    }
+    None
+}
+
+// 목록·제목 내용 맨 앞에서 Backspace (노션식): 제목은 일반 문단으로, 들여쓴 항목은 한 단계 내어쓰기,
+// 블록 첫 항목은 기호만 지워 일반 문단으로, 그 밖의 항목은 윗줄과 합친다.
+fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)> {
+    let ls = line_start(s, c);
+    let line = &s[byte_idx(s, ls)..byte_idx(s, line_end(s, c))];
+    let m = hidden_prefix(line);
+    if m == 0 || c != ls + char_len(&line[..m]) {
+        return None;
+    }
+    if list_marker_bytes(line).is_none() {
+        return Some((replace_range(s, (ls, c), ""), ls)); // 제목 → 문단
+    }
+    if line.starts_with(' ') {
+        return indent_list(s, (c, c), true).map(|(t, sel)| (t, sel.0));
+    }
+    let first = ls == 0 || s[..byte_idx(s, ls)].ends_with("\n\n");
+    if first {
+        Some((replace_range(s, (ls, ls + m), ""), ls))
+    } else {
+        Some((replace_range(s, (ls - 1, ls + m), ""), ls - 1))
+    }
+}
+
+// 코드 블록 편집이 숨긴 ``` 줄을 건드렸으면 그 부분만 되돌린다 (코드 부분의 변경은 유지).
+// 반환: (고친 블록, 커서 문자 위치). 펜스가 멀쩡하면 None.
+fn keep_code_fences(old: &str, new: &str) -> Option<(String, usize)> {
+    let (s0, e0) = code_body_range(old)?;
+    let (p, s) = (byte_idx(old, s0), old.len() - byte_idx(old, e0));
+    if new.len() >= p + s && new.starts_with(&old[..p]) && new.ends_with(&old[old.len() - s..]) {
+        return None;
+    }
+    let mut cp = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(cp) || !new.is_char_boundary(cp) {
+        cp -= 1;
+    }
+    let max_cs = (old.len() - cp).min(new.len() - cp);
+    let mut cs = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take(max_cs)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(old.len() - cs) || !new.is_char_boundary(new.len() - cs) {
+        cs -= 1;
+    }
+    let ins = &new[cp..new.len() - cs];
+    let a = cp.clamp(p, old.len() - s);
+    let b = (old.len() - cs).clamp(a, old.len() - s);
+    let out = format!("{}{ins}{}", &old[..a], &old[b..]);
+    let caret = char_len(&out[..a + ins.len()]);
+    Some((out, caret))
+}
+
+// 번호 목록을 계층별로 1, 2, 3… 다시 매긴다 (맨 위 단계의 첫 번호는 사용자가 쓴 값 유지)
+fn renumber_lists(lines: &mut [String]) {
+    let mut stack: Vec<(usize, bool, u64)> = Vec::new(); // (들여쓰기, 번호 목록?, 다음 번호)
+    for line in lines.iter_mut() {
+        let Some((ind, col)) = list_cols(line) else {
+            continue; // 이어지는 문단 줄
+        };
+        let digits = &line[ind..col - 2];
+        let ordered = !digits.is_empty();
+        while stack.last().is_some_and(|t| t.0 > ind) {
+            stack.pop();
+        }
+        if stack.last().is_some_and(|t| t.0 == ind && t.1 != ordered) {
+            stack.pop(); // 같은 단계에서 기호 종류가 바뀌면 새 목록
+        }
+        if !stack.last().is_some_and(|t| t.0 == ind) {
+            let start = if stack.is_empty() {
+                digits.parse().unwrap_or(1)
+            } else {
+                1
+            };
+            stack.push((ind, ordered, start));
+        }
+        let top = stack.last_mut().unwrap();
+        if ordered {
+            let n = top.2.to_string();
+            top.2 += 1;
+            if n != digits {
+                line.replace_range(ind..col - 2, &n);
+            }
+        }
+    }
+}
+
+// Tab / Shift+Tab (목록 줄): 계층 구조대로 들여쓰기·내어쓰기.
+// Tab → 바로 위 형제 항목의 내용 열로 (형제가 없으면 첫 항목이라 들여쓸 수 없음),
+// Shift+Tab → 부모 항목의 들여쓰기로. 하위 항목도 함께 움직이고 번호는 다시 매긴다.
+// 첫 줄이 목록이 아니면 None.
+// ponytail: 문서 전체를 줄로 나눈다(O(n)). Tab은 드물어서 충분하다.
+fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String, Sel)> {
+    let orig: Vec<&str> = s.split('\n').collect();
+    let pos = |c: usize| {
+        let mut acc = 0;
+        for (i, l) in orig.iter().enumerate() {
+            let n = char_len(l);
+            if c <= acc + n {
+                return (i, c - acc);
+            }
+            acc += n + 1;
+        }
+        (orig.len() - 1, 0)
+    };
+    let ((la, ca), (lb, cb)) = (pos(a), pos(b));
+    let (ind, _) = list_cols(orig[la])?;
+    let above = || {
+        orig[..la]
+            .iter()
+            .rev()
+            .take_while(|l| !l.trim().is_empty())
+            .filter_map(|l| list_cols(l))
+    };
+    let target = if outdent {
+        above().find(|&(i, _)| i < ind).map_or(0, |(i, _)| i)
+    } else {
+        match above().find(|&(i, _)| i <= ind) {
+            Some((i, col)) if i == ind => col,
+            _ => ind, // 형제 없음: 그대로
+        }
+    };
+    let delta = target as isize - ind as isize;
+    if delta == 0 {
+        return Some((s.to_string(), (a, b)));
+    }
+    let lead = |l: &str| l.len() - l.trim_start_matches(' ').len();
+    // 선택 줄 + 그 아래의 하위 항목·이어지는 줄까지 함께 이동
+    let mut end = lb;
+    while end + 1 < orig.len() && !orig[end + 1].trim().is_empty() && lead(orig[end + 1]) > ind {
+        end += 1;
+    }
+    let mut lines: Vec<String> = orig.iter().map(|l| l.to_string()).collect();
+    for l in &mut lines[la..=end] {
+        if delta > 0 {
+            l.insert_str(0, &" ".repeat(delta as usize));
+        } else {
+            let n = lead(l).min((-delta) as usize);
+            l.drain(..n);
+        }
+    }
+    let run_start = (0..=la)
+        .rev()
+        .find(|&i| i == 0 || lines[i - 1].trim().is_empty())
+        .unwrap_or(0);
+    let run_end = (end..lines.len())
+        .find(|&i| i + 1 == lines.len() || lines[i + 1].trim().is_empty())
+        .unwrap_or(end);
+    renumber_lists(&mut lines[run_start..=run_end]);
+    // 커서: 같은 줄에서 줄 길이 변화만큼 이동 (변화는 모두 내용 앞에서 일어난다)
+    let at = |line: usize, col: usize| {
+        let diff = char_len(&lines[line]) as isize - char_len(orig[line]) as isize;
+        let col = (col as isize + diff).clamp(0, char_len(&lines[line]) as isize) as usize;
+        lines[..line].iter().map(|l| char_len(l) + 1).sum::<usize>() + col
+    };
+    let sel = (at(la, ca), at(lb, cb));
+    Some((lines.join("\n"), sel))
 }
 
 // 목록 줄 분석: (들여쓰기, 다음 줄에 쓸 기호, 현재 기호 길이(문자), 내용이 비었는지)
@@ -3504,6 +3931,13 @@ impl App {
                 }
                 return false;
             }
+            // 들여쓴 빈 항목에서 Enter → 한 단계 내어쓰기 (노션·구글 문서와 같은 동작)
+            if text[ls..le].starts_with(' ') {
+                if let Some((t2, s2)) = indent_list(&text, sel, true) {
+                    self.set_text(t2, s2);
+                    return true;
+                }
+            }
             let mut t2 = text;
             if ls == r.start {
                 // 첫 줄이 빈 항목이면 기호만 지우고 일반 문단으로
@@ -3519,6 +3953,62 @@ impl App {
         }
         self.split(b);
         true
+    }
+
+    // 숨긴 인라인 기호(** 등) 옆의 Backspace/Delete. true면 직접 처리했으니 키를 소비한다.
+    fn delete_hidden(&mut self, ctx: &egui::Context, back: bool) -> bool {
+        let (Some(r), Some(doc), Some(name)) =
+            (self.active_block(), self.doc(), self.current.clone())
+        else {
+            return false;
+        };
+        let block = &doc.text[r.clone()];
+        if code_body_range(block).is_some() {
+            return false;
+        }
+        let local = self.local_cursor(ctx, doc, &r);
+        if local.0 != local.1 {
+            return false;
+        }
+        match delete_near_hidden(block, local.0, back) {
+            Some(Ok((blk, caret))) => {
+                let c = char_len(&doc.text[..r.start]) + caret;
+                let mut t = doc.text.clone();
+                t.replace_range(r, &blk);
+                self.set_text(t, (c, c));
+                true
+            }
+            Some(Err(c)) => {
+                // 커서만 기호 바깥으로 옮기고 나머지는 기본 Backspace/Delete 흐름에 맡긴다
+                let id = Self::editor_id(&name, r.start);
+                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                let cc = egui::text::CCursor::new(c);
+                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(cc)));
+                egui::TextEdit::store_state(ctx, id, st);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn backspace_list(&mut self, ctx: &egui::Context) -> bool {
+        let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
+            return false;
+        };
+        if code_body_range(&doc.text[r]).is_some() {
+            return false;
+        }
+        let sel = self.cursor(ctx);
+        if sel.0 != sel.1 {
+            return false;
+        }
+        match backspace_list_marker(&doc.text, sel.0) {
+            Some((t, c)) => {
+                self.set_text(t, (c, c));
+                true
+            }
+            None => false,
+        }
     }
 
     // 블록 맨 앞 Backspace: 앞 빈 줄을 지우거나, 내용이 있으면 앞 블록과 합친다
@@ -3681,6 +4171,11 @@ impl App {
         }
         .cloned();
         let Some(t) = target else {
+            // 문서 맨 끝 코드 블록의 마지막 줄에서 ↓: 아래에 새 문단을 만들고 빠져나간다 (닫는 ```는 숨겨져 있음)
+            if !up && code_body_range(&doc.text[r.clone()]).is_some() {
+                self.split(r.end);
+                return true;
+            }
             return false;
         };
         let caret = if t.is_empty() {
@@ -3711,11 +4206,12 @@ impl App {
         if local.0 != local.1 {
             return false;
         }
+        let (vis_start, vis_end) = visible_bounds(&doc.text[r.clone()]);
         if !right {
-            if local.0 > 0 {
+            if local.0 > vis_start {
                 return false;
             }
-        } else if local.0 < char_len(&doc.text[r.clone()]) {
+        } else if local.0 < vis_end {
             return false;
         }
         let slots = self.doc_slots();
@@ -4817,13 +5313,16 @@ impl App {
         }
         if bs_del_tab {
             if k(Modifiers::SHIFT, Key::Tab) {
-                self.edit(ctx, |t, sel| Some(indent_lines(t, sel, true)));
+                self.edit(ctx, |t, sel| {
+                    indent_list(t, sel, true).or_else(|| Some(indent_lines(t, sel, true)))
+                });
             } else if k(Modifiers::NONE, Key::Tab) {
                 self.edit(ctx, |t, sel| {
+                    if let Some(r) = indent_list(t, sel, false) {
+                        return Some(r);
+                    }
                     let multi = t[byte_idx(t, sel.0)..byte_idx(t, sel.1)].contains('\n');
-                    let line =
-                        &t[byte_idx(t, line_start(t, sel.0))..byte_idx(t, line_end(t, sel.0))];
-                    if multi || list_marker(line).is_some() {
+                    if multi {
                         Some(indent_lines(t, sel, false))
                     } else {
                         Some((replace_range(t, sel, "  "), (sel.0 + 2, sel.0 + 2)))
@@ -4836,10 +5335,10 @@ impl App {
                     i.modifiers.is_none() && i.key_pressed(Key::Delete),
                 )
             });
-            if bs && self.backspace_at_start(ctx) {
+            if bs && (self.delete_hidden(ctx, true) || self.backspace_list(ctx) || self.backspace_at_start(ctx)) {
                 k(Modifiers::NONE, Key::Backspace);
             }
-            if del && self.delete_at_end(ctx) {
+            if del && (self.delete_hidden(ctx, false) || self.delete_at_end(ctx)) {
                 k(Modifiers::NONE, Key::Delete);
             }
         }
@@ -5189,6 +5688,101 @@ mod tests {
         assert_eq!(indent_lines("- x", (3, 3), false), ("  - x".into(), (5, 5)));
     }
 
+    // 실제 마크다운 파서가 보는 항목별 중첩 깊이
+    fn item_depths(md: &str) -> Vec<usize> {
+        use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+        let (mut d, mut out) = (0, vec![]);
+        for ev in Parser::new(md) {
+            match ev {
+                Event::Start(Tag::List(_)) => d += 1,
+                Event::End(TagEnd::List(_)) => d -= 1,
+                Event::Start(Tag::Item) => out.push(d),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn list_tab_builds_real_hierarchy() {
+        let tab = |s: &str, line: usize| {
+            let c = s.split('\n').take(line).map(|l| l.chars().count() + 1).sum::<usize>();
+            indent_list(s, (c, c), false).unwrap().0
+        };
+        let shift_tab = |s: &str, line: usize| {
+            let c = s.split('\n').take(line).map(|l| l.chars().count() + 1).sum::<usize>();
+            indent_list(s, (c, c), true).unwrap().0
+        };
+        // 번호 목록: 3칸 들여써야 자식이 되고, 하위 번호는 1부터, 뒤 번호는 당겨진다
+        let s = tab("1. AA\n2. BB\n3. CC", 1);
+        assert_eq!(s, "1. AA\n   1. BB\n2. CC");
+        assert_eq!(item_depths(&s), [1, 2, 1]);
+        // 한 번 더: 형제가 없으면 더 들어가지 않는다
+        assert_eq!(tab(&s, 1), s);
+        // 글머리 목록 3단계
+        let s = tab(&tab("- a\n- b\n- c", 1), 2);
+        assert_eq!(s, "- a\n  - b\n  - c");
+        let s = tab(&s, 2);
+        assert_eq!(s, "- a\n  - b\n    - c");
+        assert_eq!(item_depths(&s), [1, 2, 3]);
+        // 섞인 목록: 번호 아래 글머리
+        assert_eq!(item_depths(&tab("1. a\n- b", 1)), [1, 2]);
+        // 내어쓰기: 하위 항목도 같이 나오고, 번호는 부모 다음으로
+        let s = "1. a\n   1. b\n      - c\n2. d";
+        let o = shift_tab(s, 1);
+        assert_eq!(o, "1. a\n2. b\n   - c\n3. d");
+        assert_eq!(item_depths(&o), [1, 1, 2, 1]);
+        // 편집 화면 깊이·번호는 렌더러와 같은 규칙 (번호 빈칸도 1, 2로 표시)
+        let mut st = vec![];
+        let got: Vec<_> = "1. a\n   - b\n1. c\n5. d"
+            .split('\n')
+            .map(|l| list_item_step(&mut st, l).unwrap())
+            .collect();
+        assert_eq!(got, [(0, Some(1)), (1, None), (0, Some(2)), (0, Some(3))]);
+        // 숨긴 기호 안 커서 → 내용 시작 / 내용 시작에서 왼쪽 → 윗줄 끝
+        assert_eq!(clamp_hidden("- a\n  - b", 4, None), 8);
+        assert_eq!(clamp_hidden("- a\n  - b", 7, Some(8)), 3);
+        assert_eq!(clamp_hidden("plain", 0, None), 0);
+        // 인라인 기호: "a**bc**d" — 숨긴 ** 안에 커서가 머물지 않고, 제자리걸음 없이 한 글자씩 움직인다
+        let s = "a**bc**d";
+        assert_eq!(clamp_hidden(s, 2, Some(1)), 4, "a| → → 는 b 뒤로");
+        assert_eq!(clamp_hidden(s, 2, Some(3)), 0, "|b 에서 ← 는 a 앞으로");
+        assert_eq!(clamp_hidden(s, 6, Some(5)), 8, "c| → → 는 d 뒤로");
+        assert_eq!(clamp_hidden(s, 6, None), 7);
+        // 제목 기호도 숨김: Home → 내용 시작
+        assert_eq!(clamp_hidden("## 제목", 0, Some(5)), 3);
+        // 숨긴 ** 옆 Backspace/Delete는 보이는 글자를 지우고, 마지막 한 글자면 서식째 지운다
+        assert_eq!(delete_near_hidden(s, 7, true), Some(Ok(("a**b**d".into(), 4))));
+        assert_eq!(delete_near_hidden(s, 3, true), Some(Err(1)));
+        assert_eq!(delete_near_hidden(s, 1, false), Some(Ok(("a**c**d".into(), 3))));
+        assert_eq!(delete_near_hidden("x**y**", 6, true), Some(Ok(("x".into(), 1))));
+        assert_eq!(delete_near_hidden("plain", 2, true), None);
+        // 제목 맨 앞 Backspace → 일반 문단
+        assert_eq!(backspace_list_marker("## 제목", 3), Some(("제목".into(), 0)));
+        // 내용 맨 앞 Backspace: 하위 → 내어쓰기, 첫 항목 → 문단, 그 외 → 윗줄과 합치기
+        assert_eq!(backspace_list_marker("- a\n  - b", 8), Some(("- a\n- b".into(), 6)));
+        assert_eq!(backspace_list_marker("- a", 2), Some(("a".into(), 0)));
+        assert_eq!(backspace_list_marker("- a\n- b", 6), Some(("- ab".into(), 3)));
+        assert_eq!(backspace_list_marker("- ab", 3), None);
+        // 코드 블록: 숨긴 ``` 줄은 지켜지고 코드 변경은 유지
+        let code = "```sas\ndata a;\n```";
+        assert_eq!(code_body_range(code), Some((7, 14)));
+        assert_eq!(keep_code_fences(code, "```sas\ndata b;\n```"), None);
+        assert_eq!(
+            keep_code_fences(code, "```sasdata a;\n```"),
+            Some((code.into(), 7)),
+            "맨 앞 Backspace는 펜스를 못 지운다"
+        );
+        assert_eq!(
+            keep_code_fences(code, "x"),
+            Some(("```sas\nx\n```".into(), 8)),
+            "전체 선택 후 입력은 코드만 바꾼다"
+        );
+        // 첫 항목 Tab은 아무 변화 없음, 목록 아닌 줄은 None
+        assert_eq!(tab("- a", 0), "- a");
+        assert!(indent_list("plain", (0, 0), false).is_none());
+    }
+
     #[test]
     fn smart_enter_continues_and_ends_lists() {
         assert_eq!(smart_enter("- a", 3), Some(("- a\n- ".into(), 6)));
@@ -5421,41 +6015,45 @@ mod tests {
 "
         );
 
-        // 7. 블록 맨 앞 Backspace는 앞 블록과 합친다
+        // 7. 제목 맨 앞 Backspace는 노션처럼 먼저 일반 문단으로 바꾸고, 한 번 더 누르면 앞 블록과 합친다
         h.get_by_label("소제목").click();
         h.run_steps(3);
         h.key_press(egui::Key::Home);
         h.run_steps(2);
         h.key_press(egui::Key::Backspace);
         h.run_steps(3);
-        assert_eq!(
-            text(&h),
-            "# 제목
+        assert_eq!(text(&h), "# 제목
 
-첫 문단!## 소제목
+첫 문단!
+
+소제목
 
 - [x] 할 일
-"
-        );
+");
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(3);
+        assert_eq!(text(&h), "# 제목
+
+첫 문단!소제목
+
+- [x] 할 일
+");
 
         // 8. Ctrl+Z는 블록 합치기 같은 구조 편집도 되돌리고, Ctrl+Y로 다시 실행한다
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
         h.run_steps(3);
-        assert_eq!(
-            text(&h),
-            "# 제목
+        assert_eq!(text(&h), "# 제목
 
 첫 문단!
 
-## 소제목
+소제목
 
 - [x] 할 일
-"
-        );
+");
         assert!(h.state().active.is_some());
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Y);
         h.run_steps(3);
-        assert!(text(&h).contains("첫 문단!## 소제목"), "{}", text(&h));
+        assert!(text(&h).contains("첫 문단!소제목"), "{}", text(&h));
         // 끝까지 되돌리면 처음 파일 내용으로 돌아온다
         for _ in 0..20 {
             h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
@@ -6276,10 +6874,8 @@ mod tests {
             "```rust\n  let x = 1;\n  \n```"
         );
 
-        // 닫는 ``` 줄 끝에서 Enter를 누르면 코드 블록을 빠져나와 아래에 새 블록을 만든다
+        // 편집 중엔 ```가 숨겨져 있다: 마지막 줄에서 ↓를 누르면 코드 블록을 빠져나와 아래에 새 블록을 만든다
         h.key_press(egui::Key::ArrowDown);
-        h.key_press(egui::Key::End);
-        h.key_press(egui::Key::Enter);
         h.run_steps(2);
         h.event(egui::Event::Text("다음 문단".into()));
         h.run_steps(2);
