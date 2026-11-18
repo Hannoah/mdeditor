@@ -7044,6 +7044,23 @@ mod tests {
         assert!(!is_bold_sec("보통"));
         assert!(!is_bold_sec("그대로"));
 
+        // ==강조==는 보기·편집 화면 모두 굵게 + 같은 강조 배경, **굵게**는 배경 없음
+        let bg_of = |job: &egui::text::LayoutJob, needle: &str| {
+            job.sections
+                .iter()
+                .find(|s| {
+                    &job.text[usize::from(s.byte_range.start)..usize::from(s.byte_range.end)]
+                        == needle
+                })
+                .map(|s| (s.format.background, s.format.font_id.family == theme::bold()))
+        };
+        let src = "가 ==강조== 나 **굵게** 다";
+        let view = ui::inline_md_view_job(src, 15.0, &p, false);
+        let edit = ui::md_job(&ctx, src, 15.0, &p, false);
+        assert_eq!(bg_of(&view, "강조"), bg_of(&edit, "강조"));
+        assert_ne!(bg_of(&view, "강조").unwrap().0, egui::Color32::TRANSPARENT);
+        assert_eq!(bg_of(&view, "굵게"), Some((egui::Color32::TRANSPARENT, true)));
+
         // 2. 편집 모드 LayoutJob: 바이트 100% 보존 + 내부 텍스트에 theme::bold() 적용
         let src = "앞 **편집굵게** __또굵게__ 뒤";
         let edit_job = ui::md_job(&ctx, src, 15.0, &p, false);

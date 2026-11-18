@@ -686,6 +686,11 @@ fn build_code_layout_job(
     job
 }
 
+// ==강조== 배경 (편집·보기 화면 공용)
+fn mark_bg() -> Color32 {
+    Color32::from_rgba_unmultiplied(0xf5, 0x9e, 0x0b, 64)
+}
+
 // 편집 라인 내 인라인 마크다운(**굵게**, __굵게__, *기울임*, ~~취소선~~, ==강조==, `코드`) 강조
 // 바이트 길이를 100% 보존하여 TextEdit 커서·IME 위치가 어긋나지 않는다
 fn append_inline_md_source(
@@ -693,7 +698,6 @@ fn append_inline_md_source(
     line: &str,
     size: f32,
     p: &Pal,
-    dark: bool,
 ) {
     use egui::text::TextFormat;
     let mk_fmt = |sz: f32, family: FontFamily, color: Color32| TextFormat {
@@ -701,11 +705,6 @@ fn append_inline_md_source(
         color,
         line_height: Some(size * 1.6),
         ..Default::default()
-    };
-    let hl_bg = if dark {
-        Color32::from_rgba_unmultiplied(0xf5, 0x9e, 0x0b, 52)
-    } else {
-        Color32::from_rgba_unmultiplied(0xf5, 0x9e, 0x0b, 72)
     };
     // 서식 기호(** ` ~~ == *)는 폭 0·투명으로 숨긴다. 텍스트에는 남아 있어 복사·저장은 마크다운 그대로.
     let hidden = TextFormat {
@@ -729,7 +728,7 @@ fn append_inline_md_source(
             Inline::Bold => mk_fmt(size, theme::bold(), p.text),
             Inline::Mark => {
                 let mut f = mk_fmt(size, theme::bold(), p.text);
-                f.background = hl_bg;
+                f.background = mark_bg();
                 f
             }
             Inline::Strike => {
@@ -868,7 +867,7 @@ pub(crate) fn md_job(
             f.valign = Align::TOP;
             job.append(&line[..len], (content_x - w).max(0.0), f);
             let s0 = job.sections.len();
-            append_inline_md_source(&mut job, &line[len..], body, p, dark);
+            append_inline_md_source(&mut job, &line[len..], body, p);
             for sec in &mut job.sections[s0..] {
                 sec.format.line_height = Some(lh);
                 sec.format.valign = Align::TOP;
@@ -888,7 +887,7 @@ pub(crate) fn md_job(
                 fmt(body, FontFamily::Proportional, p.faint),
             );
         }
-        append_inline_md_source(&mut job, &line[marker..], body, p, dark);
+        append_inline_md_source(&mut job, &line[marker..], body, p);
     }
     debug_assert_eq!(job.text, text);
     job
@@ -4271,6 +4270,7 @@ impl App {
         }
         let mut rctx = MdRenderCtx {
             p,
+            raw: src,
             body,
             scheme,
             dark,
@@ -5723,6 +5723,7 @@ impl App {
 
 struct MdRenderCtx<'a> {
     p: &'a Pal,
+    raw: &'a str, // 전처리 전 원문 (길이 동일) — ==강조==와 **굵게** 구분용
     body: f32,
     scheme: &'a str,
     dark: bool,
@@ -5738,6 +5739,7 @@ struct MdInlineBuf<'a> {
     links: Vec<(Range<usize>, String)>,
     char_count: usize,
     strong: u16,
+    mark: u16, // ==강조== (전처리로 **가 된 구간)
     emphasis: u16,
     strike: u16,
     link_url: Option<String>,
@@ -5755,6 +5757,7 @@ impl<'a> MdInlineBuf<'a> {
             links: Vec::new(),
             char_count: 0,
             strong: 0,
+            mark: 0,
             emphasis: 0,
             strike: 0,
             link_url: None,
@@ -5793,6 +5796,11 @@ impl<'a> MdInlineBuf<'a> {
                 Stroke::new(1.0, color)
             } else {
                 Stroke::NONE
+            },
+            background: if self.mark > 0 {
+                mark_bg()
+            } else {
+                Color32::TRANSPARENT
             },
             ..Default::default()
         };
@@ -5970,11 +5978,15 @@ impl<'a> MdInlineBuf<'a> {
             Event::Start(Tag::Strong) => {
                 self.flush_pending();
                 self.strong += 1;
+                self.mark += u16::from(src.get(span.start..span.start + 2) == Some("=="));
                 true
             }
             Event::End(TagEnd::Strong) => {
                 self.flush_pending();
                 self.strong = self.strong.saturating_sub(1);
+                if src.get(span.start..span.start + 2) == Some("==") {
+                    self.mark = self.mark.saturating_sub(1);
+                }
                 true
             }
             Event::Start(Tag::Emphasis) => {
@@ -6042,6 +6054,7 @@ impl<'a> MdInlineBuf<'a> {
                 sec.byte_range.end.0.hash(&mut h);
                 sec.format.color.to_array().hash(&mut h);
                 sec.format.italics.hash(&mut h);
+                sec.format.background.to_array().hash(&mut h);
                 sec.format.font_id.size.to_bits().hash(&mut h);
                 (sec.format.font_id.family == theme::bold()).hash(&mut h);
                 (sec.format.font_id.family == FontFamily::Monospace).hash(&mut h);
@@ -6139,7 +6152,7 @@ fn render_inline_md_cached(
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES | Options::ENABLE_MATH;
     let mut buf = MdInlineBuf::new(p, size, p.text, base_bold);
     for (ev, span) in Parser::new_ext(&clean, opts).into_offset_iter() {
-        buf.handle_inline_event(&ev, &clean, span);
+        buf.handle_inline_event(&ev, src, span);
     }
     buf.flush_pending();
     if buf.job.text.is_empty() {
@@ -6186,7 +6199,7 @@ pub(crate) fn inline_md_view_job(
     let opts = Options::ENABLE_STRIKETHROUGH;
     let mut buf = MdInlineBuf::new(p, size, p.text, base_bold);
     for (ev, span) in Parser::new_ext(&clean, opts).into_offset_iter() {
-        buf.handle_inline_event(&ev, &clean, span);
+        buf.handle_inline_event(&ev, src, span);
     }
     buf.flush_pending();
     buf.job
@@ -6261,7 +6274,7 @@ fn render_md_stream<'a, I>(
                     if matches!(iev, Event::End(TagEnd::Paragraph)) {
                         break;
                     }
-                    buf.handle_inline_event(&iev, src, ispan);
+                    buf.handle_inline_event(&iev, ctx.raw, ispan);
                 }
                 buf.finish_cached(ui, ctx.cache, width, ctx.dark, ctx.scheme);
             }
@@ -6276,7 +6289,7 @@ fn render_md_stream<'a, I>(
                     if matches!(iev, Event::End(TagEnd::Heading(_))) {
                         break;
                     }
-                    buf.handle_inline_event(&iev, src, ispan);
+                    buf.handle_inline_event(&iev, ctx.raw, ispan);
                 }
                 buf.finish_cached(ui, ctx.cache, width, ctx.dark, ctx.scheme);
             }
@@ -6448,7 +6461,7 @@ fn render_md_stream<'a, I>(
                                             if matches!(iev, Event::End(TagEnd::Paragraph)) {
                                                 break;
                                             }
-                                            buf.handle_inline_event(&iev, src, ispan);
+                                            buf.handle_inline_event(&iev, ctx.raw, ispan);
                                         }
                                         buf.finish_cached(
                                             ui, ctx.cache, item_w, ctx.dark, ctx.scheme,
@@ -6468,7 +6481,7 @@ fn render_md_stream<'a, I>(
                                                 break;
                                             }
                                             let (iev, ispan) = iter.next().unwrap();
-                                            buf.handle_inline_event(&iev, src, ispan);
+                                            buf.handle_inline_event(&iev, ctx.raw, ispan);
                                         }
                                         buf.finish_cached(
                                             ui, ctx.cache, item_w, ctx.dark, ctx.scheme,
@@ -6554,7 +6567,7 @@ fn render_md_stream<'a, I>(
                                 if matches!(cev, Event::End(TagEnd::TableCell)) {
                                     break;
                                 }
-                                buf.handle_inline_event(&cev, src, cspan);
+                                buf.handle_inline_event(&cev, ctx.raw, cspan);
                             }
                             buf.flush_pending();
                             cur_row.push(buf.job);
