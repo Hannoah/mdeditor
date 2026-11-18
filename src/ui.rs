@@ -698,6 +698,7 @@ fn append_inline_md_source(
     line: &str,
     size: f32,
     p: &Pal,
+    base: Color32,
 ) {
     use egui::text::TextFormat;
     let mk_fmt = |sz: f32, family: FontFamily, color: Color32| TextFormat {
@@ -706,17 +707,37 @@ fn append_inline_md_source(
         line_height: Some(size * 1.6),
         ..Default::default()
     };
-    // 서식 기호(** ` ~~ == *)는 폭 0·투명으로 숨긴다. 텍스트에는 남아 있어 복사·저장은 마크다운 그대로.
+    // 서식 기호(** ` ~~ == * [ ](주소) ^)는 폭 0·투명으로 숨긴다. 텍스트에는 남아 있어 복사·저장은 마크다운 그대로.
     let hidden = TextFormat {
         font_id: FontId::new(0.1, FontFamily::Proportional),
         color: Color32::TRANSPARENT,
         line_height: Some(size * 1.6),
         ..Default::default()
     };
+    // 보기 화면의 각주 배지와 같은 모양 (append_footnote_badge)
+    let badge = TextFormat {
+        font_id: FontId::new(size * 0.78, FontFamily::Monospace),
+        color: p.accent,
+        valign: Align::TOP,
+        line_height: Some(size * 1.6),
+        ..Default::default()
+    };
     let mut at = 0usize;
     for (s, bs, be, e, kind) in inline_spans(line) {
+        if kind == Inline::FootRef {
+            // "[^1]": "[" "1" "]"는 배지로, "^"만 숨긴다
+            if at < s - 1 {
+                job.append(&line[at..s - 1], 0.0, mk_fmt(size, FontFamily::Proportional, base));
+            }
+            job.append(&line[s - 1..s], 0.0, badge.clone());
+            job.append(&line[s..bs], 0.0, hidden.clone());
+            job.append(&line[bs..be], 0.0, badge.clone());
+            job.append(&line[be..be + 1], 0.0, badge.clone());
+            at = be + 1;
+            continue;
+        }
         if at < s {
-            job.append(&line[at..s], 0.0, mk_fmt(size, FontFamily::Proportional, p.text));
+            job.append(&line[at..s], 0.0, mk_fmt(size, FontFamily::Proportional, base));
         }
         job.append(&line[s..bs], 0.0, hidden.clone());
         let f = match kind {
@@ -737,8 +758,14 @@ fn append_inline_md_source(
                 f
             }
             Inline::Italic => {
-                let mut f = mk_fmt(size, FontFamily::Proportional, p.text);
+                let mut f = mk_fmt(size, FontFamily::Proportional, base);
                 f.italics = true;
+                f
+            }
+            Inline::Link | Inline::FootRef => {
+                // 보기 화면 링크와 같은 모양 (MdInlineBuf::push_styled)
+                let mut f = mk_fmt(size, FontFamily::Proportional, p.accent);
+                f.underline = Stroke::new(1.0, p.accent);
                 f
             }
         };
@@ -747,17 +774,31 @@ fn append_inline_md_source(
         at = e;
     }
     if at < line.len() {
-        job.append(&line[at..], 0.0, mk_fmt(size, FontFamily::Proportional, p.text));
+        job.append(&line[at..], 0.0, mk_fmt(size, FontFamily::Proportional, base));
     }
 }
 
 // 편집 중인 블록의 원문 서식: 제목은 크기·굵기, 코드는 고정폭+구문 강조, 기호는 흐리게
+#[cfg(test)]
 pub(crate) fn md_job(
     ctx: &egui::Context,
     text: &str,
     body: f32,
     p: &Pal,
     dark: bool,
+) -> egui::text::LayoutJob {
+    md_job_ex(ctx, text, body, p, dark, f32::INFINITY, false)
+}
+
+// wrap: 줄바꿈 폭(수식 가운데 정렬용), folded: 접기 블록이 접혀 있는지
+fn md_job_ex(
+    ctx: &egui::Context,
+    text: &str,
+    body: f32,
+    p: &Pal,
+    dark: bool,
+    wrap: f32,
+    folded: bool,
 ) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
     let fmt = |size: f32, family: FontFamily, color: Color32| TextFormat {
@@ -823,74 +864,126 @@ pub(crate) fn md_job(
         return job;
     }
 
+    let collapsed = TextFormat {
+        font_id: FontId::new(0.1, FontFamily::Proportional),
+        color: Color32::TRANSPARENT,
+        line_height: Some(0.0),
+        ..Default::default()
+    };
+    // 숨긴 줄머리 기호: 폭 0·투명, 뒤 내용이 보기 화면과 같은 x(content_x)에서 시작하도록 앞 여백을 준다
+    let hide_prefix = |job: &mut LayoutJob, s: &str, content_x: f32, lh: f32| {
+        let mut f = fmt(0.1, FontFamily::Proportional, Color32::TRANSPARENT);
+        f.line_height = Some(lh);
+        job.append(s, content_x, f);
+    };
+
+    // 수식 블록: $$ 줄은 접고, 식은 보기 화면처럼 가운데 고정폭
+    if is_math_block(text) {
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let last = lines.len() - 1;
+        for (i, line) in lines.iter().enumerate() {
+            let closing = i == last && i > 0 && line.trim() == "$$";
+            if i == 0 || closing {
+                job.append(line, 0.0, collapsed.clone());
+                continue;
+            }
+            let font = FontId::new(body, FontFamily::Monospace);
+            let shown = line.trim_end_matches(['\n', '\r']).to_owned();
+            let w = ctx.fonts_mut(|f| f.layout_no_wrap(shown, font.clone(), p.text)).size().x;
+            let lead = if wrap.is_finite() { ((wrap - w) * 0.5).max(0.0) } else { 0.0 };
+            // 줄 높이는 글꼴 기본값: 보기 화면의 수식 라벨과 같은 높이
+            let mut f = fmt(body, FontFamily::Monospace, p.text);
+            f.line_height = None;
+            job.append(line, lead, f);
+        }
+        debug_assert_eq!(job.text, text);
+        return job;
+    }
+
+    let toggle = is_toggle_block(text);
+    let callout = callout_kind(text).is_some();
+    let n_lines = text.split_inclusive('\n').count();
     let mut fence = false;
     let mut list_stack = Vec::new();
-    for line in text.split_inclusive('\n') {
+    for (li, line) in text.split_inclusive('\n').enumerate() {
         let t = line.trim_start();
+        let bare = line.trim_end_matches(['\n', '\r']);
+        // 접기: 닫는 ::: 줄은 항상, 내용 줄은 접혀 있을 때 접는다
+        if toggle && li > 0 && (folded || (li + 1 == n_lines && bare.trim() == ":::")) {
+            job.append(line, 0.0, collapsed.clone());
+            continue;
+        }
+        let s0 = job.sections.len();
         let is_fence = t.starts_with("```") || t.starts_with("~~~");
         if is_fence || fence {
             let c = if is_fence { p.faint } else { p.text };
             job.append(line, 0.0, fmt(body * 0.86, FontFamily::Monospace, c));
             fence ^= is_fence;
-            continue;
-        }
-        if let Some(level) = heading_level(t) {
+        } else if toggle && li == 0 {
+            // 접기 제목: ":::toggle "을 숨기고 화살표 버튼 뒤(TOGGLE_TITLE_X)에서 굵게
+            let m = hidden_prefix(bare).min(line.len());
+            hide_prefix(&mut job, &line[..m], TOGGLE_TITLE_X, body * 1.6);
+            job.append(&line[m..], 0.0, fmt(body, theme::bold(), p.text));
+        } else if callout && li == 0 {
+            job.append(line, 0.0, collapsed.clone()); // 알림 상자 제목 줄은 상자 머리에 표시
+        } else if let Some(level) = heading_level(t) {
             let size = body * HEADING_SCALE[level - 1];
             let m = (line.len() - t.len() + level + 1).min(line.len());
             // "## " 기호는 폭 0·투명으로 숨긴다 (노션식). 줄 높이는 제목 크기 그대로
-            let mut hf = fmt(0.1, theme::bold(), Color32::TRANSPARENT);
-            hf.line_height = Some(size * 1.6);
-            job.append(&line[..m], 0.0, hf);
+            hide_prefix(&mut job, &line[..m], 0.0, size * 1.6);
             job.append(&line[m..], 0.0, fmt(size, theme::bold(), p.text));
-            continue;
-        }
-        let bare = line.trim_end_matches(['\n', '\r']);
-        if let (Some(len), Some((depth, _))) =
+        } else if is_hr_line(bare) {
+            // 구분선: 글자는 숨기고 paint_block_decor가 선을 긋는다. 줄 높이는 보기 화면과 같게
+            hide_prefix(&mut job, line, 0.0, HR_ROW_H);
+        } else if let (Some(len), Some((depth, _))) =
             (list_marker_bytes(bare), list_item_step(&mut list_stack, bare))
         {
             // 노션식: 들여쓰기·기호(- / 1. / - [ ])는 투명하게 두고 렌더링 화면과 같은 자리에서 내용이 시작한다.
-            // 기호 자리의 글머리·번호·체크박스는 paint_list_markers가 그린다. 텍스트는 마크다운 그대로.
+            // 기호 자리의 글머리·번호·체크박스는 paint_block_decor가 그린다. 텍스트는 마크다운 그대로.
             let len = len.min(line.len());
             let lh = body * 1.6 + LIST_ROW_GAP;
-            // 숨긴 기호는 작은 글자로 둬서 "- [ ] "처럼 긴 기호도 내용 열 안에 들어가게 한다
-            let hidden_size = body * 0.4;
-            let font = FontId::new(hidden_size, FontFamily::Proportional);
-            let w = ctx
-                .fonts_mut(|f| {
-                    f.layout_no_wrap(line[..len].to_owned(), font, Color32::TRANSPARENT)
-                })
-                .size()
-                .x;
-            let content_x = LIST_STEP * (depth + 1) as f32;
-            let mut f = fmt(hidden_size, FontFamily::Proportional, Color32::TRANSPARENT);
-            f.line_height = Some(lh);
-            f.valign = Align::TOP;
-            job.append(&line[..len], (content_x - w).max(0.0), f);
-            let s0 = job.sections.len();
-            append_inline_md_source(&mut job, &line[len..], body, p);
-            for sec in &mut job.sections[s0..] {
+            hide_prefix(&mut job, &line[..len], LIST_STEP * (depth + 1) as f32, lh);
+            let s1 = job.sections.len();
+            append_inline_md_source(&mut job, &line[len..], body, p, p.text);
+            for sec in &mut job.sections[s1 - 1..] {
                 sec.format.line_height = Some(lh);
                 sec.format.valign = Align::TOP;
             }
-            continue;
-        }
-        let marker = if let Some(rest) = t.strip_prefix('>') {
-            line.len() - t.len() + 1 + usize::from(rest.starts_with(' '))
+        } else if let Some((name, m)) = footnote_def(bare) {
+            // 각주 정의: "[^1]: "을 숨기고 paint_block_decor가 "[1]:" 표시를 그린다 (보기 화면과 같은 자리)
+            let m = m.min(line.len());
+            hide_prefix(&mut job, &line[..m], footnote_label_w(ctx, name, body) + 6.0, body * 1.6);
+            append_inline_md_source(&mut job, &line[m..], body, p, p.muted);
+        } else if t.starts_with('>') {
+            // 인용 "> " 숨김: 보기 화면처럼 세로줄 오른쪽(QUOTE_X)에서 흐린 글자 / 알림 상자 안은 보통 글자
+            let m = hidden_prefix(bare).min(line.len());
+            let (x, color) = if callout { (0.0, p.text) } else { (QUOTE_X, p.muted) };
+            hide_prefix(&mut job, &line[..m], x, body * 1.6);
+            append_inline_md_source(&mut job, &line[m..], body, p, color);
         } else {
-            0
-        };
-        let marker = marker.min(line.len());
-        if marker > 0 {
-            job.append(
-                &line[..marker],
-                0.0,
-                fmt(body, FontFamily::Proportional, p.faint),
-            );
+            append_inline_md_source(&mut job, line, body, p, p.text);
         }
-        append_inline_md_source(&mut job, &line[marker..], body, p);
+        if toggle && li > 0 {
+            if let Some(sec) = job.sections.get_mut(s0) {
+                sec.leading_space += TOGGLE_INDENT; // 접기 내용은 보기 화면처럼 들여쓴다
+            }
+        }
     }
     debug_assert_eq!(job.text, text);
     job
+}
+
+// 편집 화면 배치 상수 (보기 화면 render_block / render_md_stream과 같은 값)
+const TOGGLE_TITLE_X: f32 = 34.0; // 화살표 버튼(여백 포함) + 간격 7 — 보기 화면에서 잰 값
+const TOGGLE_INDENT: f32 = 22.0;
+const QUOTE_X: f32 = 14.0;
+const HR_ROW_H: f32 = 15.0; // 여백 4 + 선 1 + 보기 화면 항목 간격 6 + 여백 4
+
+fn footnote_label_w(ctx: &egui::Context, name: &str, body: f32) -> f32 {
+    let font = FontId::new(body * 0.85, FontFamily::Monospace);
+    ctx.fonts_mut(|f| f.layout_no_wrap(format!("[{name}]:"), font, Color32::WHITE))
+        .size()
+        .x
 }
 
 // 목록 배치 (렌더링·편집 화면 공용): [여백 PAD][기호 칸 MARKER_W][GAP] 내용. 한 단계 = LIST_STEP
@@ -920,49 +1013,97 @@ fn paint_checkbox(painter: &egui::Painter, c: egui::Pos2, checked: bool) {
     }
 }
 
-// 편집 중인 블록에서 투명하게 둔 목록 기호 자리에 렌더링 화면과 같은 글머리·번호·체크박스를 그린다
-fn paint_list_markers(
+// 편집 중인 블록의 장식: 숨긴 기호 자리에 보기 화면과 같은 글머리·번호·체크박스, 인용 세로줄,
+// 구분선, 각주 "[1]:" 표시, 접기 화살표를 그린다. width: 블록 폭, folded: 접기 블록이 접혀 있는지
+#[allow(clippy::too_many_arguments)]
+fn paint_block_decor(
     painter: &egui::Painter,
     g: &egui::Galley,
     origin: egui::Pos2,
     text: &str,
     body: f32,
     p: &Pal,
+    width: f32,
+    folded: bool,
 ) {
     use egui::text::CCursor;
+    if is_math_block(text) {
+        return;
+    }
+    let toggle = is_toggle_block(text);
+    let callout = callout_kind(text).is_some();
     let mut stack = Vec::new();
     let (mut ci, mut fence) = (0, false);
-    for line in text.split('\n') {
+    let mut quote_rows: Option<(f32, f32)> = None;
+    let bar = |rows: (f32, f32)| {
+        painter.vline(
+            origin.x + 4.0,
+            (origin.y + rows.0)..=(origin.y + rows.1),
+            Stroke::new(3.0, p.border_hover),
+        );
+    };
+    for (li, line) in text.split('\n').enumerate() {
         let t = line.trim_start();
+        let row = |c: usize| g.pos_from_cursor(CCursor::new(c));
+        let is_quote = !callout && !fence && t.starts_with('>');
+        if !is_quote {
+            if let Some(q) = quote_rows.take() {
+                bar(q);
+            }
+        }
         if t.starts_with("```") || t.starts_with("~~~") {
             fence = !fence;
-        } else if !fence {
-            if let (Some(len), Some((depth, num))) =
-                (list_marker_bytes(line), list_item_step(&mut stack, line))
-            {
-                let row_top = g.pos_from_cursor(CCursor::new(ci + len)).top();
-                let c = origin
-                    + vec2(
-                        LIST_STEP * depth as f32 + LIST_PAD + LIST_MARKER_W * 0.5,
-                        row_top + body * 0.75,
-                    );
-                let m = line[..len].trim_start();
-                if m.ends_with("] ") {
-                    paint_checkbox(painter, c, m.contains(['x', 'X']));
-                } else {
-                    let label =
-                        num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
-                    painter.text(
-                        c,
-                        Align2::CENTER_CENTER,
-                        label,
-                        FontId::proportional(body),
-                        p.muted,
-                    );
-                }
+        } else if fence || (toggle && li > 0 && folded) {
+        } else if toggle && li == 0 {
+            let r = row(ci);
+            let c = origin + vec2(11.0, r.center().y);
+            let btn = Rect::from_center_size(c, vec2(22.0, 22.0));
+            if !folded {
+                painter.rect_filled(btn, 5.0, p.accent.gamma_multiply(0.10));
+            }
+            painter.text(
+                c,
+                Align2::CENTER_CENTER,
+                if folded { "▶" } else { "▼" },
+                FontId::proportional(10.5),
+                if folded { p.muted } else { p.accent },
+            );
+        } else if is_hr_line(line) {
+            let y = origin.y + row(ci).top() + 4.5;
+            painter.hline(origin.x..=origin.x + width, y, Stroke::new(1.0, p.border));
+        } else if is_quote {
+            let (top, bottom) = (row(ci).top(), row(ci + line.chars().count()).bottom());
+            quote_rows = Some(quote_rows.map_or((top, bottom), |q| (q.0, bottom)));
+        } else if let Some((name, _)) = footnote_def(line) {
+            painter.text(
+                origin + vec2(0.0, row(ci).top()),
+                Align2::LEFT_TOP,
+                format!("[{name}]:"),
+                FontId::monospace(body * 0.85),
+                p.accent,
+            );
+        } else if let (Some(len), Some((depth, num))) =
+            (list_marker_bytes(line), list_item_step(&mut stack, line))
+        {
+            let x0 = if toggle && li > 0 { TOGGLE_INDENT } else { 0.0 };
+            let row_top = row(ci + len).top();
+            let c = origin
+                + vec2(
+                    x0 + LIST_STEP * depth as f32 + LIST_PAD + LIST_MARKER_W * 0.5,
+                    row_top + body * 0.75,
+                );
+            let m = line[..len].trim_start();
+            if m.ends_with("] ") {
+                paint_checkbox(painter, c, m.contains(['x', 'X']));
+            } else {
+                let label = num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
+                painter.text(c, Align2::CENTER_CENTER, label, FontId::proportional(body), p.muted);
             }
         }
         ci += line.chars().count() + 1;
+    }
+    if let Some(q) = quote_rows {
+        bar(q);
     }
 }
 
@@ -982,10 +1123,12 @@ fn editor_galley_cached(
     pal: &Pal,
     dark: bool,
     ppp_bits: u32,
+    folded: bool,
 ) -> std::sync::Arc<egui::Galley> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     ppp_bits.hash(&mut hasher);
+    folded.hash(&mut hasher);
     s.hash(&mut hasher);
     let key = (hasher.finish(), body.to_bits(), wrap.to_bits(), dark);
     if let Some((ch, cb, cw, cd, g)) = cache.as_ref() {
@@ -993,7 +1136,7 @@ fn editor_galley_cached(
             return std::sync::Arc::clone(g);
         }
     }
-    let mut job = md_job(ctx, s, body, pal, dark);
+    let mut job = md_job_ex(ctx, s, body, pal, dark, wrap, folded);
     job.wrap.max_width = wrap;
     let g = ctx.fonts_mut(|f| f.layout_job(job));
     *cache = Some((key.0, key.1, key.2, key.3, std::sync::Arc::clone(&g)));
@@ -2708,6 +2851,14 @@ impl App {
         if let Some(lv) = heading_level(buf.trim_start()) {
             ui.add_space(HEADING_TOP[lv - 1]);
         }
+        // 접기 블록의 펼침 상태는 보기 화면(render_block)과 공유한다
+        let toggle_id = egui::Id::unique(("toggle-open", r.start));
+        let folded = is_toggle_block(&buf) && !ctx.data(|d| d.get_temp(toggle_id).unwrap_or(false));
+        let callout = callout_kind(&buf).map(str::to_ascii_uppercase);
+        let math = is_math_block(&buf);
+        if math {
+            ui.add_space(6.0); // 보기 화면 card()와 같은 위 여백
+        }
         let mut pre_click = None;
         let pre_pos = ui.cursor().min;
         if let Some((target_start, click_pos)) = self.pending_click_pos {
@@ -2723,6 +2874,7 @@ impl App {
                     &pal,
                     dark,
                     ppp_bits,
+                    folded,
                 );
                 let c = g.cursor_from_pos(click_pos - pre_pos);
                 let cr = CCursorRange::one(c);
@@ -2785,6 +2937,7 @@ impl App {
             }
         };
         let mut code_frame_rect = None;
+        let mut picked_callout: Option<&'static str> = None;
         let mut copy_inner_code: Option<String> = None;
 
         let take_focus = std::mem::take(&mut self.focus_editor);
@@ -2973,6 +3126,7 @@ impl App {
                             &pal,
                             dark,
                             ppp_bits,
+                            false,
                         )
                     };
                     egui::TextEdit::multiline(&mut buf)
@@ -2999,18 +3153,107 @@ impl App {
                     &pal,
                     dark,
                     ppp_bits,
+                    folded,
                 )
             };
-            egui::TextEdit::multiline(&mut buf)
-                .id(id)
-                .frame(Frame::NONE)
-                .margin(Margin::ZERO)
-                .desired_width(f32::INFINITY)
-                .desired_rows(1)
-                .lock_focus(true)
-                .hint_text(RichText::new(PLACEHOLDER).size(body).color(p.faint))
-                .layouter(&mut layouter)
-                .show(ui)
+            // 구분선·수식은 글자 한 줄 기본 높이보다 낮으니 최소 높이를 두지 않는다 (보기 화면 높이 그대로)
+            let hr_block = is_hr_line(&text[r.clone()]) && !text[r.clone()].contains('\n');
+            let compact = hr_block || math;
+            let mut text_edit = |ui: &mut egui::Ui| {
+                ui.scope(|ui| {
+                if compact {
+                    ui.spacing_mut().interact_size.y = 0.0;
+                }
+                // TextEdit은 자기 글꼴로 최소 한 줄 높이를 잡는다 → 작은 글꼴로 그 최소 높이를 없앤다
+                let te_font = if compact { FontId::proportional(1.0) } else { FontId::proportional(body) };
+                egui::TextEdit::multiline(&mut buf)
+                    .font(te_font)
+                    .id(id)
+                    .frame(Frame::NONE)
+                    .margin(Margin::ZERO)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(usize::from(!compact))
+                    .lock_focus(true)
+                    .hint_text(RichText::new(PLACEHOLDER).size(body).color(p.faint))
+                    .layouter(&mut layouter)
+                    .show(ui)
+                })
+                .inner
+            };
+            // 보기 화면과 같은 틀 안에서 편집한다 (알림 상자·접기·수식)
+            if let Some(kind) = callout.as_deref() {
+                let (accent, title) = md_alert_meta(alert_kind(kind), dark);
+                let framed = Frame::new()
+                    .fill(accent.gamma_multiply(0.08))
+                    .corner_radius(6)
+                    .inner_margin(Margin {
+                        left: 16,
+                        right: 14,
+                        top: 10,
+                        bottom: 10,
+                    })
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let hdr = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(title)
+                                        .font(FontId::new(body * 0.94, theme::bold()))
+                                        .color(accent),
+                                )
+                                .sense(Sense::click()),
+                            )
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text("알림 종류 바꾸기");
+                        if hdr.clicked() {
+                            header_interacted = true;
+                        }
+                        egui::Popup::menu(&hdr).show(|ui| {
+                            ui.set_width(150.0);
+                            for k in ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"] {
+                                let (c, label) = md_alert_meta(alert_kind(k), dark);
+                                if ui
+                                    .selectable_label(kind == k, RichText::new(label).color(c))
+                                    .clicked()
+                                {
+                                    picked_callout = Some(k);
+                                    header_interacted = true;
+                                }
+                            }
+                        });
+                        text_edit(ui)
+                    });
+                let r = framed.response.rect;
+                ui.painter().rect_filled(
+                    Rect::from_min_max(r.left_top(), pos2(r.left() + 3.0, r.bottom())),
+                    2.0,
+                    accent,
+                );
+                framed.inner
+            } else if is_toggle_block(&text[r.clone()]) || math {
+                let margin = if math {
+                    Margin::symmetric(16, 12)
+                } else {
+                    Margin::symmetric(12, 9)
+                };
+                let o = Frame::new()
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(8)
+                    .inner_margin(margin)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        text_edit(ui)
+                    })
+                    .inner;
+                if math {
+                    // card()의 아래 여백 6 + 보기 화면 항목 간격 6 (편집 영역은 항목 간격이 0)
+                    ui.add_space(12.0);
+                }
+                o
+            } else {
+                text_edit(ui)
+            }
         };
         if let Some(copied) = copy_inner_code {
             ctx.copy_text(copied);
@@ -3018,7 +3261,51 @@ impl App {
         }
         self.editor_galley_cache = galley_cache;
         if code_frame_rect.is_none() {
-            paint_list_markers(ui.painter(), &out.galley, out.galley_pos, &buf, body, &pal);
+            paint_block_decor(
+                ui.painter(),
+                &out.galley,
+                out.galley_pos,
+                &buf,
+                body,
+                &pal,
+                out.response.rect.width(),
+                folded,
+            );
+        }
+        // 접기 화살표 (제목 줄 왼쪽): 눌러서 펼치기/접기
+        if is_toggle_block(&buf) {
+            let row0 = out.galley.rows.first().map_or(Rect::NOTHING, |row| row.rect());
+            let arrow = Rect::from_center_size(
+                out.galley_pos + vec2(11.0, row0.center().y),
+                vec2(22.0, 22.0),
+            );
+            let resp = ui
+                .interact(arrow, id.with("toggle-arrow"), Sense::click())
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("클릭하여 펼치기/접기");
+            if resp.clicked() {
+                ctx.data_mut(|d| d.insert_temp(toggle_id, folded));
+                header_interacted = true;
+                ctx.request_repaint();
+            }
+        }
+        // 알림 종류 바꾸기: 제목 줄만 바꾸고 커서는 길이 차이만큼 옮긴다
+        if let Some(k) = picked_callout {
+            let l0 = buf.find('\n').unwrap_or(buf.len());
+            let new_l0 = format!("> [!{k}]");
+            let diff = char_len(&new_l0) as isize - char_len(&buf[..l0]) as isize;
+            buf.replace_range(..l0, &new_l0);
+            if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
+                if let Some(cr) = st.cursor.char_range() {
+                    let shift = |c: usize| (c as isize + diff).max(0) as usize;
+                    st.cursor.set_char_range(Some(CCursorRange::two(
+                        CCursor::new(shift(cr.primary.index.into())),
+                        CCursor::new(shift(cr.secondary.index.into())),
+                    )));
+                    egui::TextEdit::store_state(ctx, id, st);
+                }
+            }
+            self.focus_editor = true;
         }
         let mut sel = out.cursor_range.map(|c| c.as_sorted_char_range());
         let mut primary_cursor = out.cursor_range.map(|c| c.primary);
@@ -3076,8 +3363,20 @@ impl App {
                 self.drag_last_pos = None;
             }
         }
-        // 숨긴 ``` 줄이 지워지거나 바뀌었으면 그 부분만 되돌린다 (전체 선택 후 입력, 맨 앞 Backspace 등)
-        if code_frame_rect.is_some() {
+        // 구분선에 글자를 치면 구분선은 그대로 두고 아래 새 문단으로 옮긴다
+        let old_block = &text[r.clone()];
+        if is_hr_line(old_block) && !old_block.contains('\n') && buf != old_block {
+            if let Some(typed) = buf.strip_prefix(old_block).filter(|t| !t.starts_with('\n')) {
+                let fixed = format!("{old_block}\n\n{typed}");
+                let caret = char_len(&fixed);
+                buf = fixed;
+                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(caret))));
+                egui::TextEdit::store_state(ctx, id, st);
+            }
+        }
+        // 숨긴 ``` / $$ / :::toggle 줄이 지워지거나 바뀌었으면 그 부분만 되돌린다 (전체 선택 후 입력, 맨 앞 Backspace 등)
+        {
             if let Some((fixed, caret)) = keep_code_fences(&text[r.clone()], &buf) {
                 buf = fixed;
                 let cr = CCursorRange::one(CCursor::new(caret));
@@ -3108,15 +3407,15 @@ impl App {
         // 커서가 숨긴 목록 기호·코드 펜스 안으로 들어가면 보이는 자리로 옮긴다
         if let Some(s) = sel.clone().filter(|s| s.start == s.end && !self.ime_composing) {
             let c = s.start.0;
-            let to = match code_body_range(&buf) {
-                Some((a, b)) if code_frame_rect.is_some() => c.clamp(a, b),
-                _ => {
-                    let prev = self
-                        .last_sel
-                        .and_then(|(a, b)| (a == b && a >= base).then(|| a - base));
-                    clamp_hidden(&buf, c, prev)
-                }
-            };
+            // 코드·수식·접기: 숨긴 앞뒤 줄 안쪽으로 (접혀 있으면 제목 줄 안으로)
+            let c1 = fenced_body_range(&buf).map_or(c, |(a, b)| {
+                let b = if folded { a.max(char_len(buf.split('\n').next().unwrap_or(""))) } else { b };
+                c.clamp(a, b)
+            });
+            let prev = self
+                .last_sel
+                .and_then(|(a, b)| (a == b && a >= base).then(|| a - base));
+            let to = clamp_hidden(&buf, c1, prev);
             if to != c {
                 let cr = CCursorRange::one(CCursor::new(to));
                 let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
@@ -3125,6 +3424,19 @@ impl App {
                 sel = Some(cr.as_sorted_char_range());
                 primary_cursor = Some(cr.primary);
                 ctx.request_repaint();
+            }
+        }
+        // 링크 주소는 화면에 숨겨져 있으니 커서가 링크 위에 있으면 상태 표시줄에 보여준다
+        if let Some(c) = sel.as_ref().filter(|s| s.start == s.end).map(|s| s.start.0) {
+            let link = block_inline_spans(&buf)
+                .into_iter()
+                .find(|&([os, _, _, ce], k)| k == Inline::Link && c >= os && c <= ce);
+            if let Some(([_, _, be, ce], _)) = link {
+                let url: String = buf.chars().skip(be + 2).take(ce - 1 - (be + 2)).collect();
+                let msg = format!("링크: {url}  ·  Ctrl+K로 고치기");
+                if self.status != msg {
+                    self.status = msg;
+                }
             }
         }
         let has_range_sel = self
@@ -3868,7 +4180,7 @@ impl App {
                             .strip_suffix(":::")
                             .map_or(src.len(), str::len);
                         let inner = src.get(body_start.min(body_end)..body_end).unwrap_or("");
-                        let open_id = ui.make_persistent_id("toggle-open");
+                        let open_id = egui::Id::unique(("toggle-open", r.start)); // 편집 화면과 공유
                         let mut open = ui.data(|d| d.get_temp(open_id).unwrap_or(false));
                         Frame::new()
                             .fill(p.surface)
@@ -4476,6 +4788,7 @@ impl App {
             Dialog::Unsaved(_) => 5,
             Dialog::Image { .. } => 6,
             Dialog::Help => 7,
+            Dialog::Link { .. } => 8,
         };
         // 종류마다 다른 id: 같은 id면 이전 창 크기를 기억해 레이아웃이 늘어난다
         let modal = egui::Modal::new(egui::Id::unique(("dialog", kind)))
@@ -4679,6 +4992,48 @@ impl App {
                     Dialog::Image { url_tab, url, alt } => {
                         cancel |= modal_header(ui, p, theme::IMAGE, p.accent, "이미지 삽입");
                         self.image_modal(ui, ctx, p, url_tab, url, alt, &mut close, &mut cancel);
+                    }
+                    Dialog::Link { range, label, url, existing } => {
+                        let title = if *existing { "링크 고치기" } else { "링크 넣기" };
+                        cancel |= modal_header(ui, p, theme::TYPE, p.accent, title);
+                        let mut submit = false;
+                        Frame::new()
+                            .inner_margin(Margin::symmetric(20, 18))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 8.0;
+                                for (lbl, val, hint, iid) in [
+                                    ("보이는 글자", &mut *label, "링크 글자", "link-label"),
+                                    ("주소", &mut *url, "https://", "link-url"),
+                                ] {
+                                    ui.label(RichText::new(lbl).size(12.0).strong().color(p.muted));
+                                    let r = input(ui, p, egui::Id::unique(iid), val, hint, f32::INFINITY);
+                                    if iid == "link-url" && !ui.memory(|m| m.focused().is_some()) {
+                                        r.request_focus();
+                                    }
+                                    submit |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                                }
+                            });
+                        let mut unlink = false;
+                        footer(ui, p, None, |ui| {
+                            submit |= primary(ui, p, "적용").clicked();
+                            if *existing {
+                                unlink = ghost(ui, p, "링크 해제", None).clicked();
+                            }
+                            cancel |= ghost(ui, p, "취소", None).clicked();
+                        });
+                        if unlink {
+                            let (rg, l) = (*range, label.clone());
+                            self.apply_link(rg, &l, None);
+                            close = true;
+                        } else if submit {
+                            if url.trim().is_empty() {
+                                error = Some("주소를 입력하세요".into());
+                            } else {
+                                let (rg, l, u) = (*range, label.clone(), url.trim().to_string());
+                                self.apply_link(rg, &l, Some(&u));
+                                close = true;
+                            }
+                        }
                     }
                     Dialog::Help => {
                         cancel |=
@@ -6203,6 +6558,18 @@ pub(crate) fn inline_md_view_job(
     }
     buf.flush_pending();
     buf.job
+}
+
+// "NOTE" 같은 알림 상자 이름 → 종류 (모르는 이름은 Note)
+fn alert_kind(name: &str) -> pulldown_cmark::BlockQuoteKind {
+    use pulldown_cmark::BlockQuoteKind;
+    match name.to_ascii_uppercase().as_str() {
+        "TIP" => BlockQuoteKind::Tip,
+        "IMPORTANT" => BlockQuoteKind::Important,
+        "WARNING" => BlockQuoteKind::Warning,
+        "CAUTION" => BlockQuoteKind::Caution,
+        _ => BlockQuoteKind::Note,
+    }
 }
 
 fn md_alert_meta(kind: pulldown_cmark::BlockQuoteKind, dark: bool) -> (Color32, &'static str) {

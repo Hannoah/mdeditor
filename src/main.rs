@@ -876,13 +876,89 @@ fn code_body_range(block: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-// 편집 화면에서 숨기는 줄머리 기호(목록 "- ", "1. ", "- [ ] " / 제목 "## ")의 바이트 길이
+// 수식 블록 ($$ 줄로 감싼 여러 줄)
+fn is_math_block(block: &str) -> bool {
+    let t = block.trim_start();
+    t.split('\n').next().is_some_and(|l| l.trim() == "$$") && t.contains('\n')
+}
+
+// 접기 블록 (:::toggle 제목 … :::)
+fn is_toggle_block(block: &str) -> bool {
+    block.trim_start().starts_with(":::toggle")
+}
+
+// 알림 상자 종류 ("> [!NOTE]" → "NOTE")
+fn callout_kind(block: &str) -> Option<&str> {
+    let first = block.trim_start().split('\n').next()?.trim();
+    first.strip_prefix('>')?.trim().strip_prefix("[!")?.strip_suffix(']')
+}
+
+// 구분선 줄 (---, ***, ___)
+fn is_hr_line(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 3 && matches!(t.as_bytes()[0], b'-' | b'*' | b'_') && t.bytes().all(|b| b == t.as_bytes()[0])
+}
+
+// 각주 정의 줄 "[^이름]: " → (이름, 기호 바이트 길이)
+fn footnote_def(line: &str) -> Option<(&str, usize)> {
+    let rest = line.strip_prefix("[^")?;
+    let close = rest.find("]:")?;
+    let name = &rest[..close];
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| {
+        let m = 2 + close + 2;
+        (name, m + usize::from(line[m..].starts_with(' ')))
+    })
+}
+
+// 앞뒤 줄을 숨기는 블록(코드 ``` / 수식 $$ / 접기 :::toggle)의 보이는 문자 구간
+fn fenced_body_range(block: &str) -> Option<(usize, usize)> {
+    if let Some(r) = code_body_range(block) {
+        return Some(r);
+    }
+    let (start, close) = if is_math_block(block) {
+        (char_len(&block[..=block.find('\n')?]), "$$")
+    } else if is_toggle_block(block) {
+        let lead = block.len() - block.trim_start().len();
+        let after = &block[lead + ":::toggle".len()..];
+        let sp = after.len() - after.trim_start_matches(' ').len();
+        (char_len(&block[..lead + ":::toggle".len() + sp]), ":::")
+    } else {
+        return None;
+    };
+    let nl = block.find('\n').unwrap_or(block.len());
+    let last = block.rfind('\n').map_or(0, |i| i + 1);
+    let end = if last > nl && block[last..].trim() == close {
+        char_len(&block[..last - 1]).max(start)
+    } else {
+        char_len(block)
+    };
+    Some((start, end))
+}
+
+// 편집 화면에서 숨기는 줄머리 기호의 바이트 길이:
+// 목록 "- ", "1. ", "- [ ] " / 제목 "## " / 인용 "> " / 알림 상자 제목 줄·구분선(줄 전체) / 각주 "[^1]: " / 접기 ":::toggle "
 fn hidden_prefix(line: &str) -> usize {
     if let Some(m) = list_marker_bytes(line) {
         return m;
     }
     let t = line.trim_start();
-    heading_level(t).map_or(0, |lv| (line.len() - t.len() + lv + 1).min(line.len()))
+    let lead = line.len() - t.len();
+    if let Some(lv) = heading_level(t) {
+        return (lead + lv + 1).min(line.len());
+    }
+    if let Some(r) = t.strip_prefix('>') {
+        if callout_kind(t).is_some() {
+            return line.len();
+        }
+        return lead + 1 + usize::from(r.starts_with(' '));
+    }
+    if is_hr_line(line) || t.trim_end() == ":::" {
+        return line.len();
+    }
+    if let Some(r) = t.strip_prefix(":::toggle") {
+        return lead + ":::toggle".len() + (r.len() - r.trim_start_matches(' ').len());
+    }
+    footnote_def(line).map_or(0, |(_, m)| m)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -892,6 +968,8 @@ enum Inline {
     Mark,
     Strike,
     Italic,
+    Link,    // [글자](주소) — 글자만 보임
+    FootRef, // [^1] — "^"만 숨겨 [1] 배지로 보임
 }
 
 // 줄 안의 인라인 서식 (**굵게**, __굵게__, *기울임*, ~~취소선~~, ==강조==, `코드`):
@@ -920,6 +998,28 @@ fn inline_spans(line: &str) -> Vec<(usize, usize, usize, usize, Inline)> {
             }
             i += run;
             continue;
+        }
+        if b[i] == b'[' && !(i > 0 && b[i - 1] == b'!') {
+            if let Some(close) = line[i + 1..].find(']') {
+                let label = &line[i + 1..i + 1 + close];
+                let after = i + 2 + close; // "]" 다음
+                if let Some(name) = label.strip_prefix('^') {
+                    if !name.is_empty()
+                        && !name.contains(char::is_whitespace)
+                        && !line[after..].starts_with(':')
+                    {
+                        out.push((i + 1, i + 2, after - 1, after - 1, Inline::FootRef));
+                        i = after;
+                        continue;
+                    }
+                } else if !label.is_empty() && !label.contains('[') && line[after..].starts_with('(') {
+                    if let Some(rp) = line[after..].find(')') {
+                        out.push((i, i + 1, after - 1, after + rp + 1, Inline::Link));
+                        i = after + rp + 1;
+                        continue;
+                    }
+                }
+            }
         }
         let two = b.get(i..i + 2);
         if matches!(two, Some(b"**" | b"__" | b"~~" | b"==")) {
@@ -978,21 +1078,26 @@ fn inline_spans(line: &str) -> Vec<(usize, usize, usize, usize, Inline)> {
     out
 }
 
-// 줄에서 인라인 서식을 읽기 시작하는 바이트 위치 (md_job과 같은 규칙). 제목 줄은 인라인 서식 없음(None).
+// 줄에서 인라인 서식을 읽기 시작하는 바이트 위치 (md_job과 같은 규칙).
+// 제목·구분선·접기 제목/닫는 줄·알림 상자 제목 줄은 인라인 서식 없음(None).
 fn inline_start(line: &str) -> Option<usize> {
     let t = line.trim_start();
-    if heading_level(t).is_some() {
+    if heading_level(t).is_some()
+        || is_hr_line(line)
+        || t.starts_with(":::")
+        || (t.starts_with('>') && callout_kind(t).is_some())
+    {
         return None;
     }
-    if let Some(m) = list_marker_bytes(line) {
-        return Some(m);
-    }
-    Some(t.strip_prefix('>').map_or(0, |r| line.len() - t.len() + 1 + usize::from(r.starts_with(' '))))
+    Some(hidden_prefix(line))
 }
 
-// 블록 안 인라인 서식들의 문자 위치 [여는 시작, 내용 시작, 내용 끝, 닫는 끝]
-fn block_inline_spans(block: &str) -> Vec<[usize; 4]> {
+// 블록 안 인라인 서식들의 문자 위치 [여는 시작, 내용 시작, 내용 끝, 닫는 끝]과 종류. 코드·수식 블록은 없음.
+fn block_inline_spans(block: &str) -> Vec<([usize; 4], Inline)> {
     let mut out = Vec::new();
+    if is_math_block(block) {
+        return out;
+    }
     let (mut ci, mut fence) = (0, false);
     for line in block.split('\n') {
         let t = line.trim_start();
@@ -1003,8 +1108,8 @@ fn block_inline_spans(block: &str) -> Vec<[usize; 4]> {
             let base = ci + char_len(&line[..st]);
             let rest = &line[st..];
             let cc = |b: usize| base + char_len(&rest[..b]);
-            for (a, bs, be, e, _) in inline_spans(rest) {
-                out.push([cc(a), cc(bs), cc(be), cc(e)]);
+            for (a, bs, be, e, k) in inline_spans(rest) {
+                out.push(([cc(a), cc(bs), cc(be), cc(e)], k));
             }
         }
         ci += char_len(line) + 1;
@@ -1012,35 +1117,51 @@ fn block_inline_spans(block: &str) -> Vec<[usize; 4]> {
     out
 }
 
-// 편집 화면에서 숨긴 기호 구간(문자 위치): (시작, 끝, 줄머리 기호인지)
+// 편집 화면에서 숨긴 기호 구간(문자 위치): (시작, 끝, 줄머리 기호인지). 붙어 있는 줄머리 구간은 하나로 합친다.
 fn hidden_runs(block: &str) -> Vec<(usize, usize, bool)> {
-    let mut out = Vec::new();
-    let (mut ci, mut fence) = (0, false);
-    for line in block.split('\n') {
-        let t = line.trim_start();
-        let is_fence = t.starts_with("```") || t.starts_with("~~~");
-        if is_fence || fence {
-            fence ^= is_fence;
-        } else {
-            let pre = hidden_prefix(line);
-            if pre > 0 {
-                out.push((ci, ci + char_len(&line[..pre]), true));
+    let mut pre_runs: Vec<(usize, usize, bool)> = Vec::new();
+    if !is_math_block(block) {
+        let lines: Vec<&str> = block.split('\n').collect();
+        let (mut ci, mut fence) = (0, false);
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            let is_fence = t.starts_with("```") || t.starts_with("~~~");
+            if is_fence || fence {
+                fence ^= is_fence;
+            } else {
+                let pre = hidden_prefix(line);
+                if pre > 0 {
+                    let mut e = ci + char_len(&line[..pre]);
+                    if pre == line.len() && i + 1 < lines.len() {
+                        e += 1; // 줄 전체를 숨기면 줄바꿈도 함께 (접힌 줄에 커서가 서지 않게)
+                    }
+                    match pre_runs.last_mut() {
+                        Some(last) if last.1 == ci => last.1 = e,
+                        _ => pre_runs.push((ci, e, true)),
+                    }
+                }
             }
+            ci += char_len(line) + 1;
         }
-        ci += char_len(line) + 1;
     }
-    for [a, bs, be, e] in block_inline_spans(block) {
+    let mut out = pre_runs;
+    for ([a, bs, be, e], _) in block_inline_spans(block) {
         out.push((a, bs, false));
-        out.push((be, e, false));
+        if be < e {
+            out.push((be, e, false));
+        }
     }
     out
 }
 
 // 편집 화면에서 커서가 갈 수 있는 블록 안 범위 (숨긴 줄머리 기호·코드 펜스 바깥)
 fn visible_bounds(block: &str) -> (usize, usize) {
-    code_body_range(block).unwrap_or_else(|| {
-        let first = block.split('\n').next().unwrap_or("");
-        (char_len(&first[..hidden_prefix(first)]), char_len(block))
+    fenced_body_range(block).unwrap_or_else(|| {
+        let start = hidden_runs(block)
+            .iter()
+            .find(|r| r.2 && r.0 == 0)
+            .map_or(0, |r| r.1);
+        (start, char_len(block))
     })
 }
 
@@ -1076,7 +1197,15 @@ fn clamp_hidden(s: &str, c: usize, prev: Option<usize>) -> usize {
 // 숨긴 인라인 기호 옆 Backspace/Delete: 화면에 보이는 이웃 글자를 지운다 (내용이 한 글자뿐이면 서식째).
 // Some(Ok((블록, 커서))) = 직접 처리, Some(Err(c)) = 커서만 c로 옮기고 기본 동작에 맡김.
 fn delete_near_hidden(block: &str, c: usize, back: bool) -> Option<Result<(String, usize), usize>> {
-    for [os, bs, be, ce] in block_inline_spans(block) {
+    for ([os, bs, be, ce], kind) in block_inline_spans(block) {
+        if kind == Inline::FootRef {
+            // [^1] 배지는 한 덩어리: 바로 뒤 Backspace·바로 앞 Delete로 통째로 지운다
+            let (whole_a, whole_e) = (os - 1, ce + 1);
+            if (back && c == whole_e) || (!back && c == whole_a) {
+                return Some(Ok((replace_range(block, (whole_a, whole_e), ""), whole_a)));
+            }
+            continue;
+        }
         let (at_start, at_end) = (c == os || c == bs, c == be || c == ce);
         let target = match (back, at_start, at_end) {
             (true, _, true) => be - 1,  // 뒤에서 Backspace → 내용 마지막 글자
@@ -1102,8 +1231,38 @@ fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)> {
     if m == 0 || c != ls + char_len(&line[..m]) {
         return None;
     }
+    let t = line.trim_start();
+    let lb = byte_idx(s, ls);
+    let bstart = s[..lb].rfind("\n\n").map_or(0, |i| i + 2);
+    let bend = s[lb..].find("\n\n").map_or(s.len(), |i| lb + i);
+    if t.starts_with('>') {
+        // 인용·알림 상자의 첫 줄 맨 앞 → 블록 전체를 일반 문단으로 / 그 밖의 줄 → 윗줄과 합치기
+        let block = &s[bstart..bend];
+        let after_title = callout_kind(block).is_some() && !s[bstart..lb.saturating_sub(1)].contains('\n');
+        if lb == bstart || after_title {
+            let mut lines: Vec<&str> = block.split('\n').collect();
+            if callout_kind(block).is_some() {
+                lines.remove(0);
+            }
+            let plain: Vec<&str> = lines
+                .iter()
+                .map(|l| l.trim_start().strip_prefix('>').map_or(*l, |r| r.strip_prefix(' ').unwrap_or(r)))
+                .collect();
+            let out = format!("{}{}{}", &s[..bstart], plain.join("\n"), &s[bend..]);
+            return Some((out, char_len(&s[..bstart])));
+        }
+        return Some((replace_range(s, (ls - 1, c), ""), ls - 1));
+    }
+    if t.starts_with(":::toggle") {
+        // 접기 제목 맨 앞 → 접기를 풀어 일반 문단으로 (닫는 ::: 줄도 함께 지움)
+        let block = &s[bstart..bend];
+        let body = block.trim_end().strip_suffix(":::").map_or(block, |b| b.trim_end_matches('\n'));
+        let body = body.get(block.len() - block.trim_start().len() + hidden_prefix(t)..).unwrap_or("");
+        let out = format!("{}{}{}", &s[..bstart], body, &s[bend..]);
+        return Some((out, char_len(&s[..bstart])));
+    }
     if list_marker_bytes(line).is_none() {
-        return Some((replace_range(s, (ls, c), ""), ls)); // 제목 → 문단
+        return Some((replace_range(s, (ls, c), ""), ls)); // 제목·구분선·각주 → 문단
     }
     if line.starts_with(' ') {
         return indent_list(s, (c, c), true).map(|(t, sel)| (t, sel.0));
@@ -1119,7 +1278,7 @@ fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)> {
 // 코드 블록 편집이 숨긴 ``` 줄을 건드렸으면 그 부분만 되돌린다 (코드 부분의 변경은 유지).
 // 반환: (고친 블록, 커서 문자 위치). 펜스가 멀쩡하면 None.
 fn keep_code_fences(old: &str, new: &str) -> Option<(String, usize)> {
-    let (s0, e0) = code_body_range(old)?;
+    let (s0, e0) = fenced_body_range(old)?;
     let (p, s) = (byte_idx(old, s0), old.len() - byte_idx(old, e0));
     if new.len() >= p + s && new.starts_with(&old[..p]) && new.ends_with(&old[old.len() - s..]) {
         return None;
@@ -2046,6 +2205,13 @@ enum Dialog {
         url_tab: bool,
         url: String,
         alt: String,
+    },
+    // 링크 넣기·고치기 (Ctrl+K). range: 바꿀 문서 문자 구간, existing: 이미 있는 링크를 고치는 중
+    Link {
+        range: Sel,
+        label: String,
+        url: String,
+        existing: bool,
     },
     Help,
 }
@@ -3421,6 +3587,53 @@ impl App {
         });
     }
 
+    // 커서가 링크 안이면 그 링크를, 아니면 선택한 글자를 링크로 만드는 대화상자를 연다
+    fn open_link_dialog(&mut self, ctx: &egui::Context) {
+        let sel = self.cursor(ctx);
+        let (Some(doc), r) = (self.doc(), self.active_block()) else {
+            return;
+        };
+        let text = &doc.text;
+        let found = r.and_then(|r| {
+            let base = char_len(&text[..r.start]);
+            let blk = &text[r];
+            block_inline_spans(blk)
+                .into_iter()
+                .find(|&([os, _, _, ce], k)| {
+                    k == Inline::Link && sel.0 >= base + os && sel.1 <= base + ce
+                })
+                .map(|([os, bs, be, ce], _)| {
+                    let label: String = blk.chars().skip(bs).take(be - bs).collect();
+                    let url: String = blk.chars().skip(be + 2).take(ce - 1 - (be + 2)).collect();
+                    ((base + os, base + ce), label, url)
+                })
+        });
+        self.dialog = Some(match found {
+            Some((range, label, url)) => Dialog::Link { range, label, url, existing: true },
+            None => Dialog::Link {
+                range: sel,
+                label: text[byte_idx(text, sel.0)..byte_idx(text, sel.1)].to_string(),
+                url: String::new(),
+                existing: false,
+            },
+        });
+    }
+
+    // 링크 대화상자 결과 반영: url이 None이면 링크 해제(글자만 남김)
+    fn apply_link(&mut self, range: Sel, label: &str, url: Option<&str>) {
+        let Some(doc) = self.doc() else {
+            return;
+        };
+        let md = match url {
+            Some(u) => format!("[{}]({u})", if label.is_empty() { u } else { label }),
+            None => label.to_string(),
+        };
+        let t = replace_range(&doc.text, range, &md);
+        let caret = range.0 + char_len(&md);
+        self.set_text(t, (caret, caret));
+        self.focus_editor = true;
+    }
+
     fn format(&mut self, ctx: &egui::Context, f: Fmt) {
         if self.active_block().is_none() && self.block_sel.is_none() {
             if matches!(f, Fmt::Clear) {
@@ -3429,6 +3642,8 @@ impl App {
             self.append_block();
         }
         match f {
+            // 링크는 주소가 화면에 안 보이므로 대화상자로 넣고 고친다
+            Fmt::Wrap("[", _, _) => self.open_link_dialog(ctx),
             Fmt::Wrap(pre, suf, ph) => {
                 self.edit(ctx, |t, sel| Some(wrap_selection(t, sel, pre, suf, ph)))
             }
@@ -3995,7 +4210,7 @@ impl App {
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
             return false;
         };
-        if code_body_range(&doc.text[r]).is_some() {
+        if code_body_range(&doc.text[r.clone()]).is_some() || is_math_block(&doc.text[r]) {
             return false;
         }
         let sel = self.cursor(ctx);
@@ -4171,8 +4386,8 @@ impl App {
         }
         .cloned();
         let Some(t) = target else {
-            // 문서 맨 끝 코드 블록의 마지막 줄에서 ↓: 아래에 새 문단을 만들고 빠져나간다 (닫는 ```는 숨겨져 있음)
-            if !up && code_body_range(&doc.text[r.clone()]).is_some() {
+            // 문서 맨 끝 코드·수식·접기 블록의 마지막 줄에서 ↓: 아래에 새 문단을 만들고 빠져나간다 (닫는 줄은 숨겨져 있음)
+            if !up && fenced_body_range(&doc.text[r.clone()]).is_some() {
                 self.split(r.end);
                 return true;
             }
@@ -4954,7 +5169,14 @@ impl App {
                 }
                 if k(cmd, Key::Enter) {
                     self.context_menu = None;
-                    self.toggle_todo(ctx);
+                    // 코드·수식·접기 블록 안에서는 할 일 대신 블록 바로 아래 새 문단으로 (닫는 줄은 숨겨져 있음)
+                    let fenced = self.active_block().filter(|r| {
+                        self.doc().is_some_and(|d| fenced_body_range(&d.text[r.clone()]).is_some())
+                    });
+                    match fenced {
+                        Some(r) => self.split(r.end),
+                        None => self.toggle_todo(ctx),
+                    }
                     return;
                 }
                 if k(cmd, Key::E) {
@@ -5759,6 +5981,41 @@ mod tests {
         assert_eq!(delete_near_hidden("plain", 2, true), None);
         // 제목 맨 앞 Backspace → 일반 문단
         assert_eq!(backspace_list_marker("## 제목", 3), Some(("제목".into(), 0)));
+
+        // 편집 화면에서 숨기는 줄머리: 인용·알림 상자 제목(줄 전체)·구분선(줄 전체)·각주 정의·접기 제목
+        assert_eq!(hidden_prefix("> 인용"), 2);
+        assert_eq!(hidden_prefix("> [!NOTE]"), "> [!NOTE]".len());
+        assert_eq!(hidden_prefix("---"), 3);
+        assert_eq!(hidden_prefix("[^1]: 설명"), 6);
+        assert_eq!(hidden_prefix(":::toggle 제목"), 10);
+        assert_eq!(hidden_prefix("보통 문단"), 0);
+        // 링크는 글자만, 각주 참조는 "^"만 숨긴다
+        let line = "a [구글](https://g.com) b[^1]";
+        let spans: Vec<_> = inline_spans(line).into_iter().map(|t| t.4).collect();
+        assert_eq!(spans, [Inline::Link, Inline::FootRef]);
+        let s = "x [ab](u) y";
+        assert_eq!(clamp_hidden(s, 3, Some(2)), 4, "링크 앞 [ 안에 머물지 않는다");
+        assert_eq!(clamp_hidden(s, 6, Some(5)), 10, "b 뒤에서 → 는 숨긴 ](u)를 건너 다음 글자 뒤로");
+        assert_eq!(delete_near_hidden("a[^1] b", 5, true), Some(Ok(("a b".into(), 1))));
+        // 인용·알림 상자·접기 맨 앞 Backspace (노션식)
+        assert_eq!(backspace_list_marker("> a\n> b", 2), Some(("a\nb".into(), 0)));
+        assert_eq!(backspace_list_marker("> a\n> b", 6), Some(("> ab".into(), 3)));
+        assert_eq!(
+            backspace_list_marker("> [!NOTE]\n> 내용", 12),
+            Some(("내용".into(), 0))
+        );
+        assert_eq!(
+            backspace_list_marker(":::toggle 제목\n안\n:::", 10),
+            Some(("제목\n안".into(), 0))
+        );
+        // 수식·접기 블록도 숨긴 앞뒤 줄을 지킨다
+        assert_eq!(fenced_body_range("$$\nE=1\n$$"), Some((3, 6)));
+        assert_eq!(fenced_body_range(":::toggle 제목\n안\n:::"), Some((10, 14)));
+        assert_eq!(
+            keep_code_fences("$$\nE=1\n$$", "x"),
+            Some(("$$\nx\n$$".into(), 4))
+        );
+        assert_eq!(visible_bounds("> [!NOTE]\n> 내용"), (12, 14));
         // 내용 맨 앞 Backspace: 하위 → 내어쓰기, 첫 항목 → 문단, 그 외 → 윗줄과 합치기
         assert_eq!(backspace_list_marker("- a\n  - b", 8), Some(("- a\n- b".into(), 6)));
         assert_eq!(backspace_list_marker("- a", 2), Some(("a".into(), 0)));
@@ -7204,7 +7461,7 @@ mod tests {
         assert_eq!(h.state().current.as_deref(), Some("sub/other.md"));
         assert!(h.query_by_label("열림 확인").is_some());
 
-        // 3. 원래 탭으로 돌아가 $$ 닫는 줄에서 Enter 시 블록 탈출 확인
+        // 3. 원래 탭으로 돌아가 수식 블록 안 Ctrl+Enter로 바로 아래 새 문단 (편집 중엔 $$ 줄이 숨겨져 있음)
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
         h.run_steps(2);
         let math_start = h
@@ -7218,16 +7475,12 @@ mod tests {
             .clone();
         h.state_mut().go(math_start.start, math_start.end);
         h.run_steps(2);
-        h.key_press(egui::Key::Enter);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
         h.run_steps(2);
         h.event(egui::Event::Text("수식 다음 줄".into()));
         h.run_steps(2);
-        assert!(h
-            .state()
-            .doc()
-            .unwrap()
-            .text
-            .contains("$$\na^2 + b^2 = c^2\n$$\n\n수식 다음 줄"));
+        let t = h.state().doc().unwrap().text.clone();
+        assert!(t.contains("$$\na^2 + b^2 = c^2\n$$\n\n수식 다음 줄"), "{t}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
