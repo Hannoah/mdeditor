@@ -787,7 +787,7 @@ pub(crate) fn md_job(
     p: &Pal,
     dark: bool,
 ) -> egui::text::LayoutJob {
-    md_job_ex(ctx, text, body, p, dark, f32::INFINITY, false)
+    md_job_ex(ctx, text, body, p, dark, f32::INFINITY, false, "")
 }
 
 // wrap: 줄바꿈 폭(수식 가운데 정렬용), folded: 접기 블록이 접혀 있는지
@@ -799,6 +799,7 @@ fn md_job_ex(
     dark: bool,
     wrap: f32,
     folded: bool,
+    scheme: &str,
 ) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
     let fmt = |size: f32, family: FontFamily, color: Color32| TextFormat {
@@ -935,6 +936,10 @@ fn md_job_ex(
         } else if is_hr_line(bare) {
             // 구분선: 글자는 숨기고 paint_block_decor가 선을 긋는다. 줄 높이는 보기 화면과 같게
             hide_prefix(&mut job, line, 0.0, HR_ROW_H);
+        } else if let Some(url) = image_line(bare) {
+            // 이미지: 원문은 숨기고 그 줄 높이를 보기 화면의 이미지 크기로 — paint_block_decor가 이미지를 그린다
+            let h = image_fit(ctx, scheme, url, wrap).0.y;
+            hide_prefix(&mut job, line, 0.0, h);
         } else if let (Some(len), Some((depth, _))) =
             (list_marker_bytes(bare), list_item_step(&mut list_stack, bare))
         {
@@ -978,6 +983,25 @@ const TOGGLE_TITLE_X: f32 = 34.0; // 화살표 버튼(여백 포함) + 간격 7 
 const TOGGLE_INDENT: f32 = 22.0;
 const QUOTE_X: f32 = 14.0;
 const HR_ROW_H: f32 = 15.0; // 여백 4 + 선 1 + 보기 화면 항목 간격 6 + 여백 4
+
+// 보기 화면(egui_commonmark)과 같은 규칙으로 이미지 크기·텍스처: 원래 크기, 폭을 넘으면 줄인다. 읽는 중이면 24×24
+fn image_fit(
+    ctx: &egui::Context,
+    scheme: &str,
+    url: &str,
+    width: f32,
+) -> (egui::Vec2, Option<egui::TextureId>) {
+    let uri = if url.contains("://") || url.starts_with("data:") {
+        url.to_string()
+    } else {
+        format!("{scheme}{url}")
+    };
+    let avail = vec2(if width.is_finite() { width } else { 1e6 }, f32::INFINITY);
+    let img = egui::Image::from_uri(uri).fit_to_original_size(1.0).max_width(avail.x);
+    let tex = img.load_for_size(ctx, avail).ok();
+    let size = img.calc_size(avail, tex.as_ref().and_then(|t| t.size()));
+    (size, tex.and_then(|t| t.texture_id()))
+}
 
 fn footnote_label_w(ctx: &egui::Context, name: &str, body: f32) -> f32 {
     let font = FontId::new(body * 0.85, FontFamily::Monospace);
@@ -1025,6 +1049,7 @@ fn paint_block_decor(
     p: &Pal,
     width: f32,
     folded: bool,
+    scheme: &str,
 ) {
     use egui::text::CCursor;
     if is_math_block(text) {
@@ -1071,6 +1096,20 @@ fn paint_block_decor(
         } else if is_hr_line(line) {
             let y = origin.y + row(ci).top() + 4.5;
             painter.hline(origin.x..=origin.x + width, y, Stroke::new(1.0, p.border));
+        } else if let Some(url) = image_line(line) {
+            let (size, tex) = image_fit(painter.ctx(), scheme, url, width);
+            let rect = Rect::from_min_size(origin + vec2(0.0, row(ci).top()), size);
+            match tex {
+                Some(id) => {
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    painter.image(id, rect, uv, Color32::WHITE);
+                }
+                None => {
+                    painter.rect_filled(rect, 4.0, p.surface);
+                }
+            }
+            // 노션처럼 선택된 이미지는 테두리로 표시 (원문 대신)
+            painter.rect_stroke(rect.expand(2.0), 4.0, Stroke::new(2.0, p.accent.gamma_multiply(0.6)), egui::StrokeKind::Outside);
         } else if is_quote {
             let (top, bottom) = (row(ci).top(), row(ci + line.chars().count()).bottom());
             quote_rows = Some(quote_rows.map_or((top, bottom), |q| (q.0, bottom)));
@@ -1124,6 +1163,7 @@ fn editor_galley_cached(
     dark: bool,
     ppp_bits: u32,
     folded: bool,
+    scheme: &str,
 ) -> std::sync::Arc<egui::Galley> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1132,11 +1172,12 @@ fn editor_galley_cached(
     s.hash(&mut hasher);
     let key = (hasher.finish(), body.to_bits(), wrap.to_bits(), dark);
     if let Some((ch, cb, cw, cd, g)) = cache.as_ref() {
-        if (*ch, *cb, *cw, *cd) == key && g.text() == s {
+        // 이미지는 읽어 들이는 동안 크기가 바뀌므로 캐시하지 않는다
+        if (*ch, *cb, *cw, *cd) == key && g.text() == s && !s.contains("![") {
             return std::sync::Arc::clone(g);
         }
     }
-    let mut job = md_job_ex(ctx, s, body, pal, dark, wrap, folded);
+    let mut job = md_job_ex(ctx, s, body, pal, dark, wrap, folded, scheme);
     job.wrap.max_width = wrap;
     let g = ctx.fonts_mut(|f| f.layout_job(job));
     *cache = Some((key.0, key.1, key.2, key.3, std::sync::Arc::clone(&g)));
@@ -2821,6 +2862,7 @@ impl App {
         let dark = self.dark;
         let ppp_bits = ctx.pixels_per_point().to_bits();
         let mut galley_cache = self.editor_galley_cache.take();
+        let scheme = self.doc_scheme().to_string();
         if !self.raw_table_mode {
             if let Some(tbl) = parse_md_table(&buf) {
                 self.pending_click_pos = None;
@@ -2875,6 +2917,7 @@ impl App {
                     dark,
                     ppp_bits,
                     folded,
+                    &scheme,
                 );
                 let c = g.cursor_from_pos(click_pos - pre_pos);
                 let cr = CCursorRange::one(c);
@@ -3127,6 +3170,7 @@ impl App {
                             dark,
                             ppp_bits,
                             false,
+                            &scheme,
                         )
                     };
                     egui::TextEdit::multiline(&mut buf)
@@ -3154,6 +3198,7 @@ impl App {
                     dark,
                     ppp_bits,
                     folded,
+                    &scheme,
                 )
             };
             // 구분선·수식은 글자 한 줄 기본 높이보다 낮으니 최소 높이를 두지 않는다 (보기 화면 높이 그대로)
@@ -3270,6 +3315,7 @@ impl App {
                 &pal,
                 out.response.rect.width(),
                 folded,
+                &scheme,
             );
         }
         // 접기 화살표 (제목 줄 왼쪽): 눌러서 펼치기/접기
@@ -3363,9 +3409,12 @@ impl App {
                 self.drag_last_pos = None;
             }
         }
-        // 구분선에 글자를 치면 구분선은 그대로 두고 아래 새 문단으로 옮긴다
+        // 구분선·이미지에 글자를 치면 그대로 두고 아래 새 문단으로 옮긴다
         let old_block = &text[r.clone()];
-        if is_hr_line(old_block) && !old_block.contains('\n') && buf != old_block {
+        if (is_hr_line(old_block) || image_line(old_block).is_some())
+            && !old_block.contains('\n')
+            && buf != old_block
+        {
             if let Some(typed) = buf.strip_prefix(old_block).filter(|t| !t.starts_with('\n')) {
                 let fixed = format!("{old_block}\n\n{typed}");
                 let caret = char_len(&fixed);
@@ -3431,12 +3480,14 @@ impl App {
             let link = block_inline_spans(&buf)
                 .into_iter()
                 .find(|&([os, _, _, ce], k)| k == Inline::Link && c >= os && c <= ce);
-            if let Some(([_, _, be, ce], _)) = link {
+            let msg = if let Some(([_, _, be, ce], _)) = link {
                 let url: String = buf.chars().skip(be + 2).take(ce - 1 - (be + 2)).collect();
-                let msg = format!("링크: {url}  ·  Ctrl+K로 고치기");
-                if self.status != msg {
-                    self.status = msg;
-                }
+                Some(format!("링크: {url}  ·  Ctrl+K로 고치기"))
+            } else {
+                image_line(&buf).map(|u| format!("이미지: {u}  ·  Backspace로 지우기"))
+            };
+            if let Some(msg) = msg.filter(|m| *m != self.status) {
+                self.status = msg;
             }
         }
         let has_range_sel = self

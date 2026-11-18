@@ -935,6 +935,12 @@ fn fenced_body_range(block: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
+// 이미지만 있는 줄 "![설명](경로)" → 경로. 편집 화면에서 원문 대신 이미지를 그린다.
+fn image_line(line: &str) -> Option<&str> {
+    let (alt, url) = line.trim().strip_prefix("![")?.strip_suffix(')')?.split_once("](")?;
+    (!alt.contains(']') && !url.contains([')', '\n']) && !url.trim().is_empty()).then(|| url.trim())
+}
+
 // 편집 화면에서 숨기는 줄머리 기호의 바이트 길이:
 // 목록 "- ", "1. ", "- [ ] " / 제목 "## " / 인용 "> " / 알림 상자 제목 줄·구분선(줄 전체) / 각주 "[^1]: " / 접기 ":::toggle "
 fn hidden_prefix(line: &str) -> usize {
@@ -952,7 +958,7 @@ fn hidden_prefix(line: &str) -> usize {
         }
         return lead + 1 + usize::from(r.starts_with(' '));
     }
-    if is_hr_line(line) || t.trim_end() == ":::" {
+    if is_hr_line(line) || t.trim_end() == ":::" || image_line(line).is_some() {
         return line.len();
     }
     if let Some(r) = t.strip_prefix(":::toggle") {
@@ -7482,6 +7488,61 @@ mod tests {
         let t = h.state().doc().unwrap().text.clone();
         assert!(t.contains("$$\na^2 + b^2 = c^2\n$$\n\n수식 다음 줄"), "{t}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_block_edits_like_view() {
+        use egui_kittest::kittest::Queryable;
+        assert_eq!(image_line("![그림](images/p.png)"), Some("images/p.png"));
+        assert_eq!(image_line("글 ![a](b)"), None);
+        assert_eq!(hidden_prefix("![a](b.png)"), "![a](b.png)".len());
+
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_image_edit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        image::RgbaImage::from_pixel(120, 60, image::Rgba([200, 30, 30, 255]))
+            .save(dir.join("images/p.png"))
+            .unwrap();
+        let img = "![그림](images/p.png)";
+        let file = dir.join("img.md");
+        std::fs::write(&file, format!("앞 문단\n\n{img}\n\n뒤 문단\n")).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        let settle = |h: &mut egui_kittest::Harness<'_, App>| {
+            for _ in 0..40 {
+                h.step();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        settle(&mut h);
+        let view_y = h.get_by_label("뒤 문단").rect().top();
+
+        // 이미지 블록 편집: 원문 대신 같은 크기의 이미지 → 아래 문단 위치가 그대로
+        let start = "앞 문단\n\n".len();
+        h.state_mut().go(start, start + img.len());
+        settle(&mut h);
+        assert_eq!(h.state().active, Some(start));
+        assert!(h.query_by_label(img).is_none());
+        let edit_y = h.get_by_label("뒤 문단").rect().top();
+        assert!((edit_y - view_y).abs() < 1.0, "view {view_y} edit {edit_y}");
+        assert!(h.state().status.starts_with("이미지: images/p.png"), "{}", h.state().status);
+
+        // 글자를 치면 이미지는 그대로, 아래 새 문단으로
+        h.input_mut().events.push(egui::Event::Text("가".into()));
+        settle(&mut h);
+        assert!(h.state().doc().unwrap().text.contains(&format!("{img}\n\n가")));
+
+        // 이미지 위 Backspace → 노션처럼 이미지 블록을 통째로 지운다
+        h.state_mut().go(start, start + img.len());
+        settle(&mut h);
+        h.key_press(egui::Key::Backspace);
+        settle(&mut h);
+        let text = &h.state().doc().unwrap().text;
+        assert!(!text.contains(img), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
