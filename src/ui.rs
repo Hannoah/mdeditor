@@ -810,7 +810,8 @@ fn md_job_ex(
     };
     let mut job = LayoutJob::default();
     let trimmed = text.trim_start();
-    if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+    // ``` 한 줄만 있으면 아직 여는 줄을 치는 중 — 글자 그대로 보인다 (Space/Enter로 코드 블록이 된다)
+    if (trimmed.starts_with("```") || trimmed.starts_with("~~~")) && text.contains('\n') {
         let code_size = body * 0.86;
         let code_lh = code_size * 1.55;
         let fence = &trimmed[..3];
@@ -2969,7 +2970,7 @@ impl App {
         }
         let code_meta = {
             let bt_init = buf.trim_start();
-            if bt_init.starts_with("```") || bt_init.starts_with("~~~") {
+            if (bt_init.starts_with("```") || bt_init.starts_with("~~~")) && bt_init.contains('\n') {
                 let lead = buf.len() - bt_init.len();
                 let fence = bt_init[..3].to_string();
                 let first_nl_rel = bt_init.find('\n').unwrap_or(bt_init.len());

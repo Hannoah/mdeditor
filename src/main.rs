@@ -866,7 +866,10 @@ fn code_body_range(block: &str) -> Option<(usize, usize)> {
     }
     let fence = &t[..3];
     let nl = block.find('\n')?;
-    let start = char_len(&block[..=nl]);
+    // 목록 안 코드 블록("  ```")은 본문도 같은 만큼 들여써 있다 → 그 들여쓰기 뒤부터
+    let lead = block.len() - t.len();
+    let ind = block[nl + 1..].bytes().take(lead).take_while(|&b| b == b' ').count();
+    let start = char_len(&block[..=nl]) + ind;
     let last = block.rfind('\n').map_or(0, |i| i + 1);
     let end = if last > nl && block[last..].trim_start().starts_with(fence) {
         char_len(&block[..last - 1]).max(start)
@@ -1285,6 +1288,14 @@ fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)> {
 // 반환: (고친 블록, 커서 문자 위치). 펜스가 멀쩡하면 None.
 fn keep_code_fences(old: &str, new: &str) -> Option<(String, usize)> {
     let (s0, e0) = fenced_body_range(old)?;
+    // 빈 블록("```\n```")에서 친 글자는 닫는 줄 앞에 붙는다 → 닫는 ```를 다음 줄로 돌려놓는다
+    let close = &old[old.rfind('\n').map_or(old.len(), |i| i + 1)..];
+    if s0 == e0 && ["```", "~~~", "$$", ":::"].contains(&close.trim()) && new.ends_with(close) {
+        let at = new.len() - close.len();
+        if at > byte_idx(old, s0) && !new[..at].ends_with('\n') && new.starts_with(&old[..byte_idx(old, s0)]) {
+            return Some((format!("{}\n{}", &new[..at], close), char_len(&new[..at])));
+        }
+    }
     let (p, s) = (byte_idx(old, s0), old.len() - byte_idx(old, e0));
     if new.len() >= p + s && new.starts_with(&old[..p]) && new.ends_with(&old[old.len() - s..]) {
         return None;
@@ -1486,7 +1497,35 @@ fn smart_enter(s: &str, cursor: usize) -> Option<(String, usize)> {
     }
     let ins = format!("\n{indent}{next}");
     let out = replace_range(s, (cursor, cursor), &ins);
-    Some((out, cursor + char_len(&ins)))
+    Some(renumber_block_at(&out, cursor + char_len(&ins)))
+}
+
+// 커서(문자 위치)가 있는 블록의 번호 목록을 다시 매긴다. 커서는 같은 줄·같은 글자 뒤에 남는다.
+fn renumber_block_at(s: &str, c: usize) -> (String, usize) {
+    let b = byte_idx(s, c);
+    let bs = s[..b].rfind("\n\n").map_or(0, |i| i + 2);
+    let be = s[b..].find("\n\n").map_or(s.len(), |i| b + i);
+    let mut lines: Vec<String> = s[bs..be].split('\n').map(str::to_string).collect();
+    let li = s[bs..b].matches('\n').count();
+    let line_start = s[..b].rfind('\n').map_or(0, |i| i + 1).max(bs);
+    let from_end = char_len(&lines[li]) - char_len(&s[line_start..b]);
+    renumber_lists(&mut lines);
+    let caret = char_len(&s[..bs])
+        + lines[..li].iter().map(|l| char_len(l) + 1).sum::<usize>()
+        + char_len(&lines[li])
+        - from_end;
+    (format!("{}{}{}", &s[..bs], lines.join("\n"), &s[be..]), caret)
+}
+
+// 구분선·이미지: 글자를 넣을 수 없는 한 덩어리 블록
+fn is_atomic_block(b: &str) -> bool {
+    !b.contains('\n') && (is_hr_line(b) || image_line(b).is_some())
+}
+
+// 앞뒤 블록과 글자를 합치면 구조가 깨지는 블록 (코드·수식·접기·표·구분선·이미지)
+fn is_unmergeable_block(b: &str) -> bool {
+    let t = b.trim_start();
+    is_atomic_block(b) || ["```", "~~~", "$$", ":::toggle", "|"].iter().any(|p| t.starts_with(p))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -4141,9 +4180,60 @@ impl App {
             self.split(ba);
             return true;
         }
-        let b = self.block_byte_of(&r, doc, sel.0);
+        let mut text = text;
+        let mut b = self.block_byte_of(&r, doc, sel.0);
+        let block = &text[r.clone()];
+        // 제목·인용·알림 상자·각주의 내용 맨 앞 Enter → 블록은 그대로 두고 위에 빈 문단 (노션식)
+        let vis0 = visible_bounds(block).0;
+        if vis0 > 0
+            && list_marker_bytes(block).is_none()
+            && char_len(&text[r.start..b]) == vis0
+            && !text[b..r.end].trim().is_empty()
+        {
+            self.split(r.start);
+            return true;
+        }
         let ls = text[..b].rfind('\n').map_or(0, |i| i + 1).max(r.start);
         let le = text[b..].find('\n').map_or(text.len(), |i| b + i);
+        // **굵게**·[링크](주소)·`코드` 안에서 Enter → 기호를 닫고 다시 열어 두 쪽 모두 서식 유지
+        let cl = b - ls;
+        let span = inline_spans(&text[ls..le])
+            .into_iter()
+            .find(|s| s.0 < cl && cl < s.3 && s.4 != Inline::FootRef);
+        if let Some((os, bs, be, ce, _)) = span {
+            if cl <= bs {
+                b = ls + os;
+            } else if cl >= be {
+                b = ls + ce;
+            } else {
+                let (open, close) = (text[ls + os..ls + bs].to_string(), text[ls + be..ls + ce].to_string());
+                text.insert_str(b, &format!("{close}{open}"));
+                b += close.len();
+            }
+        }
+        let sel = (char_len(&text[..b]), char_len(&text[..b]));
+        let le = ls + text[ls..].find('\n').unwrap_or(text.len() - ls);
+        let line = &text[ls..le];
+        let r_end = r.end + (text.len() - doc.text.len());
+        // 인용·알림 상자 줄 중간 Enter → 인용 안에서 줄바꿈 ("> " 이어감). 마지막 줄 끝이면 아래 새 문단
+        if line.trim_start().starts_with('>') && !(le == r_end && b == le) {
+            let pfx = line[..hidden_prefix(line)].to_string();
+            if line.trim() == ">" && ls > r.start {
+                // 빈 인용 줄에서 Enter → 그 줄을 지우고 인용 밖으로
+                text.replace_range(ls - 1..le, "");
+                let c = char_len(&text[..ls - 1]);
+                self.set_text(text, (c, c));
+                self.split(ls - 1);
+                return true;
+            }
+            text.insert_str(b, &format!("\n{pfx}"));
+            let c = char_len(&text[..b]) + 1 + char_len(&pfx);
+            self.set_text(text, (c, c));
+            return true;
+        }
+        if text.len() != doc.text.len() {
+            self.set_text(text.clone(), sel);
+        }
         if let Some((.., empty)) = list_marker(&text[ls..le]) {
             if !empty {
                 if let Some((t2, c)) = smart_enter(&text, sel.0) {
@@ -4216,10 +4306,21 @@ impl App {
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
             return false;
         };
-        if code_body_range(&doc.text[r.clone()]).is_some() || is_math_block(&doc.text[r]) {
+        let sel = self.cursor(ctx);
+        let block = &doc.text[r.clone()];
+        if let Some((a, b)) = fenced_body_range(block).filter(|_| !is_toggle_block(block)) {
+            // 빈 코드·수식 블록 맨 앞 Backspace → 블록을 지우고 빈 문단으로 (노션식)
+            let local = self.local_cursor(ctx, doc, &r);
+            let body: String = block.chars().skip(a).take(b - a).collect();
+            if local == (a, a) && body.trim().is_empty() {
+                let mut t = doc.text.clone();
+                t.replace_range(r.clone(), "");
+                let c = char_len(&t[..r.start]);
+                self.set_text(t, (c, c));
+                return true;
+            }
             return false;
         }
-        let sel = self.cursor(ctx);
         if sel.0 != sel.1 {
             return false;
         }
@@ -4273,12 +4374,19 @@ impl App {
             self.scroll_cursor = Some(None);
             return true;
         }
-        let pt = doc.text[prev.clone()].trim_start();
-        if !r.is_empty()
-            && ["```", "~~~", "$$", ":::toggle"]
-                .iter()
-                .any(|p| pt.starts_with(p))
-        {
+        let pb = &doc.text[prev.clone()];
+        if !r.is_empty() && is_atomic_block(pb) {
+            // 바로 앞이 구분선·이미지면 노션처럼 그 블록을 지운다 (글자를 붙이면 원문이 드러난다)
+            let mut t2 = doc.text.clone();
+            t2.replace_range(prev.start..r.start, "");
+            let c = char_len(&t2[..prev.start]);
+            self.blank = 0;
+            self.active = Some(prev.start);
+            self.set_text(t2, (c, c));
+            self.scroll_cursor = Some(None);
+            return true;
+        }
+        if !r.is_empty() && is_unmergeable_block(pb) {
             return false;
         }
         let mut t2 = doc.text.clone();
@@ -4325,16 +4433,37 @@ impl App {
             self.scroll_cursor = Some(None);
             return true;
         }
-        let nt = doc.text[next.clone()].trim_start();
-        if !r.is_empty()
-            && ["```", "~~~", "$$", ":::toggle"]
-                .iter()
-                .any(|p| nt.starts_with(p))
-        {
+        // 구분선·이미지 위 Delete → 그 블록을 지운다 / 바로 뒤가 구분선·이미지면 그 블록을 지운다
+        let (cur, nb) = (&doc.text[r.clone()], &doc.text[next.clone()]);
+        let gone = if is_atomic_block(cur) {
+            Some(r.start..next.start)
+        } else if !r.is_empty() && is_atomic_block(nb) {
+            Some(r.end..next.end)
+        } else {
+            None
+        };
+        if let Some(gone) = gone {
+            let mut t2 = doc.text.clone();
+            t2.replace_range(gone.clone(), "");
+            let at = gone.start.min(r.end);
+            let c = char_len(&t2[..at]);
+            self.blank = 0;
+            self.active = Some(r.start);
+            self.set_text(t2, (c, c));
+            self.scroll_cursor = Some(None);
+            return true;
+        }
+        if !r.is_empty() && (is_unmergeable_block(cur) || is_unmergeable_block(nb)) {
             return false;
         }
+        // 뒤 블록의 숨긴 기호(## · - · > 등)는 떼고 내용만 붙인다. 여러 줄 구조(목록·인용)는 깨지니 그대로 둔다
+        let vis0 = if r.is_empty() { 0 } else { visible_bounds(nb).0 };
+        if vis0 > 0 && nb.contains('\n') {
+            return false;
+        }
+        let cut = next.start + byte_idx(nb, vis0);
         let mut t2 = doc.text.clone();
-        t2.replace_range(r.end..next.start, "");
+        t2.replace_range(r.end..cut, "");
         let c = char_len(&t2[..r.end]);
         self.blank = 0;
         self.active = Some(r.start);
@@ -5433,10 +5562,8 @@ impl App {
                             replace_with = Some(s.clone());
                             false
                         }
-                        egui::Event::Text(s) if !i.modifiers.command && !i.modifiers.ctrl => {
-                            replace_with = Some(s.clone());
-                            false
-                        }
+                        // 노션처럼 블록 선택 중 글자 입력은 무시 (Shift+↑ 한 번 뒤 한 글자로 블록 통째가 사라지지 않게)
+                        egui::Event::Text(_) if !i.modifiers.command && !i.modifiers.ctrl => false,
                         _ => true,
                     });
                 });
@@ -6040,6 +6167,11 @@ mod tests {
             keep_code_fences(code, "x"),
             Some(("```sas\nx\n```".into(), 8)),
             "전체 선택 후 입력은 코드만 바꾼다"
+        );
+        assert_eq!(
+            keep_code_fences("```\n```", "```\nQ```"),
+            Some(("```\nQ\n```".into(), 5)),
+            "빈 코드 블록에 친 글자는 닫는 ``` 앞 줄로"
         );
         // 첫 항목 Tab은 아무 변화 없음, 목록 아닌 줄은 None
         assert_eq!(tab("- a", 0), "- a");
@@ -7583,6 +7715,80 @@ mod tests {
         h.run_steps(2);
         assert!(h.state().block_heights.len() >= measured);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 편집 키가 마크다운 구조를 깨거나 원문을 드러내지 않는다 (코드 블록 언어칸 입력 버그 등)
+    #[test]
+    fn editing_keys_keep_markdown_structure() {
+        use egui_kittest::kittest::Queryable;
+        assert_eq!(code_body_range("  ```python\n  print(1)\n  ```"), Some((14, 22)));
+        assert_eq!(
+            renumber_block_at("1. a\n2. \n2. b", 8),
+            ("1. a\n2. \n3. b".to_string(), 8)
+        );
+
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_structure");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d1 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, None, &d1));
+        h.run_steps(3);
+
+        // ``` 뒤에 바로 글자를 쳐도 코드 카드(언어칸)로 숨겨지지 않는다
+        for c in "```print".chars() {
+            h.event(egui::Event::Text(c.to_string()));
+            h.step();
+        }
+        h.run_steps(2);
+        assert!(h.query_by_label("코드 블록").is_none());
+
+        // (문서, 블록 시작, 커서 바이트, 키, 기대 결과)
+        let cases: &[(&str, &str, &str, egui::Key, &str)] = &[
+            ("빈 코드 블록 입력", "```\n```", "```\n", egui::Key::A, "```\nQ\n```"),
+            ("빈 코드 블록 Backspace", "앞\n\n```\n\n```", "앞\n\n```\n", egui::Key::Backspace, "앞\n\n"),
+            ("굵게 안 Enter", "가 **굵게** 나", "가 **굵", egui::Key::Enter, "가 **굵**\n\n**게** 나"),
+            ("링크 안 Enter", "[링크](u)", "[링", egui::Key::Enter, "[링](u)\n\n[크](u)"),
+            ("인용 중간 Enter", "> 인용 줄\n> 둘째", "> 인용", egui::Key::Enter, "> 인용\n>  줄\n> 둘째"),
+            ("제목 맨 앞 Enter", "## 제목", "## ", egui::Key::Enter, "\n\n## 제목"),
+            ("번호 목록 Enter", "1. 첫째\n2. 둘째", "1. 첫째", egui::Key::Enter, "1. 첫째\n2. \n3. 둘째"),
+            ("구분선 Delete", "---\n\n뒤", "---", egui::Key::Delete, "뒤"),
+            ("이미지 앞 Delete", "앞\n\n![a](b.png)", "앞", egui::Key::Delete, "앞"),
+            ("구분선 뒤 Backspace", "---\n\n뒤", "---\n\n", egui::Key::Backspace, "뒤"),
+            ("제목 앞 Delete", "앞\n\n## 제목", "앞", egui::Key::Delete, "앞제목"),
+            ("한 줄 인용 앞 Delete", "앞\n\n> 인용", "앞", egui::Key::Delete, "앞인용"),
+            ("여러 줄 인용 앞 Delete", "앞\n\n> 인용\n> 둘", "앞", egui::Key::Delete, "앞\n\n> 인용\n> 둘"),
+        ];
+        for &(name, doc, caret, key, want) in cases {
+            h.state_mut().set_text(doc.to_string(), (0, 0));
+            h.run_steps(2);
+            let start = caret.rfind("\n\n").map_or(0, |i| i + 2);
+            h.state_mut().go(start, caret.len());
+            h.run_steps(3);
+            if key == egui::Key::A {
+                h.event(egui::Event::Text("Q".into()));
+            } else {
+                h.key_press(key);
+            }
+            h.run_steps(3);
+            assert_eq!(h.state().doc().unwrap().text, want, "{name}");
+        }
+
+        // Shift+↑로 블록 선택이 된 뒤 글자를 쳐도 블록이 통째로 사라지지 않는다
+        let doc = "앞 문단\n\n```python\nprint(1)\n```";
+        h.state_mut().set_text(doc.to_string(), (0, 0));
+        h.run_steps(2);
+        let code = doc.find("```").unwrap();
+        h.state_mut().go(code, code + "```python\npr".len());
+        h.run_steps(3);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowUp);
+        h.run_steps(3);
+        h.event(egui::Event::Text("Q".into()));
+        h.run_steps(3);
+        assert_eq!(h.state().doc().unwrap().text, doc);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
