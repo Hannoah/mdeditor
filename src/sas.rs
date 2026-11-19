@@ -19,9 +19,11 @@ KEEP LABEL LEAVE LENGTH LIST LOSTCARD MERGE MODIFY OUTPUT PUT PUTLOG REDIRECT RE
 RETAIN RETURN SET STOP UPDATE WHERE \
 CREATE TABLE AS FROM GROUP ORDER HAVING JOIN LEFT RIGHT INNER OUTER ON CASE DISTINCT INTO VALUES";
 
-const OPERATORS: &str = "AND BETWEEN CONTAINS EQ EQT GE GET GT IN IS LE LET LIKE LT NE NET NOT OR SAME ALSO";
+const OPERATORS: &str =
+    "AND BETWEEN CONTAINS EQ EQT GE GET GT IN IS LE LET LIKE LT NE NET NOT OR SAME ALSO";
 
-const CONSTANTS: &str = "_ALL_ _BLANKPAGE_ _CHARACTER_ _ERROR_ _FILE_ _INFILE_ _IORC_ _MRG_ _NULL_ \
+const CONSTANTS: &str =
+    "_ALL_ _BLANKPAGE_ _CHARACTER_ _ERROR_ _FILE_ _INFILE_ _IORC_ _MRG_ _NULL_ \
 _NUMERIC_ _N_ _PAGE_ _TEMPORARY_";
 
 const FUNCTIONS: &str = "ABS ADDMATRIX ADDR ADDRLONG ADDROW ADD_TABLE_ATTR AIRY ALLCOMB ALLCOMBI ALLPERM \
@@ -106,7 +108,10 @@ fn words() -> &'static HashMap<&'static str, Kind> {
         for w in FUNCTIONS.split_whitespace() {
             m.insert(w, Kind::Function);
         }
-        for w in OPERATORS.split_whitespace().chain(STATEMENTS.split_whitespace()) {
+        for w in OPERATORS
+            .split_whitespace()
+            .chain(STATEMENTS.split_whitespace())
+        {
             m.insert(w, Kind::Keyword);
         }
         for w in CONSTANTS.split_whitespace() {
@@ -163,7 +168,10 @@ fn tokenize(code: &str) -> Vec<(usize, usize, Kind)> {
                 i += 1;
             }
             Kind::Macro
-        } else if c == b'&' && b.get(i + 1).is_some_and(|&x| x == b'&' || x.is_ascii_alphabetic() || x == b'_') {
+        } else if c == b'&'
+            && b.get(i + 1)
+                .is_some_and(|&x| x == b'&' || x.is_ascii_alphabetic() || x == b'_')
+        {
             while i < n && b[i] == b'&' {
                 i += 1;
             }
@@ -174,7 +182,8 @@ fn tokenize(code: &str) -> Vec<(usize, usize, Kind)> {
                 i += 1; // &name. 구분점
             }
             Kind::Macro
-        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
+        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit))
+        {
             while i < n && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
                 i += 1;
             }
@@ -203,7 +212,11 @@ fn tokenize(code: &str) -> Vec<(usize, usize, Kind)> {
         if !c.is_ascii_whitespace() {
             stmt_start = b[i - 1] == b';'; // 주석 문장 "* …;" 뒤도 새 문장의 시작
         }
-        if kind != Kind::Plain || out.last().is_none_or(|t: &(usize, usize, Kind)| t.2 != Kind::Plain) {
+        if kind != Kind::Plain
+            || out
+                .last()
+                .is_none_or(|t: &(usize, usize, Kind)| t.2 != Kind::Plain)
+        {
             out.push((start, i, kind));
         } else if let Some(last) = out.last_mut() {
             last.1 = i;
@@ -212,7 +225,13 @@ fn tokenize(code: &str) -> Vec<(usize, usize, Kind)> {
     out
 }
 
-pub fn highlight(code: &str, font: FontId, line_height: f32, dark: bool, text: Color32) -> LayoutJob {
+pub fn highlight(
+    code: &str,
+    font: FontId,
+    line_height: f32,
+    dark: bool,
+    text: Color32,
+) -> LayoutJob {
     let hex = |h: u32| Color32::from_rgb((h >> 16) as u8, (h >> 8) as u8, h as u8);
     // VS Code 기본 테마 계열 색
     let color = |k: Kind| match (k, dark) {

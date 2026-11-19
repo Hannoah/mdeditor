@@ -50,6 +50,7 @@ impl eframe::App for App {
         for img in pasted {
             self.insert_pasted_image(&ctx, &img);
         }
+        self.poll_pasted(&ctx);
         self.handle_shortcuts(&ctx);
         self.auto_save_tick(&ctx, frame.storage_mut());
         self.title_bar(&ctx);
@@ -184,6 +185,7 @@ impl eframe::App for App {
             .unwrap_or("");
         storage.set_string("file", file.to_string());
         storage.set_string("draft", self.draft_text().to_string());
+        storage.set_string("drafts", self.drafts_joined());
         storage.set_string("theme", if self.dark { "dark" } else { "light" }.into());
         storage.set_string("full_width", self.full_width.to_string());
         storage.set_string("small_text", self.small_text.to_string());
@@ -727,7 +729,11 @@ fn append_inline_md_source(
         if kind == Inline::FootRef {
             // "[^1]": "[" "1" "]"는 배지로, "^"만 숨긴다
             if at < s - 1 {
-                job.append(&line[at..s - 1], 0.0, mk_fmt(size, FontFamily::Proportional, base));
+                job.append(
+                    &line[at..s - 1],
+                    0.0,
+                    mk_fmt(size, FontFamily::Proportional, base),
+                );
             }
             job.append(&line[s - 1..s], 0.0, badge.clone());
             job.append(&line[s..bs], 0.0, hidden.clone());
@@ -737,7 +743,11 @@ fn append_inline_md_source(
             continue;
         }
         if at < s {
-            job.append(&line[at..s], 0.0, mk_fmt(size, FontFamily::Proportional, base));
+            job.append(
+                &line[at..s],
+                0.0,
+                mk_fmt(size, FontFamily::Proportional, base),
+            );
         }
         job.append(&line[s..bs], 0.0, hidden.clone());
         let f = match kind {
@@ -774,7 +784,11 @@ fn append_inline_md_source(
         at = e;
     }
     if at < line.len() {
-        job.append(&line[at..], 0.0, mk_fmt(size, FontFamily::Proportional, base));
+        job.append(
+            &line[at..],
+            0.0,
+            mk_fmt(size, FontFamily::Proportional, base),
+        );
     }
 }
 
@@ -791,6 +805,7 @@ pub(crate) fn md_job(
 }
 
 // wrap: 줄바꿈 폭(수식 가운데 정렬용), folded: 접기 블록이 접혀 있는지
+#[allow(clippy::too_many_arguments)]
 fn md_job_ex(
     ctx: &egui::Context,
     text: &str,
@@ -891,8 +906,15 @@ fn md_job_ex(
             }
             let font = FontId::new(body, FontFamily::Monospace);
             let shown = line.trim_end_matches(['\n', '\r']).to_owned();
-            let w = ctx.fonts_mut(|f| f.layout_no_wrap(shown, font.clone(), p.text)).size().x;
-            let lead = if wrap.is_finite() { ((wrap - w) * 0.5).max(0.0) } else { 0.0 };
+            let w = ctx
+                .fonts_mut(|f| f.layout_no_wrap(shown, font.clone(), p.text))
+                .size()
+                .x;
+            let lead = if wrap.is_finite() {
+                ((wrap - w) * 0.5).max(0.0)
+            } else {
+                0.0
+            };
             // 줄 높이는 글꼴 기본값: 보기 화면의 수식 라벨과 같은 높이
             let mut f = fmt(body, FontFamily::Monospace, p.text);
             f.line_height = None;
@@ -941,9 +963,10 @@ fn md_job_ex(
             // 이미지: 원문은 숨기고 그 줄 높이를 보기 화면의 이미지 크기로 — paint_block_decor가 이미지를 그린다
             let h = image_fit(ctx, scheme, url, wrap).0.y;
             hide_prefix(&mut job, line, 0.0, h);
-        } else if let (Some(len), Some((depth, _))) =
-            (list_marker_bytes(bare), list_item_step(&mut list_stack, bare))
-        {
+        } else if let (Some(len), Some((depth, _))) = (
+            list_marker_bytes(bare),
+            list_item_step(&mut list_stack, bare),
+        ) {
             // 노션식: 들여쓰기·기호(- / 1. / - [ ])는 투명하게 두고 렌더링 화면과 같은 자리에서 내용이 시작한다.
             // 기호 자리의 글머리·번호·체크박스는 paint_block_decor가 그린다. 텍스트는 마크다운 그대로.
             let len = len.min(line.len());
@@ -958,12 +981,21 @@ fn md_job_ex(
         } else if let Some((name, m)) = footnote_def(bare) {
             // 각주 정의: "[^1]: "을 숨기고 paint_block_decor가 "[1]:" 표시를 그린다 (보기 화면과 같은 자리)
             let m = m.min(line.len());
-            hide_prefix(&mut job, &line[..m], footnote_label_w(ctx, name, body) + 6.0, body * 1.6);
+            hide_prefix(
+                &mut job,
+                &line[..m],
+                footnote_label_w(ctx, name, body) + 6.0,
+                body * 1.6,
+            );
             append_inline_md_source(&mut job, &line[m..], body, p, p.muted);
         } else if t.starts_with('>') {
             // 인용 "> " 숨김: 보기 화면처럼 세로줄 오른쪽(QUOTE_X)에서 흐린 글자 / 알림 상자 안은 보통 글자
             let m = hidden_prefix(bare).min(line.len());
-            let (x, color) = if callout { (0.0, p.text) } else { (QUOTE_X, p.muted) };
+            let (x, color) = if callout {
+                (0.0, p.text)
+            } else {
+                (QUOTE_X, p.muted)
+            };
             hide_prefix(&mut job, &line[..m], x, body * 1.6);
             append_inline_md_source(&mut job, &line[m..], body, p, color);
         } else {
@@ -998,7 +1030,9 @@ fn image_fit(
         format!("{scheme}{url}")
     };
     let avail = vec2(if width.is_finite() { width } else { 1e6 }, f32::INFINITY);
-    let img = egui::Image::from_uri(uri).fit_to_original_size(1.0).max_width(avail.x);
+    let img = egui::Image::from_uri(uri)
+        .fit_to_original_size(1.0)
+        .max_width(avail.x);
     let tex = img.load_for_size(ctx, avail).ok();
     let size = img.calc_size(avail, tex.as_ref().and_then(|t| t.size()));
     (size, tex.and_then(|t| t.texture_id()))
@@ -1024,7 +1058,13 @@ fn paint_checkbox(painter: &egui::Painter, c: egui::Pos2, checked: bool) {
     let style = painter.ctx().global_style();
     let w = &style.visuals.widgets.inactive;
     let r = Rect::from_center_size(c, egui::Vec2::splat(style.spacing.icon_width));
-    painter.rect(r, w.corner_radius, w.bg_fill, w.bg_stroke, egui::StrokeKind::Inside);
+    painter.rect(
+        r,
+        w.corner_radius,
+        w.bg_fill,
+        w.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
     if checked {
         let r = r.shrink(3.0);
         painter.add(egui::Shape::line(
@@ -1110,7 +1150,12 @@ fn paint_block_decor(
                 }
             }
             // 노션처럼 선택된 이미지는 테두리로 표시 (원문 대신)
-            painter.rect_stroke(rect.expand(2.0), 4.0, Stroke::new(2.0, p.accent.gamma_multiply(0.6)), egui::StrokeKind::Outside);
+            painter.rect_stroke(
+                rect.expand(2.0),
+                4.0,
+                Stroke::new(2.0, p.accent.gamma_multiply(0.6)),
+                egui::StrokeKind::Outside,
+            );
         } else if is_quote {
             let (top, bottom) = (row(ci).top(), row(ci + line.chars().count()).bottom());
             quote_rows = Some(quote_rows.map_or((top, bottom), |q| (q.0, bottom)));
@@ -1137,7 +1182,13 @@ fn paint_block_decor(
                 paint_checkbox(painter, c, m.contains(['x', 'X']));
             } else {
                 let label = num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
-                painter.text(c, Align2::CENTER_CENTER, label, FontId::proportional(body), p.muted);
+                painter.text(
+                    c,
+                    Align2::CENTER_CENTER,
+                    label,
+                    FontId::proportional(body),
+                    p.muted,
+                );
             }
         }
         ci += line.chars().count() + 1;
@@ -2970,7 +3021,8 @@ impl App {
         }
         let code_meta = {
             let bt_init = buf.trim_start();
-            if (bt_init.starts_with("```") || bt_init.starts_with("~~~")) && bt_init.contains('\n') {
+            if (bt_init.starts_with("```") || bt_init.starts_with("~~~")) && bt_init.contains('\n')
+            {
                 let lead = buf.len() - bt_init.len();
                 let fence = bt_init[..3].to_string();
                 let first_nl_rel = bt_init.find('\n').unwrap_or(bt_init.len());
@@ -3207,22 +3259,26 @@ impl App {
             let compact = hr_block || math;
             let mut text_edit = |ui: &mut egui::Ui| {
                 ui.scope(|ui| {
-                if compact {
-                    ui.spacing_mut().interact_size.y = 0.0;
-                }
-                // TextEdit은 자기 글꼴로 최소 한 줄 높이를 잡는다 → 작은 글꼴로 그 최소 높이를 없앤다
-                let te_font = if compact { FontId::proportional(1.0) } else { FontId::proportional(body) };
-                egui::TextEdit::multiline(&mut buf)
-                    .font(te_font)
-                    .id(id)
-                    .frame(Frame::NONE)
-                    .margin(Margin::ZERO)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(usize::from(!compact))
-                    .lock_focus(true)
-                    .hint_text(RichText::new(PLACEHOLDER).size(body).color(p.faint))
-                    .layouter(&mut layouter)
-                    .show(ui)
+                    if compact {
+                        ui.spacing_mut().interact_size.y = 0.0;
+                    }
+                    // TextEdit은 자기 글꼴로 최소 한 줄 높이를 잡는다 → 작은 글꼴로 그 최소 높이를 없앤다
+                    let te_font = if compact {
+                        FontId::proportional(1.0)
+                    } else {
+                        FontId::proportional(body)
+                    };
+                    egui::TextEdit::multiline(&mut buf)
+                        .font(te_font)
+                        .id(id)
+                        .frame(Frame::NONE)
+                        .margin(Margin::ZERO)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(usize::from(!compact))
+                        .lock_focus(true)
+                        .hint_text(RichText::new(PLACEHOLDER).size(body).color(p.faint))
+                        .layouter(&mut layouter)
+                        .show(ui)
                 })
                 .inner
             };
@@ -3321,7 +3377,11 @@ impl App {
         }
         // 접기 화살표 (제목 줄 왼쪽): 눌러서 펼치기/접기
         if is_toggle_block(&buf) {
-            let row0 = out.galley.rows.first().map_or(Rect::NOTHING, |row| row.rect());
+            let row0 = out
+                .galley
+                .rows
+                .first()
+                .map_or(Rect::NOTHING, |row| row.rect());
             let arrow = Rect::from_center_size(
                 out.galley_pos + vec2(11.0, row0.center().y),
                 vec2(22.0, 22.0),
@@ -3421,7 +3481,8 @@ impl App {
                 let caret = char_len(&fixed);
                 buf = fixed;
                 let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(caret))));
+                st.cursor
+                    .set_char_range(Some(CCursorRange::one(CCursor::new(caret))));
                 egui::TextEdit::store_state(ctx, id, st);
             }
         }
@@ -3455,11 +3516,18 @@ impl App {
                 (b, l)
             };
         // 커서가 숨긴 목록 기호·코드 펜스 안으로 들어가면 보이는 자리로 옮긴다
-        if let Some(s) = sel.clone().filter(|s| s.start == s.end && !self.ime_composing) {
+        if let Some(s) = sel
+            .clone()
+            .filter(|s| s.start == s.end && !self.ime_composing)
+        {
             let c = s.start.0;
             // 코드·수식·접기: 숨긴 앞뒤 줄 안쪽으로 (접혀 있으면 제목 줄 안으로)
             let c1 = fenced_body_range(&buf).map_or(c, |(a, b)| {
-                let b = if folded { a.max(char_len(buf.split('\n').next().unwrap_or(""))) } else { b };
+                let b = if folded {
+                    a.max(char_len(buf.split('\n').next().unwrap_or("")))
+                } else {
+                    b
+                };
                 c.clamp(a, b)
             });
             let prev = self
@@ -3519,7 +3587,12 @@ impl App {
         }
         self.cursor_info = primary_cursor.map(|pc| {
             // 접어 둔(높이 0) ``` 줄은 빼고 보이는 줄 기준으로 첫·마지막 줄을 판단
-            let rows: Vec<_> = out.galley.rows.iter().filter(|r| r.rect().height() > 1.0).collect();
+            let rows: Vec<_> = out
+                .galley
+                .rows
+                .iter()
+                .filter(|r| r.rect().height() > 1.0)
+                .collect();
             if rows.len() <= 1 {
                 EditorCursorInfo {
                     block_start: r.start,
@@ -4841,6 +4914,7 @@ impl App {
             Dialog::Image { .. } => 6,
             Dialog::Help => 7,
             Dialog::Link { .. } => 8,
+            Dialog::Conflict(_) => 9,
         };
         // 종류마다 다른 id: 같은 id면 이전 창 크기를 기억해 레이아웃이 늘어난다
         let modal = egui::Modal::new(egui::Id::unique(("dialog", kind)))
@@ -5041,12 +5115,57 @@ impl App {
                             cancel |= ghost(ui, p, "취소", None).clicked();
                         });
                     }
+                    Dialog::Conflict(name) => {
+                        let name = name.clone();
+                        dialog_title(ui, p, AMBER, "파일이 바뀌었습니다");
+                        message(
+                            ui,
+                            p,
+                            &format!(
+                                "{name}을(를) 다른 프로그램이 수정했습니다.
+어떻게 할까요?"
+                            ),
+                        );
+                        footer(ui, p, Some(p.surface), |ui| {
+                            if primary(ui, p, "내 내용으로 덮어쓰기").clicked() {
+                                let path = self.root.join(&name);
+                                if let Some(d) = self.docs.get_mut(&name) {
+                                    d.mtime = modified(&path);
+                                }
+                                if self.save_quiet(&name) {
+                                    close = true;
+                                } else {
+                                    error = Some(self.status.clone());
+                                }
+                            }
+                            if ghost(ui, p, "디스크 내용 불러오기", Some(RED)).clicked() {
+                                match Doc::load(&self.root.join(&name)) {
+                                    Ok(fresh) => {
+                                        self.deactivate();
+                                        self.docs.insert(name.clone(), fresh);
+                                        close = true;
+                                    }
+                                    Err(e) => error = Some(format!("열기 실패: {e}")),
+                                }
+                            }
+                            cancel |= ghost(ui, p, "취소", None).clicked();
+                        });
+                    }
                     Dialog::Image { url_tab, url, alt } => {
                         cancel |= modal_header(ui, p, theme::IMAGE, p.accent, "이미지 삽입");
                         self.image_modal(ui, ctx, p, url_tab, url, alt, &mut close, &mut cancel);
                     }
-                    Dialog::Link { range, label, url, existing } => {
-                        let title = if *existing { "링크 고치기" } else { "링크 넣기" };
+                    Dialog::Link {
+                        range,
+                        label,
+                        url,
+                        existing,
+                    } => {
+                        let title = if *existing {
+                            "링크 고치기"
+                        } else {
+                            "링크 넣기"
+                        };
                         cancel |= modal_header(ui, p, theme::TYPE, p.accent, title);
                         let mut submit = false;
                         Frame::new()
@@ -5058,11 +5177,19 @@ impl App {
                                     ("주소", &mut *url, "https://", "link-url"),
                                 ] {
                                     ui.label(RichText::new(lbl).size(12.0).strong().color(p.muted));
-                                    let r = input(ui, p, egui::Id::unique(iid), val, hint, f32::INFINITY);
+                                    let r = input(
+                                        ui,
+                                        p,
+                                        egui::Id::unique(iid),
+                                        val,
+                                        hint,
+                                        f32::INFINITY,
+                                    );
                                     if iid == "link-url" && !ui.memory(|m| m.focused().is_some()) {
                                         r.request_focus();
                                     }
-                                    submit |= r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                                    submit |=
+                                        r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                                 }
                             });
                         let mut unlink = false;
@@ -6654,17 +6781,7 @@ fn render_markdown_native(
         | Options::ENABLE_GFM;
     let mut iter = Parser::new_ext(src, opts).into_offset_iter().peekable();
     let mut toggled = None;
-    render_md_stream(
-        ui,
-        ctx,
-        src,
-        width,
-        &mut iter,
-        None,
-        ctx.p.text,
-        0,
-        &mut toggled,
-    );
+    render_md_stream(ui, ctx, width, &mut iter, None, ctx.p.text, 0, &mut toggled);
     toggled
 }
 
@@ -6672,7 +6789,6 @@ fn render_markdown_native(
 fn render_md_stream<'a, I>(
     ui: &mut egui::Ui,
     ctx: &mut MdRenderCtx<'_>,
-    src: &'a str,
     width: f32,
     iter: &mut std::iter::Peekable<I>,
     stop_tag: Option<pulldown_cmark::TagEnd>,
@@ -6727,7 +6843,6 @@ fn render_md_stream<'a, I>(
                         render_md_stream(
                             ui,
                             ctx,
-                            src,
                             fw,
                             iter,
                             Some(TagEnd::FootnoteDefinition),
@@ -6760,7 +6875,6 @@ fn render_md_stream<'a, I>(
                             render_md_stream(
                                 ui,
                                 ctx,
-                                src,
                                 (width - 30.0).max(80.0),
                                 iter,
                                 Some(TagEnd::BlockQuote(kind)),
@@ -6786,7 +6900,6 @@ fn render_md_stream<'a, I>(
                                 render_md_stream(
                                     ui,
                                     ctx,
-                                    src,
                                     qw,
                                     iter,
                                     Some(TagEnd::BlockQuote(kind)),
@@ -6909,7 +7022,6 @@ fn render_md_stream<'a, I>(
                                     render_md_stream(
                                         ui,
                                         ctx,
-                                        src,
                                         item_w,
                                         iter,
                                         Some(TagEnd::Item),

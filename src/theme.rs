@@ -318,12 +318,22 @@ mod unix_mem {
             const MAP_PRIVATE: i32 = 2;
             // 매핑은 fd를 닫아도 유지된다
             let p = unsafe {
-                mmap(core::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, file.as_raw_fd(), 0)
+                mmap(
+                    core::ptr::null_mut(),
+                    len,
+                    PROT_READ,
+                    MAP_PRIVATE,
+                    file.as_raw_fd(),
+                    0,
+                )
             };
             if p as isize == -1 {
                 return None; // MAP_FAILED
             }
-            Some(Self { ptr: NonNull::new(p.cast())?, len })
+            Some(Self {
+                ptr: NonNull::new(p.cast())?,
+                len,
+            })
         }
     }
 
@@ -353,11 +363,17 @@ pub fn clipboard_text() -> Option<String> {
 fn load_font_data(path: &std::path::Path, index: u32) -> Option<egui::FontData> {
     #[cfg(windows)]
     if let Some(mapped) = win_mem::MappedFile::open(path) {
-        return Some(egui::FontData::from_blob(std::sync::Arc::new(mapped), index));
+        return Some(egui::FontData::from_blob(
+            std::sync::Arc::new(mapped),
+            index,
+        ));
     }
     #[cfg(unix)]
     if let Some(mapped) = unix_mem::MappedFile::open(path) {
-        return Some(egui::FontData::from_blob(std::sync::Arc::new(mapped), index));
+        return Some(egui::FontData::from_blob(
+            std::sync::Arc::new(mapped),
+            index,
+        ));
     }
     let mut fd = egui::FontData::from_owned(std::fs::read(path).ok()?);
     fd.index = index;
@@ -456,8 +472,7 @@ fn font_dirs() -> Vec<std::path::PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn font_dirs() -> Vec<std::path::PathBuf> {
-    let user = std::env::var_os("HOME")
-        .map(|h| std::path::PathBuf::from(h).join("Library/Fonts"));
+    let user = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Fonts"));
     user.into_iter()
         .chain(
             [
@@ -559,7 +574,11 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     } else {
         add(
             "regular",
-            find(&["KoPubWorld Dotum Medium", "segoeui.ttf", "AppleSDGothicNeo.ttc#0"]),
+            find(&[
+                "KoPubWorld Dotum Medium",
+                "segoeui.ttf",
+                "AppleSDGothicNeo.ttc#0",
+            ]),
         )
     };
     let bold_found = if custom_path.is_some() {
@@ -569,7 +588,11 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     } else {
         add(
             "bold",
-            find(&["KoPubWorld Dotum Bold", "segoeuib.ttf", "AppleSDGothicNeo.ttc#6"]),
+            find(&[
+                "KoPubWorld Dotum Bold",
+                "segoeuib.ttf",
+                "AppleSDGothicNeo.ttc#6",
+            ]),
         )
     };
 
@@ -582,7 +605,11 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     {
         None
     } else {
-        add("malgunbd", find(&["malgunbd.ttf", "AppleSDGothicNeo.ttc#6"])).map(|(_, k)| k)
+        add(
+            "malgunbd",
+            find(&["malgunbd.ttf", "AppleSDGothicNeo.ttc#6"]),
+        )
+        .map(|(_, k)| k)
     };
     let mono = if choice == "d2coding" {
         add("mono", find(&["D2Coding", "consola.ttf", "Menlo.ttc#0"])).map(|(_, k)| k)

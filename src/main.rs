@@ -11,10 +11,13 @@ use egui::text::{CCursor, CCursorRange};
 use egui::{Key, Modifiers};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
+use textops::*;
+
 mod mermaid;
 mod sas;
 #[cfg(windows)] // 설치·제거 마법사는 Windows 전용 (PowerShell 엔진)
 mod setup;
+mod textops;
 mod theme;
 mod ui;
 
@@ -38,7 +41,23 @@ fn tab_base_name(key: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+// 패닉(release는 abort)으로 죽기 직전에 저장 안 된 문서를 *.recovered.md 로 남기기 위한 스냅샷 (경로, 내용)
+static RECOVERY: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn install_panic_recovery() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(snap) = RECOVERY.try_lock() {
+            for (path, text) in snap.iter() {
+                let _ = std::fs::write(path, text);
+            }
+        }
+        prev(info);
+    }));
+}
+
 fn main() -> eframe::Result {
+    install_panic_recovery();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().unwrap_or_default();
     #[cfg(windows)]
@@ -76,10 +95,11 @@ fn main() -> eframe::Result {
         wgpu_options: {
             // vsync 끔(Immediate): ProMotion 화면에서 입력 직후 다음 vsync까지 기다리지 않는다.
             // 측정(백스페이스 연타): 입력→다음 프레임 p99 9ms → 5ms, vsync 켬에서 60ms 멈춤 1회 관찰
-            let mut w = eframe::WgpuConfiguration::default().with_surface_config(eframe::SurfaceConfig {
-                present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
-                ..eframe::SurfaceConfig::LOW_LATENCY
-            });
+            let mut w =
+                eframe::WgpuConfiguration::default().with_surface_config(eframe::SurfaceConfig {
+                    present_mode: eframe::wgpu::PresentMode::AutoNoVsync,
+                    ..eframe::SurfaceConfig::LOW_LATENCY
+                });
             if let eframe::egui_wgpu::WgpuSetup::CreateNew(c) = &mut w.wgpu_setup {
                 c.power_preference = eframe::wgpu::PowerPreference::LowPower;
             }
@@ -271,22 +291,72 @@ fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
 }
 
 // 임시 파일에 쓴 뒤 rename → 저장 도중 크래시해도 원본이 잘리지 않는다
+// 심볼릭 링크는 링크가 가리키는 실제 파일에 쓰고, 백신·동기화 프로그램이 잠깐 잡고 있는 파일은 짧게 재시도한다
 fn save_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    let real = if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        std::fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
+    };
+    let path = real.as_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(body)?;
         file.sync_all()?;
     }
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    let mut res = std::fs::rename(&tmp, path);
+    for _ in 0..4 {
+        if res.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(60));
+        res = std::fs::rename(&tmp, path);
+    }
+    res.inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+// 퍼센트 인코딩/디코딩 (링크 경로·file:// URI용). 영숫자와 -._~/: 만 그대로 둔다.
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/:".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |x: u8| (x as char).to_digit(16);
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 // ---------- 문서 ----------
@@ -350,12 +420,18 @@ struct Doc {
     redo: Vec<Patch>,
     typed_at: Option<Instant>,
     // 탭 전환 시 복원되는 문서별 편집 위치/선택 상태
-    view_active: Option<usize>,
-    view_blank: usize,
-    view_block_sel: Option<Range<usize>>,
-    view_block_sel_anchor: Option<usize>,
-    view_block_sel_head: Option<usize>,
-    view_last_sel: Option<Sel>,
+    view: TabView,
+}
+
+// 탭 전환 때 저장·복원하는 편집 위치/선택 상태
+#[derive(Default)]
+struct TabView {
+    active: Option<usize>,
+    blank: usize,
+    block_sel: Option<Range<usize>>,
+    block_sel_anchor: Option<usize>,
+    block_sel_head: Option<usize>,
+    last_sel: Option<Sel>,
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -417,17 +493,12 @@ impl Doc {
             blocks: Vec::new(),
             outline: Vec::new(),
             rev: 0,
-            view_active: None,
-            view_blank: 0,
-            view_block_sel: None,
-            view_block_sel_anchor: None,
-            view_block_sel_head: None,
-            view_last_sel: None,
+            view: TabView::default(),
         };
         doc.refresh_meta();
         if doc.text.is_empty() {
-            doc.view_active = Some(0);
-            doc.view_last_sel = Some((0, 0));
+            doc.view.active = Some(0);
+            doc.view.last_sel = Some((0, 0));
         }
         Ok(doc)
     }
@@ -452,12 +523,11 @@ impl Doc {
             blocks: Vec::new(),
             outline: Vec::new(),
             rev: 0,
-            view_active: empty.then_some(0),
-            view_blank: 0,
-            view_block_sel: None,
-            view_block_sel_anchor: None,
-            view_block_sel_head: None,
-            view_last_sel: empty.then_some((0, 0)),
+            view: TabView {
+                active: empty.then_some(0),
+                last_sel: empty.then_some((0, 0)),
+                ..TabView::default()
+            },
         };
         doc.refresh_meta();
         doc
@@ -727,1510 +797,6 @@ impl Doc {
     }
 }
 
-// ---------- 편집 연산 (문자 인덱스 기준, 순수 함수) ----------
-
-type Sel = (usize, usize); // (시작, 끝) 문자 인덱스, 시작 <= 끝
-
-fn byte_idx(s: &str, ci: usize) -> usize {
-    s.char_indices().nth(ci).map_or(s.len(), |(b, _)| b)
-}
-
-fn char_len(s: &str) -> usize {
-    s.chars().count()
-}
-
-fn line_start(s: &str, ci: usize) -> usize {
-    let b = byte_idx(s, ci);
-    s[..b].rfind('\n').map_or(0, |i| char_len(&s[..=i]))
-}
-
-fn line_end(s: &str, ci: usize) -> usize {
-    let b = byte_idx(s, ci);
-    s[b..]
-        .find('\n')
-        .map_or(char_len(s), |i| ci + char_len(&s[b..b + i]))
-}
-
-fn replace_range(s: &str, (a, b): Sel, with: &str) -> String {
-    let (ba, bb) = (byte_idx(s, a), byte_idx(s, b));
-    format!("{}{}{}", &s[..ba], with, &s[bb..])
-}
-
-// 선택 영역을 prefix/suffix로 감싼다. 선택이 없으면 placeholder를 넣고 선택해 둔다.
-// 이미 같은 기호로 감싸져 있으면 벗긴다(토글). 링크는 바로 주소를 칠 수 있게 URL 자리를 선택한다.
-fn wrap_selection(s: &str, (a, b): Sel, pre: &str, suf: &str, placeholder: &str) -> (String, Sel) {
-    let (ba, bb) = (byte_idx(s, a), byte_idx(s, b));
-    let (before, sel, after) = (&s[..ba], &s[ba..bb], &s[bb..]);
-    let (pl, sl) = (char_len(pre), char_len(suf));
-    if a != b {
-        // 기울임(*)이 굵게(**)의 별표를 벗기지 않게 한다
-        let bold_not_italic = pre == "*" && before.ends_with("**") && !before.ends_with("***");
-        if before.ends_with(pre) && after.starts_with(suf) && !bold_not_italic {
-            let out = format!(
-                "{}{sel}{}",
-                &before[..before.len() - pre.len()],
-                &after[suf.len()..]
-            );
-            return (out, (a - pl, b - pl));
-        }
-        let inner_bold = pre == "*" && sel.starts_with("**") && !sel.starts_with("***");
-        if sel.len() >= pre.len() + suf.len()
-            && sel.starts_with(pre)
-            && sel.ends_with(suf)
-            && !inner_bold
-        {
-            let core = &sel[pre.len()..sel.len() - suf.len()];
-            return (format!("{before}{core}{after}"), (a, b - pl - sl));
-        }
-    }
-    let inner = if a == b { placeholder } else { sel };
-    let out = format!("{before}{pre}{inner}{suf}{after}");
-    let start = a + pl;
-    let end = start + char_len(inner);
-    match suf.strip_prefix("](").and_then(|u| u.strip_suffix(')')) {
-        Some(url) if a != b => (out, (end + 2, end + 2 + char_len(url))),
-        _ => (out, (start, end)),
-    }
-}
-
-// Tab / Shift+Tab: 선택된 줄 전체를 2칸 들여쓰기·내어쓰기
-fn indent_lines(s: &str, (a, b): Sel, outdent: bool) -> (String, Sel) {
-    let (ls, le) = (line_start(s, a), line_end(s, b));
-    let block = &s[byte_idx(s, ls)..byte_idx(s, le)];
-    let mut first_delta: isize = 0;
-    let lines: Vec<String> = block
-        .split('\n')
-        .enumerate()
-        .map(|(i, l)| {
-            let (new, delta) = if outdent {
-                let n = l.len() - l.trim_start_matches(' ').len();
-                let n = n.min(2);
-                (l[n..].to_string(), -(n as isize))
-            } else {
-                (format!("  {l}"), 2)
-            };
-            if i == 0 {
-                first_delta = delta;
-            }
-            new
-        })
-        .collect();
-    let new_block = lines.join("\n");
-    let out = replace_range(s, (ls, le), &new_block);
-    let new_le = ls + char_len(&new_block);
-    let na = (a as isize + first_delta).max(ls as isize) as usize;
-    let nb = if a == b {
-        na
-    } else {
-        (b as isize + (new_le as isize - le as isize)) as usize
-    };
-    (out, (na, nb))
-}
-
-// 목록 줄의 (들여쓰기, 내용 시작 열). CommonMark에서 하위 항목은 부모의 "내용 시작 열"까지
-// 들여써야 자식이 된다: "- a" → 2칸, "1. a" → 3칸, "10. a" → 4칸. (할 일 "- [ ] "도 2칸 기준)
-fn list_cols(line: &str) -> Option<(usize, usize)> {
-    let ind = line.len() - line.trim_start_matches(' ').len();
-    let rest = &line[ind..];
-    if ["- ", "* ", "+ "].iter().any(|b| rest.starts_with(b)) {
-        return Some((ind, ind + 2));
-    }
-    let d = rest.bytes().take_while(u8::is_ascii_digit).count();
-    ((1..10).contains(&d) && (rest[d..].starts_with(". ") || rest[d..].starts_with(") ")))
-        .then_some((ind, ind + d + 2))
-}
-
-// 목록 줄 하나를 읽어 (깊이, 표시 번호)를 낸다. stack: 열린 상위 항목들의 (내용 열, 번호).
-// 렌더러(pulldown-cmark)와 같은 규칙: 부모 내용 열 이상 들여써야 자식, 번호는 같은 목록 앞 항목 + 1.
-fn list_item_step(stack: &mut Vec<(usize, Option<u64>)>, line: &str) -> Option<(usize, Option<u64>)> {
-    let (ind, col) = list_cols(line)?;
-    let digits = &line[ind..col - 2];
-    let mut sib = None;
-    while stack.last().is_some_and(|t| ind < t.0) {
-        sib = stack.pop();
-    }
-    let num = (!digits.is_empty()).then(|| match sib {
-        Some((_, Some(n))) => n + 1,
-        _ => digits.parse().unwrap_or(1),
-    });
-    let depth = stack.len();
-    stack.push((col, num));
-    Some((depth, num))
-}
-
-// 코드 블록의 코드 부분(여는·닫는 ``` 줄 제외) 문자 구간. 펜스 블록이 아니면 None.
-fn code_body_range(block: &str) -> Option<(usize, usize)> {
-    let t = block.trim_start();
-    if !(t.starts_with("```") || t.starts_with("~~~")) {
-        return None;
-    }
-    let fence = &t[..3];
-    let nl = block.find('\n')?;
-    // 목록 안 코드 블록("  ```")은 본문도 같은 만큼 들여써 있다 → 그 들여쓰기 뒤부터
-    let lead = block.len() - t.len();
-    let ind = block[nl + 1..].bytes().take(lead).take_while(|&b| b == b' ').count();
-    let start = char_len(&block[..=nl]) + ind;
-    let last = block.rfind('\n').map_or(0, |i| i + 1);
-    let end = if last > nl && block[last..].trim_start().starts_with(fence) {
-        char_len(&block[..last - 1]).max(start)
-    } else {
-        char_len(block)
-    };
-    Some((start, end))
-}
-
-// 수식 블록 ($$ 줄로 감싼 여러 줄)
-fn is_math_block(block: &str) -> bool {
-    let t = block.trim_start();
-    t.split('\n').next().is_some_and(|l| l.trim() == "$$") && t.contains('\n')
-}
-
-// 접기 블록 (:::toggle 제목 … :::)
-fn is_toggle_block(block: &str) -> bool {
-    block.trim_start().starts_with(":::toggle")
-}
-
-// 알림 상자 종류 ("> [!NOTE]" → "NOTE")
-fn callout_kind(block: &str) -> Option<&str> {
-    let first = block.trim_start().split('\n').next()?.trim();
-    first.strip_prefix('>')?.trim().strip_prefix("[!")?.strip_suffix(']')
-}
-
-// 구분선 줄 (---, ***, ___)
-fn is_hr_line(line: &str) -> bool {
-    let t = line.trim();
-    t.len() >= 3 && matches!(t.as_bytes()[0], b'-' | b'*' | b'_') && t.bytes().all(|b| b == t.as_bytes()[0])
-}
-
-// 각주 정의 줄 "[^이름]: " → (이름, 기호 바이트 길이)
-fn footnote_def(line: &str) -> Option<(&str, usize)> {
-    let rest = line.strip_prefix("[^")?;
-    let close = rest.find("]:")?;
-    let name = &rest[..close];
-    (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| {
-        let m = 2 + close + 2;
-        (name, m + usize::from(line[m..].starts_with(' ')))
-    })
-}
-
-// 앞뒤 줄을 숨기는 블록(코드 ``` / 수식 $$ / 접기 :::toggle)의 보이는 문자 구간
-fn fenced_body_range(block: &str) -> Option<(usize, usize)> {
-    if let Some(r) = code_body_range(block) {
-        return Some(r);
-    }
-    let (start, close) = if is_math_block(block) {
-        (char_len(&block[..=block.find('\n')?]), "$$")
-    } else if is_toggle_block(block) {
-        let lead = block.len() - block.trim_start().len();
-        let after = &block[lead + ":::toggle".len()..];
-        let sp = after.len() - after.trim_start_matches(' ').len();
-        (char_len(&block[..lead + ":::toggle".len() + sp]), ":::")
-    } else {
-        return None;
-    };
-    let nl = block.find('\n').unwrap_or(block.len());
-    let last = block.rfind('\n').map_or(0, |i| i + 1);
-    let end = if last > nl && block[last..].trim() == close {
-        char_len(&block[..last - 1]).max(start)
-    } else {
-        char_len(block)
-    };
-    Some((start, end))
-}
-
-// 이미지만 있는 줄 "![설명](경로)" → 경로. 편집 화면에서 원문 대신 이미지를 그린다.
-fn image_line(line: &str) -> Option<&str> {
-    let (alt, url) = line.trim().strip_prefix("![")?.strip_suffix(')')?.split_once("](")?;
-    (!alt.contains(']') && !url.contains([')', '\n']) && !url.trim().is_empty()).then(|| url.trim())
-}
-
-// 편집 화면에서 숨기는 줄머리 기호의 바이트 길이:
-// 목록 "- ", "1. ", "- [ ] " / 제목 "## " / 인용 "> " / 알림 상자 제목 줄·구분선(줄 전체) / 각주 "[^1]: " / 접기 ":::toggle "
-fn hidden_prefix(line: &str) -> usize {
-    if let Some(m) = list_marker_bytes(line) {
-        return m;
-    }
-    let t = line.trim_start();
-    let lead = line.len() - t.len();
-    if let Some(lv) = heading_level(t) {
-        return (lead + lv + 1).min(line.len());
-    }
-    if let Some(r) = t.strip_prefix('>') {
-        if callout_kind(t).is_some() {
-            return line.len();
-        }
-        return lead + 1 + usize::from(r.starts_with(' '));
-    }
-    if is_hr_line(line) || t.trim_end() == ":::" || image_line(line).is_some() {
-        return line.len();
-    }
-    if let Some(r) = t.strip_prefix(":::toggle") {
-        return lead + ":::toggle".len() + (r.len() - r.trim_start_matches(' ').len());
-    }
-    footnote_def(line).map_or(0, |(_, m)| m)
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Inline {
-    Code,
-    Bold,
-    Mark,
-    Strike,
-    Italic,
-    Link,    // [글자](주소) — 글자만 보임
-    FootRef, // [^1] — "^"만 숨겨 [1] 배지로 보임
-}
-
-// 줄 안의 인라인 서식 (**굵게**, __굵게__, *기울임*, ~~취소선~~, ==강조==, `코드`):
-// (여는 기호 시작, 내용 시작, 내용 끝, 닫는 기호 끝, 종류) 바이트 위치.
-// 편집 화면 서식(append_inline_md_source)과 커서 이동(hidden_runs)이 함께 쓴다.
-fn inline_spans(line: &str) -> Vec<(usize, usize, usize, usize, Inline)> {
-    let b = line.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i < b.len() {
-        if b[i] == b'\\' && i + 1 < b.len() {
-            i += 1;
-            i += line[i..].chars().next().map_or(1, char::len_utf8);
-            continue;
-        }
-        if b[i] == b'`' {
-            let run = b[i..].iter().take_while(|&&c| c == b'`').count();
-            let fence = &line[i..i + run];
-            let bs = i + run;
-            if let Some(off) = line[bs..].find(fence) {
-                if off > 0 && !line[bs..bs + off].contains('\n') {
-                    out.push((i, bs, bs + off, bs + off + run, Inline::Code));
-                    i = bs + off + run;
-                    continue;
-                }
-            }
-            i += run;
-            continue;
-        }
-        if b[i] == b'[' && !(i > 0 && b[i - 1] == b'!') {
-            if let Some(close) = line[i + 1..].find(']') {
-                let label = &line[i + 1..i + 1 + close];
-                let after = i + 2 + close; // "]" 다음
-                if let Some(name) = label.strip_prefix('^') {
-                    if !name.is_empty()
-                        && !name.contains(char::is_whitespace)
-                        && !line[after..].starts_with(':')
-                    {
-                        out.push((i + 1, i + 2, after - 1, after - 1, Inline::FootRef));
-                        i = after;
-                        continue;
-                    }
-                } else if !label.is_empty() && !label.contains('[') && line[after..].starts_with('(') {
-                    if let Some(rp) = line[after..].find(')') {
-                        out.push((i, i + 1, after - 1, after + rp + 1, Inline::Link));
-                        i = after + rp + 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        let two = b.get(i..i + 2);
-        if matches!(two, Some(b"**" | b"__" | b"~~" | b"==")) {
-            let mark = &line[i..i + 2];
-            let prev_alnum = mark == "__"
-                && line[..i]
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_alphanumeric);
-            let inner = &line[i + 2..];
-            if !prev_alnum && !inner.starts_with(char::is_whitespace) {
-                if let Some(off) = inner.find(mark) {
-                    let body = &inner[..off];
-                    if !body.is_empty() && !body.contains('\n') && !body.ends_with(char::is_whitespace)
-                    {
-                        let kind = match mark {
-                            "**" | "__" => Inline::Bold,
-                            "==" => Inline::Mark,
-                            _ => Inline::Strike,
-                        };
-                        out.push((i, i + 2, i + 2 + off, i + 4 + off, kind));
-                        i += 4 + off;
-                        continue;
-                    }
-                }
-            }
-            i += 2;
-            continue;
-        }
-        if b[i] == b'*' {
-            let inner = &line[i + 1..];
-            if !inner.is_empty() && !inner.starts_with(char::is_whitespace) {
-                let mut from = 0usize;
-                let mut end = None;
-                while let Some(rel) = inner[from..].find('*') {
-                    let pos = from + rel;
-                    if inner[pos..].starts_with("**") {
-                        from = pos + inner.as_bytes()[pos..].iter().take_while(|&&c| c == b'*').count();
-                        continue;
-                    }
-                    let cand = &inner[..pos];
-                    if !cand.is_empty() && !cand.contains('\n') && !cand.ends_with(char::is_whitespace) {
-                        end = Some(pos);
-                    }
-                    break;
-                }
-                if let Some(off) = end {
-                    out.push((i, i + 1, i + 1 + off, i + 2 + off, Inline::Italic));
-                    i += 2 + off;
-                    continue;
-                }
-            }
-        }
-        i += line[i..].chars().next().map_or(1, char::len_utf8);
-    }
-    out
-}
-
-// 줄에서 인라인 서식을 읽기 시작하는 바이트 위치 (md_job과 같은 규칙).
-// 제목·구분선·접기 제목/닫는 줄·알림 상자 제목 줄은 인라인 서식 없음(None).
-fn inline_start(line: &str) -> Option<usize> {
-    let t = line.trim_start();
-    if heading_level(t).is_some()
-        || is_hr_line(line)
-        || t.starts_with(":::")
-        || (t.starts_with('>') && callout_kind(t).is_some())
-    {
-        return None;
-    }
-    Some(hidden_prefix(line))
-}
-
-// 블록 안 인라인 서식들의 문자 위치 [여는 시작, 내용 시작, 내용 끝, 닫는 끝]과 종류. 코드·수식 블록은 없음.
-fn block_inline_spans(block: &str) -> Vec<([usize; 4], Inline)> {
-    let mut out = Vec::new();
-    if is_math_block(block) {
-        return out;
-    }
-    let (mut ci, mut fence) = (0, false);
-    for line in block.split('\n') {
-        let t = line.trim_start();
-        let is_fence = t.starts_with("```") || t.starts_with("~~~");
-        if is_fence || fence {
-            fence ^= is_fence;
-        } else if let Some(st) = inline_start(line) {
-            let base = ci + char_len(&line[..st]);
-            let rest = &line[st..];
-            let cc = |b: usize| base + char_len(&rest[..b]);
-            for (a, bs, be, e, k) in inline_spans(rest) {
-                out.push(([cc(a), cc(bs), cc(be), cc(e)], k));
-            }
-        }
-        ci += char_len(line) + 1;
-    }
-    out
-}
-
-// 편집 화면에서 숨긴 기호 구간(문자 위치): (시작, 끝, 줄머리 기호인지). 붙어 있는 줄머리 구간은 하나로 합친다.
-fn hidden_runs(block: &str) -> Vec<(usize, usize, bool)> {
-    let mut pre_runs: Vec<(usize, usize, bool)> = Vec::new();
-    if !is_math_block(block) {
-        let lines: Vec<&str> = block.split('\n').collect();
-        let (mut ci, mut fence) = (0, false);
-        for (i, line) in lines.iter().enumerate() {
-            let t = line.trim_start();
-            let is_fence = t.starts_with("```") || t.starts_with("~~~");
-            if is_fence || fence {
-                fence ^= is_fence;
-            } else {
-                let pre = hidden_prefix(line);
-                if pre > 0 {
-                    let mut e = ci + char_len(&line[..pre]);
-                    if pre == line.len() && i + 1 < lines.len() {
-                        e += 1; // 줄 전체를 숨기면 줄바꿈도 함께 (접힌 줄에 커서가 서지 않게)
-                    }
-                    match pre_runs.last_mut() {
-                        Some(last) if last.1 == ci => last.1 = e,
-                        _ => pre_runs.push((ci, e, true)),
-                    }
-                }
-            }
-            ci += char_len(line) + 1;
-        }
-    }
-    let mut out = pre_runs;
-    for ([a, bs, be, e], _) in block_inline_spans(block) {
-        out.push((a, bs, false));
-        if be < e {
-            out.push((be, e, false));
-        }
-    }
-    out
-}
-
-// 편집 화면에서 커서가 갈 수 있는 블록 안 범위 (숨긴 줄머리 기호·코드 펜스 바깥)
-fn visible_bounds(block: &str) -> (usize, usize) {
-    fenced_body_range(block).unwrap_or_else(|| {
-        let start = hidden_runs(block)
-            .iter()
-            .find(|r| r.2 && r.0 == 0)
-            .map_or(0, |r| r.1);
-        (start, char_len(block))
-    })
-}
-
-// 커서가 숨긴 기호 안에 들어가면 보이는 자리로 옮긴다.
-// 줄머리 기호: 내용 시작으로 (내용 시작에서 왼쪽으로 온 거라면 윗줄 끝으로).
-// 인라인 기호: 움직이던 방향의 끝으로, 화면상 제자리걸음이면 한 글자 더 간다.
-fn clamp_hidden(s: &str, c: usize, prev: Option<usize>) -> usize {
-    let runs = hidden_runs(s);
-    let len = char_len(s);
-    let mut c = c;
-    for _ in 0..4 {
-        if let Some(&(a, e, _)) = runs.iter().find(|&&(a, e, pre)| pre && c >= a && c < e) {
-            c = if prev == Some(e) && a > 0 { a - 1 } else { e };
-            continue;
-        }
-        if let Some(&(a, e, _)) = runs.iter().find(|&&(a, e, pre)| !pre && c > a && c < e) {
-            c = if prev.is_some_and(|p| p >= e) { a } else { e };
-            continue;
-        }
-        let stuck = prev.filter(|&p| p != c).and_then(|p| {
-            runs.iter()
-                .find(|&&(a, e, pre)| !pre && (a..=e).contains(&c) && (a..=e).contains(&p))
-                .map(|&(a, e, _)| if c > p { (e + 1).min(len) } else { a.saturating_sub(1) })
-        });
-        match stuck {
-            Some(n) if n != c => c = n,
-            _ => break,
-        }
-    }
-    c
-}
-
-// 숨긴 인라인 기호 옆 Backspace/Delete: 화면에 보이는 이웃 글자를 지운다 (내용이 한 글자뿐이면 서식째).
-// Some(Ok((블록, 커서))) = 직접 처리, Some(Err(c)) = 커서만 c로 옮기고 기본 동작에 맡김.
-fn delete_near_hidden(block: &str, c: usize, back: bool) -> Option<Result<(String, usize), usize>> {
-    for ([os, bs, be, ce], kind) in block_inline_spans(block) {
-        if kind == Inline::FootRef {
-            // [^1] 배지는 한 덩어리: 바로 뒤 Backspace·바로 앞 Delete로 통째로 지운다
-            let (whole_a, whole_e) = (os - 1, ce + 1);
-            if (back && c == whole_e) || (!back && c == whole_a) {
-                return Some(Ok((replace_range(block, (whole_a, whole_e), ""), whole_a)));
-            }
-            continue;
-        }
-        let (at_start, at_end) = (c == os || c == bs, c == be || c == ce);
-        let target = match (back, at_start, at_end) {
-            (true, _, true) => be - 1,  // 뒤에서 Backspace → 내용 마지막 글자
-            (false, true, _) => bs,     // 앞에서 Delete → 내용 첫 글자
-            (true, true, _) => return (c != os).then_some(Err(os)),
-            (false, _, true) => return (c != ce).then_some(Err(ce)),
-            _ => continue,
-        };
-        if be - bs == 1 {
-            return Some(Ok((replace_range(block, (os, ce), ""), os)));
-        }
-        return Some(Ok((replace_range(block, (target, target + 1), ""), target)));
-    }
-    None
-}
-
-// 목록·제목 내용 맨 앞에서 Backspace (노션식): 제목은 일반 문단으로, 들여쓴 항목은 한 단계 내어쓰기,
-// 블록 첫 항목은 기호만 지워 일반 문단으로, 그 밖의 항목은 윗줄과 합친다.
-fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)> {
-    let ls = line_start(s, c);
-    let line = &s[byte_idx(s, ls)..byte_idx(s, line_end(s, c))];
-    let m = hidden_prefix(line);
-    if m == 0 || c != ls + char_len(&line[..m]) {
-        return None;
-    }
-    let t = line.trim_start();
-    let lb = byte_idx(s, ls);
-    let bstart = s[..lb].rfind("\n\n").map_or(0, |i| i + 2);
-    let bend = s[lb..].find("\n\n").map_or(s.len(), |i| lb + i);
-    if t.starts_with('>') {
-        // 인용·알림 상자의 첫 줄 맨 앞 → 블록 전체를 일반 문단으로 / 그 밖의 줄 → 윗줄과 합치기
-        let block = &s[bstart..bend];
-        let after_title = callout_kind(block).is_some() && !s[bstart..lb.saturating_sub(1)].contains('\n');
-        if lb == bstart || after_title {
-            let mut lines: Vec<&str> = block.split('\n').collect();
-            if callout_kind(block).is_some() {
-                lines.remove(0);
-            }
-            let plain: Vec<&str> = lines
-                .iter()
-                .map(|l| l.trim_start().strip_prefix('>').map_or(*l, |r| r.strip_prefix(' ').unwrap_or(r)))
-                .collect();
-            let out = format!("{}{}{}", &s[..bstart], plain.join("\n"), &s[bend..]);
-            return Some((out, char_len(&s[..bstart])));
-        }
-        return Some((replace_range(s, (ls - 1, c), ""), ls - 1));
-    }
-    if t.starts_with(":::toggle") {
-        // 접기 제목 맨 앞 → 접기를 풀어 일반 문단으로 (닫는 ::: 줄도 함께 지움)
-        let block = &s[bstart..bend];
-        let body = block.trim_end().strip_suffix(":::").map_or(block, |b| b.trim_end_matches('\n'));
-        let body = body.get(block.len() - block.trim_start().len() + hidden_prefix(t)..).unwrap_or("");
-        let out = format!("{}{}{}", &s[..bstart], body, &s[bend..]);
-        return Some((out, char_len(&s[..bstart])));
-    }
-    if list_marker_bytes(line).is_none() {
-        return Some((replace_range(s, (ls, c), ""), ls)); // 제목·구분선·각주 → 문단
-    }
-    if line.starts_with(' ') {
-        return indent_list(s, (c, c), true).map(|(t, sel)| (t, sel.0));
-    }
-    let first = ls == 0 || s[..byte_idx(s, ls)].ends_with("\n\n");
-    if first {
-        Some((replace_range(s, (ls, ls + m), ""), ls))
-    } else {
-        Some((replace_range(s, (ls - 1, ls + m), ""), ls - 1))
-    }
-}
-
-// 코드 블록 편집이 숨긴 ``` 줄을 건드렸으면 그 부분만 되돌린다 (코드 부분의 변경은 유지).
-// 반환: (고친 블록, 커서 문자 위치). 펜스가 멀쩡하면 None.
-fn keep_code_fences(old: &str, new: &str) -> Option<(String, usize)> {
-    let (s0, e0) = fenced_body_range(old)?;
-    // 빈 블록("```\n```")에서 친 글자는 닫는 줄 앞에 붙는다 → 닫는 ```를 다음 줄로 돌려놓는다
-    let close = &old[old.rfind('\n').map_or(old.len(), |i| i + 1)..];
-    if s0 == e0 && ["```", "~~~", "$$", ":::"].contains(&close.trim()) && new.ends_with(close) {
-        let at = new.len() - close.len();
-        if at > byte_idx(old, s0) && !new[..at].ends_with('\n') && new.starts_with(&old[..byte_idx(old, s0)]) {
-            return Some((format!("{}\n{}", &new[..at], close), char_len(&new[..at])));
-        }
-    }
-    let (p, s) = (byte_idx(old, s0), old.len() - byte_idx(old, e0));
-    if new.len() >= p + s && new.starts_with(&old[..p]) && new.ends_with(&old[old.len() - s..]) {
-        return None;
-    }
-    let mut cp = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
-    while !old.is_char_boundary(cp) || !new.is_char_boundary(cp) {
-        cp -= 1;
-    }
-    let max_cs = (old.len() - cp).min(new.len() - cp);
-    let mut cs = old
-        .bytes()
-        .rev()
-        .zip(new.bytes().rev())
-        .take(max_cs)
-        .take_while(|(a, b)| a == b)
-        .count();
-    while !old.is_char_boundary(old.len() - cs) || !new.is_char_boundary(new.len() - cs) {
-        cs -= 1;
-    }
-    let ins = &new[cp..new.len() - cs];
-    let a = cp.clamp(p, old.len() - s);
-    let b = (old.len() - cs).clamp(a, old.len() - s);
-    let out = format!("{}{ins}{}", &old[..a], &old[b..]);
-    let caret = char_len(&out[..a + ins.len()]);
-    Some((out, caret))
-}
-
-// 번호 목록을 계층별로 1, 2, 3… 다시 매긴다 (맨 위 단계의 첫 번호는 사용자가 쓴 값 유지)
-fn renumber_lists(lines: &mut [String]) {
-    let mut stack: Vec<(usize, bool, u64)> = Vec::new(); // (들여쓰기, 번호 목록?, 다음 번호)
-    for line in lines.iter_mut() {
-        let Some((ind, col)) = list_cols(line) else {
-            continue; // 이어지는 문단 줄
-        };
-        let digits = &line[ind..col - 2];
-        let ordered = !digits.is_empty();
-        while stack.last().is_some_and(|t| t.0 > ind) {
-            stack.pop();
-        }
-        if stack.last().is_some_and(|t| t.0 == ind && t.1 != ordered) {
-            stack.pop(); // 같은 단계에서 기호 종류가 바뀌면 새 목록
-        }
-        if !stack.last().is_some_and(|t| t.0 == ind) {
-            let start = if stack.is_empty() {
-                digits.parse().unwrap_or(1)
-            } else {
-                1
-            };
-            stack.push((ind, ordered, start));
-        }
-        let top = stack.last_mut().unwrap();
-        if ordered {
-            let n = top.2.to_string();
-            top.2 += 1;
-            if n != digits {
-                line.replace_range(ind..col - 2, &n);
-            }
-        }
-    }
-}
-
-// Tab / Shift+Tab (목록 줄): 계층 구조대로 들여쓰기·내어쓰기.
-// Tab → 바로 위 형제 항목의 내용 열로 (형제가 없으면 첫 항목이라 들여쓸 수 없음),
-// Shift+Tab → 부모 항목의 들여쓰기로. 하위 항목도 함께 움직이고 번호는 다시 매긴다.
-// 첫 줄이 목록이 아니면 None.
-// ponytail: 문서 전체를 줄로 나눈다(O(n)). Tab은 드물어서 충분하다.
-fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String, Sel)> {
-    let orig: Vec<&str> = s.split('\n').collect();
-    let pos = |c: usize| {
-        let mut acc = 0;
-        for (i, l) in orig.iter().enumerate() {
-            let n = char_len(l);
-            if c <= acc + n {
-                return (i, c - acc);
-            }
-            acc += n + 1;
-        }
-        (orig.len() - 1, 0)
-    };
-    let ((la, ca), (lb, cb)) = (pos(a), pos(b));
-    let (ind, _) = list_cols(orig[la])?;
-    let above = || {
-        orig[..la]
-            .iter()
-            .rev()
-            .take_while(|l| !l.trim().is_empty())
-            .filter_map(|l| list_cols(l))
-    };
-    let target = if outdent {
-        above().find(|&(i, _)| i < ind).map_or(0, |(i, _)| i)
-    } else {
-        match above().find(|&(i, _)| i <= ind) {
-            Some((i, col)) if i == ind => col,
-            _ => ind, // 형제 없음: 그대로
-        }
-    };
-    let delta = target as isize - ind as isize;
-    if delta == 0 {
-        return Some((s.to_string(), (a, b)));
-    }
-    let lead = |l: &str| l.len() - l.trim_start_matches(' ').len();
-    // 선택 줄 + 그 아래의 하위 항목·이어지는 줄까지 함께 이동
-    let mut end = lb;
-    while end + 1 < orig.len() && !orig[end + 1].trim().is_empty() && lead(orig[end + 1]) > ind {
-        end += 1;
-    }
-    let mut lines: Vec<String> = orig.iter().map(|l| l.to_string()).collect();
-    for l in &mut lines[la..=end] {
-        if delta > 0 {
-            l.insert_str(0, &" ".repeat(delta as usize));
-        } else {
-            let n = lead(l).min((-delta) as usize);
-            l.drain(..n);
-        }
-    }
-    let run_start = (0..=la)
-        .rev()
-        .find(|&i| i == 0 || lines[i - 1].trim().is_empty())
-        .unwrap_or(0);
-    let run_end = (end..lines.len())
-        .find(|&i| i + 1 == lines.len() || lines[i + 1].trim().is_empty())
-        .unwrap_or(end);
-    renumber_lists(&mut lines[run_start..=run_end]);
-    // 커서: 같은 줄에서 줄 길이 변화만큼 이동 (변화는 모두 내용 앞에서 일어난다)
-    let at = |line: usize, col: usize| {
-        let diff = char_len(&lines[line]) as isize - char_len(orig[line]) as isize;
-        let col = (col as isize + diff).clamp(0, char_len(&lines[line]) as isize) as usize;
-        lines[..line].iter().map(|l| char_len(l) + 1).sum::<usize>() + col
-    };
-    let sel = (at(la, ca), at(lb, cb));
-    Some((lines.join("\n"), sel))
-}
-
-// 목록 줄 분석: (들여쓰기, 다음 줄에 쓸 기호, 현재 기호 길이(문자), 내용이 비었는지)
-fn list_marker(line: &str) -> Option<(String, String, usize, bool)> {
-    let indent_len = line.len() - line.trim_start_matches(' ').len();
-    let (indent, rest) = line.split_at(indent_len);
-    for task in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] "] {
-        if let Some(body) = rest.strip_prefix(task) {
-            let next = format!("{} [ ] ", &task[..1]);
-            return Some((indent.into(), next, char_len(task), body.trim().is_empty()));
-        }
-    }
-    for bullet in ["- ", "* ", "+ "] {
-        if let Some(body) = rest.strip_prefix(bullet) {
-            return Some((indent.into(), bullet.into(), 2, body.trim().is_empty()));
-        }
-    }
-    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-    if digits > 0 && digits < 10 {
-        let after = &rest[digits..];
-        for sep in [". ", ") "] {
-            if let Some(body) = after.strip_prefix(sep) {
-                let n: u64 = rest[..digits].parse().ok()?;
-                let next = format!("{}{}", n + 1, sep);
-                return Some((indent.into(), next, digits + 2, body.trim().is_empty()));
-            }
-        }
-    }
-    None
-}
-
-// 힙 할당 없이 줄 앞 목록 기호의 바이트 길이만 계산한다 (md_job 레이아웃 전용)
-fn list_marker_bytes(line: &str) -> Option<usize> {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    let rest = &line[indent..];
-    for task in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] "] {
-        if rest.starts_with(task) {
-            return Some(indent + task.len());
-        }
-    }
-    for bullet in ["- ", "* ", "+ "] {
-        if rest.starts_with(bullet) {
-            return Some(indent + bullet.len());
-        }
-    }
-    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if digits > 0 && digits < 10 {
-        let after = &rest[digits..];
-        if after.starts_with(". ") || after.starts_with(") ") {
-            return Some(indent + digits + 2);
-        }
-    }
-    None
-}
-
-// Enter: 목록이면 다음 기호를 이어 쓰고, 빈 항목이면 목록을 끝낸다. 목록이 아니면 None.
-fn smart_enter(s: &str, cursor: usize) -> Option<(String, usize)> {
-    let ls = line_start(s, cursor);
-    let line = &s[byte_idx(s, ls)..byte_idx(s, line_end(s, cursor))];
-    let (indent, next, marker_len, empty) = list_marker(line)?;
-    let marker_end = ls + char_len(&indent) + marker_len;
-    if cursor < marker_end {
-        return None; // 기호 앞/중간에서 Enter는 일반 줄바꿈
-    }
-    if empty {
-        let out = replace_range(s, (ls, line_end(s, cursor)), "");
-        return Some((out, ls));
-    }
-    let ins = format!("\n{indent}{next}");
-    let out = replace_range(s, (cursor, cursor), &ins);
-    Some(renumber_block_at(&out, cursor + char_len(&ins)))
-}
-
-// 커서(문자 위치)가 있는 블록의 번호 목록을 다시 매긴다. 커서는 같은 줄·같은 글자 뒤에 남는다.
-fn renumber_block_at(s: &str, c: usize) -> (String, usize) {
-    let b = byte_idx(s, c);
-    let bs = s[..b].rfind("\n\n").map_or(0, |i| i + 2);
-    let be = s[b..].find("\n\n").map_or(s.len(), |i| b + i);
-    let mut lines: Vec<String> = s[bs..be].split('\n').map(str::to_string).collect();
-    let li = s[bs..b].matches('\n').count();
-    let line_start = s[..b].rfind('\n').map_or(0, |i| i + 1).max(bs);
-    let from_end = char_len(&lines[li]) - char_len(&s[line_start..b]);
-    renumber_lists(&mut lines);
-    let caret = char_len(&s[..bs])
-        + lines[..li].iter().map(|l| char_len(l) + 1).sum::<usize>()
-        + char_len(&lines[li])
-        - from_end;
-    (format!("{}{}{}", &s[..bs], lines.join("\n"), &s[be..]), caret)
-}
-
-// 구분선·이미지: 글자를 넣을 수 없는 한 덩어리 블록
-fn is_atomic_block(b: &str) -> bool {
-    !b.contains('\n') && (is_hr_line(b) || image_line(b).is_some())
-}
-
-// 앞뒤 블록과 글자를 합치면 구조가 깨지는 블록 (코드·수식·접기·표·구분선·이미지)
-fn is_unmergeable_block(b: &str) -> bool {
-    let t = b.trim_start();
-    is_atomic_block(b) || ["```", "~~~", "$$", ":::toggle", "|"].iter().any(|p| t.starts_with(p))
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BlockKind {
-    Paragraph,
-    Heading(usize),
-    Todo,
-    Bullet,
-    Numbered,
-    Quote,
-    Code,
-    Callout,
-    Toggle,
-}
-
-// 줄 앞의 마크다운 블록 기호 분석: (들여쓰기 바이트 길이, 현재 종류, 기호 바이트 길이)
-fn detect_line_kind(line: &str) -> (usize, Option<BlockKind>, usize) {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    let rest = &line[indent..];
-    if let Some(lv) = heading_level(rest) {
-        let m = (lv + 1).min(rest.len());
-        return (indent, Some(BlockKind::Heading(lv)), m);
-    }
-    for task in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] "] {
-        if rest.starts_with(task) {
-            return (indent, Some(BlockKind::Todo), task.len());
-        }
-    }
-    for bullet in ["- ", "* ", "+ "] {
-        if rest.starts_with(bullet) {
-            return (indent, Some(BlockKind::Bullet), bullet.len());
-        }
-    }
-    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if (1..10).contains(&digits) {
-        for sep in [". ", ") "] {
-            if rest[digits..].starts_with(sep) {
-                return (indent, Some(BlockKind::Numbered), digits + sep.len());
-            }
-        }
-    }
-    if let Some(after) = rest.strip_prefix('>') {
-        let m = 1 + usize::from(after.starts_with(' '));
-        return (indent, Some(BlockKind::Quote), m);
-    }
-    (indent, None, 0)
-}
-
-// 선택된 줄들의 블록 유형(제목·목록·할일·인용·일반 문단)을 전환한다 (이미 같은 유형이면 일반 문단으로 토글)
-fn convert_lines_kind(s: &str, (a, b): Sel, kind: BlockKind) -> (String, Sel) {
-    let (ls, le) = (line_start(s, a), line_end(s, b));
-    let block = &s[byte_idx(s, ls)..byte_idx(s, le)];
-    let lines_vec: Vec<&str> = block.split('\n').collect();
-    let all_same = kind != BlockKind::Paragraph
-        && lines_vec
-            .iter()
-            .filter(|l| !l.trim().is_empty() || lines_vec.len() == 1)
-            .all(|l| detect_line_kind(l).1 == Some(kind))
-        && lines_vec
-            .iter()
-            .any(|l| !l.trim().is_empty() || lines_vec.len() == 1);
-    let target = if all_same { BlockKind::Paragraph } else { kind };
-    let mut first_delta: isize = 0;
-    let out_lines: Vec<String> = lines_vec
-        .iter()
-        .enumerate()
-        .map(|(i, l)| {
-            let (indent, _, marker) = detect_line_kind(l);
-            let body = &l[indent + marker..];
-            let keep_indent = if matches!(target, BlockKind::Heading(_)) {
-                ""
-            } else {
-                &l[..indent]
-            };
-            let prefix = match target {
-                BlockKind::Paragraph => String::new(),
-                BlockKind::Heading(n) => format!("{} ", "#".repeat(n.clamp(1, 6))),
-                BlockKind::Todo => "- [ ] ".to_string(),
-                BlockKind::Bullet => "- ".to_string(),
-                BlockKind::Numbered => format!("{}. ", i + 1),
-                BlockKind::Quote => "> ".to_string(),
-                _ => String::new(),
-            };
-            let new_line = format!("{keep_indent}{prefix}{body}");
-            if i == 0 {
-                first_delta = char_len(&new_line) as isize - char_len(l) as isize;
-            }
-            new_line
-        })
-        .collect();
-    let new_block = out_lines.join("\n");
-    let out = replace_range(s, (ls, le), &new_block);
-    let new_le = ls + char_len(&new_block);
-    let na = (a as isize + first_delta).max(ls as isize) as usize;
-    let nb = if a == b {
-        na
-    } else {
-        (b as isize + (new_le as isize - le as isize)).max(na as isize) as usize
-    };
-    (out, (na.min(new_le), nb.min(new_le)))
-}
-
-// Ctrl+Enter: 할 일 체크박스 완료/미완료 토글 (일반 줄이면 할 일 항목으로 전환)
-fn toggle_todo_lines(s: &str, (a, b): Sel) -> (String, Sel) {
-    let (ls, le) = (line_start(s, a), line_end(s, b));
-    let block = &s[byte_idx(s, ls)..byte_idx(s, le)];
-    let mut first_delta: isize = 0;
-    let out_lines: Vec<String> = block
-        .split('\n')
-        .enumerate()
-        .map(|(i, l)| {
-            let indent = l.len() - l.trim_start_matches(' ').len();
-            let (ind, rest) = l.split_at(indent);
-            let new_line = if let Some(body) = rest
-                .strip_prefix("- [ ] ")
-                .or_else(|| rest.strip_prefix("* [ ] "))
-            {
-                format!("{ind}- [x] {body}")
-            } else if let Some(body) = rest
-                .strip_prefix("- [x] ")
-                .or_else(|| rest.strip_prefix("- [X] "))
-                .or_else(|| rest.strip_prefix("* [x] "))
-                .or_else(|| rest.strip_prefix("* [X] "))
-            {
-                format!("{ind}- [ ] {body}")
-            } else {
-                let (_, _, marker) = detect_line_kind(l);
-                format!("{ind}- [ ] {}", &l[indent + marker..])
-            };
-            if i == 0 {
-                first_delta = char_len(&new_line) as isize - char_len(l) as isize;
-            }
-            new_line
-        })
-        .collect();
-    let new_block = out_lines.join("\n");
-    let out = replace_range(s, (ls, le), &new_block);
-    let new_le = ls + char_len(&new_block);
-    let na = (a as isize + first_delta).max(ls as isize) as usize;
-    let nb = if a == b {
-        na
-    } else {
-        (b as isize + (new_le as isize - le as isize)).max(na as isize) as usize
-    };
-    (out, (na.min(new_le), nb.min(new_le)))
-}
-
-// 찾기: 모든 일치 구간(문자 인덱스). 대소문자 구분·ASCII 검색은 힙 할당 없이 바이트 단위로 고속 스캔한다.
-fn find_all(s: &str, query: &str, case: bool) -> Vec<Sel> {
-    if query.is_empty() || query.len() > s.len() {
-        return Vec::new();
-    }
-    if case {
-        let q_chars = char_len(query);
-        let mut out = Vec::new();
-        let (mut last_b, mut ci) = (0, 0);
-        for (b, _) in s.match_indices(query) {
-            ci += char_len(&s[last_b..b]);
-            out.push((ci, ci + q_chars));
-            last_b = b + query.len();
-            ci += q_chars;
-        }
-        return out;
-    }
-    if query.is_ascii() {
-        let qb = query.as_bytes();
-        let sb = s.as_bytes();
-        let q_len = qb.len();
-        let mut out = Vec::new();
-        let (mut i, mut last_b, mut ci) = (0, 0, 0);
-        while i + q_len <= sb.len() {
-            if sb[i..i + q_len].eq_ignore_ascii_case(qb)
-                && s.is_char_boundary(i)
-                && s.is_char_boundary(i + q_len)
-            {
-                ci += char_len(&s[last_b..i]);
-                out.push((ci, ci + q_len));
-                i += q_len;
-                last_b = i;
-                ci += q_len;
-            } else {
-                i += 1;
-            }
-        }
-        return out;
-    }
-    let norm = |c: char| c.to_lowercase().next().unwrap_or(c);
-    let needle: Vec<char> = query.chars().map(norm).collect();
-    let hay: Vec<char> = s.chars().map(norm).collect();
-    if needle.is_empty() || needle.len() > hay.len() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + needle.len() <= hay.len() {
-        if hay[i..i + needle.len()] == needle[..] {
-            out.push((i, i + needle.len()));
-            i += needle.len();
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn replace_all(s: &str, matches: &[Sel], with: &str) -> String {
-    if matches.is_empty() {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut prev_b = 0usize;
-    let mut prev_c = 0usize;
-    for &(a, b) in matches {
-        let ba = prev_b + byte_idx(&s[prev_b..], a.saturating_sub(prev_c));
-        let bb = ba + byte_idx(&s[ba..], b.saturating_sub(a));
-        out.push_str(&s[prev_b..ba]);
-        out.push_str(with);
-        prev_b = bb;
-        prev_c = b;
-    }
-    out.push_str(&s[prev_b..]);
-    out
-}
-
-// 목차: (레벨, 제목, 줄 번호, 줄 시작 문자 인덱스, 줄 시작 바이트 인덱스). 코드 펜스 안은 제외.
-// 일반 줄에서는 UTF-8 문자 수(char_len)를 세지 않고 제목 줄을 만났을 때만 증분 계산한다.
-fn outline_with_bytes_into(s: &str, out: &mut Vec<(usize, String, usize, usize, usize)>) {
-    out.clear();
-    let (mut in_code, mut ci, mut bi, mut last_bi) = (false, 0, 0, 0);
-    for (n, line) in s.split('\n').enumerate() {
-        let t = line.trim_start();
-        match t.as_bytes().first() {
-            Some(b'`' | b'~') if t.starts_with("```") || t.starts_with("~~~") => {
-                in_code = !in_code;
-            }
-            Some(b'#') if !in_code => {
-                let level = t.bytes().take_while(|&c| c == b'#').count();
-                if (1..=6).contains(&level) && t.as_bytes().get(level) == Some(&b' ') {
-                    ci += char_len(&s[last_bi..bi]);
-                    last_bi = bi;
-                    out.push((
-                        level,
-                        t[level..].trim().trim_end_matches('#').trim().into(),
-                        n,
-                        ci,
-                        bi,
-                    ));
-                }
-            }
-            _ => {}
-        }
-        bi += line.len() + 1;
-    }
-}
-
-#[cfg(test)]
-fn outline(s: &str) -> Vec<(usize, String, usize, usize)> {
-    let mut out = Vec::new();
-    outline_with_bytes_into(s, &mut out);
-    out.into_iter()
-        .map(|(l, t, n, ci, _)| (l, t, n, ci))
-        .collect()
-}
-
-// 미리보기 전용 변환. 바이트 길이를 보존해서 체크박스 위치가 원문과 1:1로 대응한다.
-//   :::toggle 제목 → ##### ▸ 제목,  ::: → 공백,  ==형광펜== → **형광펜**,  [[Ctrl]] → ``Ctrl``
-// 확장 문법이 없는 일반 블록은 힙 할당 없이 원본 슬라이스(Cow::Borrowed)를 그대로 돌려준다.
-fn preprocess(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.contains(":::") && !s.contains("==") && !s.contains("[[") {
-        return std::borrow::Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut in_code = false;
-    for (i, line) in s.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let t = line.trim_start();
-        if t.starts_with("```") || t.starts_with("~~~") {
-            in_code = !in_code;
-            out.push_str(line);
-        } else if in_code {
-            out.push_str(line);
-        } else if let Some(rest) = line.strip_prefix(":::toggle") {
-            out.push_str("##### ▸"); // 9바이트 = ":::toggle"
-            out.push_str(rest);
-        } else if line.trim_end() == ":::" {
-            for _ in 0..line.len() {
-                out.push(' ');
-            }
-        } else if !line.contains("==") && !line.contains("[[") {
-            out.push_str(line);
-        } else {
-            out.push_str(&preprocess_inline(line));
-        }
-    }
-    debug_assert_eq!(out.len(), s.len());
-    std::borrow::Cow::Owned(out)
-}
-
-fn preprocess_inline(line: &str) -> String {
-    let b = line.as_bytes();
-    let mut out: Vec<u8> = b.to_vec();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'`' {
-            // 코드 스팬은 그대로 건너뛴다
-            let run = b[i..].iter().take_while(|&&c| c == b'`').count();
-            let fence = &line[i..i + run];
-            i += run;
-            if let Some(off) = line[i..].find(fence) {
-                i += off + run;
-            }
-            continue;
-        }
-        let pair = |open: &[u8], close: &str, i: usize| -> Option<usize> {
-            if !b[i..].starts_with(open) {
-                return None;
-            }
-            let inner = &line[i + 2..];
-            let end = inner.find(close)?;
-            (end > 0 && !inner[..end].contains('`')).then_some(i + 2 + end)
-        };
-        if let Some(end) = pair(b"==", "==", i) {
-            out[i..i + 2].copy_from_slice(b"**");
-            out[end..end + 2].copy_from_slice(b"**");
-            i = end + 2;
-        } else if let Some(end) = pair(b"[[", "]]", i).filter(|&e| !line[i + 2..e].contains('[')) {
-            out[i..i + 2].copy_from_slice(b"``");
-            out[end..end + 2].copy_from_slice(b"``");
-            i = end + 2;
-        } else {
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| line.to_string())
-}
-
-// 미리보기에서 바뀐 부분(체크박스 [ ]↔[x])을 원문에 반영한다
-fn apply_preview_change(text: &mut String, before: &str, after: &str) -> bool {
-    let (b, a) = (before.as_bytes(), after.as_bytes());
-    if b.len() != a.len() || b.len() != text.len() {
-        return false;
-    }
-    let Some(first) = b.iter().zip(a).position(|(x, y)| x != y) else {
-        return false;
-    };
-    let last = b.len()
-        - 1
-        - b.iter()
-            .rev()
-            .zip(a.iter().rev())
-            .position(|(x, y)| x != y)
-            .unwrap_or(0);
-    let r = first..last + 1;
-    if !after.is_char_boundary(r.start) || !after.is_char_boundary(r.end) {
-        return false;
-    }
-    text.replace_range(r.clone(), &after[r]);
-    true
-}
-
-// 미리보기와 같은 파서(pulldown-cmark)·같은 전처리를 써서 화면과 내보낸 결과가 일치한다
-fn md_to_html(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
-    let opts = Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_DEFINITION_LIST
-        | Options::ENABLE_MATH
-        | Options::ENABLE_GFM;
-    let src = preprocess(md);
-    let mut body = String::new();
-    html::push_html(&mut body, Parser::new_ext(&src, opts));
-    body
-}
-
-fn export_html(title: &str, md: &str) -> String {
-    let body = md_to_html(md);
-    let title = title
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<title>{title} — MDEditor</title>
-<style>
-  body {{ font-family: -apple-system, "Segoe UI", "Malgun Gothic", Roboto, sans-serif; line-height: 1.8; max-width: 820px; margin: 48px auto; padding: 0 24px; color: #0f172a; }}
-  h1, h2, h3 {{ line-height: 1.35; }}
-  img {{ max-width: 100%; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-  th, td {{ border: 1px solid #e2e8f0; padding: 10px 14px; text-align: left; }}
-  th {{ background: #f8fafc; font-weight: 600; }}
-  pre {{ background: #f1f5f9; padding: 16px 20px; border-radius: 8px; overflow-x: auto; }}
-  code {{ font-family: Consolas, monospace; }}
-  blockquote {{ border-left: 3px solid #94a3b8; margin: 16px 0; padding: 6px 16px; background: #f8fafc; }}
-  .markdown-alert-note, .markdown-alert-tip {{ border-color: #0284c7; background: #f0f9ff; }}
-  .markdown-alert-important {{ border-color: #7c3aed; background: #f5f3ff; }}
-  .markdown-alert-warning, .markdown-alert-caution {{ border-color: #d97706; background: #fffbeb; }}
-  ul:has(> li > input[type=checkbox]) {{ list-style: none; padding-left: 8px; }}
-</style>
-</head>
-<body>
-{body}
-</body>
-</html>
-"#
-    )
-}
-
-// ---------- 캔버스 블록 ----------
-
-fn heading_level(t: &str) -> Option<usize> {
-    let n = t.chars().take_while(|&c| c == '#').count();
-    ((1..=6).contains(&n) && t[n..].chars().next().is_none_or(|c| c == ' ')).then_some(n)
-}
-
-fn fence_opener_line(line: &str) -> Option<(&str, &str, &str)> {
-    let body = line.trim_end_matches(['\n', '\r']);
-    let indent_len = body.len() - body.trim_start().len();
-    let indent = &body[..indent_len];
-    let t = &body[indent_len..];
-    let fence = if t.starts_with("```") {
-        "```"
-    } else if t.starts_with("~~~") {
-        "~~~"
-    } else {
-        return None;
-    };
-    let rest = &t[3..];
-    if rest.contains('`') || rest.contains('~') {
-        return None;
-    }
-    let lang = rest.trim();
-    (!lang.contains(char::is_whitespace)).then_some((indent, fence, lang))
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum TableAlign {
-    None,
-    Left,
-    Center,
-    Right,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-struct MdTable {
-    headers: Vec<String>,
-    aligns: Vec<TableAlign>,
-    rows: Vec<Vec<String>>,
-}
-
-fn split_table_row(line: &str) -> Option<Vec<String>> {
-    let t = line.trim();
-    if !t.contains('|') {
-        return None;
-    }
-    let inner = t.strip_prefix('|').unwrap_or(t);
-    let inner = inner.strip_suffix('|').unwrap_or(inner);
-    let mut cells = Vec::new();
-    let mut cur = String::new();
-    let mut chars = inner.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                if next == '|' || next == '\\' {
-                    cur.push(next);
-                    chars.next();
-                    continue;
-                }
-            }
-        }
-        if c == '|' {
-            cells.push(cur.trim().to_string());
-            cur.clear();
-        } else {
-            cur.push(c);
-        }
-    }
-    cells.push(cur.trim().to_string());
-    (!cells.is_empty()).then_some(cells)
-}
-
-fn parse_table_sep(cell: &str) -> Option<TableAlign> {
-    let t = cell.trim();
-    let left = t.starts_with(':');
-    let right = t.ends_with(':');
-    let mid = &t[usize::from(left)..t.len().saturating_sub(usize::from(right))];
-    if mid.is_empty() || !mid.bytes().all(|b| b == b'-') {
-        return None;
-    }
-    Some(match (left, right) {
-        (true, true) => TableAlign::Center,
-        (true, false) => TableAlign::Left,
-        (false, true) => TableAlign::Right,
-        (false, false) => TableAlign::None,
-    })
-}
-
-fn parse_md_table(src: &str) -> Option<MdTable> {
-    let mut lines = src.trim_end_matches(['\n', '\r']).lines();
-    let h_line = lines.next()?;
-    let s_line = lines.next()?;
-    let mut headers = split_table_row(h_line)?;
-    let seps_raw = split_table_row(s_line)?;
-    let mut aligns = Vec::with_capacity(seps_raw.len());
-    for s in seps_raw {
-        aligns.push(parse_table_sep(&s)?);
-    }
-    let cols = headers.len().max(aligns.len());
-    if cols == 0 {
-        return None;
-    }
-    headers.resize(cols, String::new());
-    aligns.resize(cols, TableAlign::None);
-    let mut rows = Vec::new();
-    for line in lines {
-        let mut row = split_table_row(line)?;
-        row.resize(cols, String::new());
-        rows.push(row);
-    }
-    Some(MdTable {
-        headers,
-        aligns,
-        rows,
-    })
-}
-
-fn serialize_md_table(tbl: &MdTable) -> String {
-    let cols = tbl.headers.len().max(1);
-    let escape_cell = |s: &str| s.replace('\r', "").replace('\n', " ").replace('|', "\\|");
-    let mut out = String::new();
-    let push_row = |out: &mut String, cells: &[String]| {
-        out.push('|');
-        for i in 0..cols {
-            out.push(' ');
-            if let Some(c) = cells.get(i) {
-                out.push_str(&escape_cell(c));
-            }
-            out.push_str(" |");
-        }
-    };
-    push_row(&mut out, &tbl.headers);
-    out.push('\n');
-    out.push('|');
-    for i in 0..cols {
-        let sep = match tbl.aligns.get(i).copied().unwrap_or(TableAlign::None) {
-            TableAlign::None => "---",
-            TableAlign::Left => ":---",
-            TableAlign::Center => ":---:",
-            TableAlign::Right => "---:",
-        };
-        out.push(' ');
-        out.push_str(sep);
-        out.push_str(" |");
-    }
-    for row in &tbl.rows {
-        out.push('\n');
-        push_row(&mut out, row);
-    }
-    out
-}
-
-// 노션식 캔버스의 블록: 빈 줄로 나뉜 바이트 구간.
-// 코드 펜스·$$·:::toggle 안의 빈 줄로는 나누지 않고, 제목 줄은 항상 혼자 한 블록이다.
-fn split_blocks_into(s: &str, out: &mut Vec<Range<usize>>) {
-    out.clear();
-    let mut start: Option<usize> = None;
-    let mut fence: Option<&str> = None; // 닫는 표식
-    let (mut pos, mut last_end) = (0, 0);
-    for line in s.split_inclusive('\n') {
-        let body = line.trim_end_matches(['\n', '\r']);
-        let t = body.trim_start();
-        let end = pos + body.len();
-        if let Some(close) = fence {
-            let closes = if close == "```" || close == "~~~" {
-                t.starts_with(close)
-            } else {
-                t.trim_end() == close
-            };
-            last_end = end;
-            if closes {
-                fence = None;
-                out.push(start.take().unwrap_or(pos)..end);
-            }
-        } else if body.is_empty() {
-            if let Some(st) = start.take() {
-                out.push(st..last_end);
-            }
-        } else {
-            let opener = if t.starts_with("```") {
-                Some("```")
-            } else if t.starts_with("~~~") {
-                Some("~~~")
-            } else if t.trim_end() == "$$" {
-                Some("$$")
-            } else if t.starts_with(":::toggle") {
-                Some(":::")
-            } else {
-                None
-            };
-            let heading = heading_level(t).is_some();
-            if opener.is_some() || heading {
-                if let Some(st) = start.take() {
-                    out.push(st..last_end);
-                }
-            }
-            if opener.is_some() {
-                start = Some(pos);
-                fence = opener;
-            } else if heading {
-                out.push(pos..end);
-            } else if start.is_none() {
-                start = Some(pos);
-            }
-            last_end = end;
-        }
-        pos += line.len();
-    }
-    if let Some(st) = start {
-        out.push(st..last_end);
-    }
-}
-
-fn split_blocks(s: &str) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
-    split_blocks_into(s, &mut out);
-    out
-}
-
-// 캔버스/커서 이동용 슬롯 목록: 비어 있지 않은 블록 + 빈 줄 블록(start..start)
-fn collect_doc_slots_into(
-    text: &str,
-    blocks: &[Range<usize>],
-    active_empty: Option<usize>,
-    out: &mut Vec<Range<usize>>,
-) {
-    fn push_gap(
-        out: &mut Vec<Range<usize>>,
-        active_empty: Option<usize>,
-        start: usize,
-        end: usize,
-        step_from: usize,
-        skip_end: bool,
-    ) {
-        let mut p = step_from;
-        while p < end || (!skip_end && p == end) {
-            out.push(p..p);
-            p += 2;
-        }
-        if let Some(a) = active_empty {
-            if a >= start && a <= end && (!skip_end || a < end) && !out.contains(&(a..a)) {
-                let at = out.partition_point(|r| r.start < a);
-                out.insert(at, a..a);
-            }
-        }
-    }
-    out.clear();
-    if blocks.is_empty() {
-        if text.is_empty() {
-            if active_empty == Some(0) {
-                out.push(0..0);
-            }
-        } else {
-            push_gap(out, active_empty, 0, text.len(), 0, false);
-        }
-        return;
-    }
-    push_gap(out, active_empty, 0, blocks[0].start, 0, true);
-    for (i, b) in blocks.iter().enumerate() {
-        out.push(b.clone());
-        let next_start = blocks.get(i + 1).map_or(text.len(), |n| n.start);
-        let step_from = (b.end + 2).min(next_start + 1);
-        push_gap(
-            out,
-            active_empty,
-            b.end,
-            next_start,
-            step_from,
-            i + 1 < blocks.len(),
-        );
-    }
-}
-
-#[cfg(test)]
-fn collect_doc_slots(
-    text: &str,
-    blocks: &[Range<usize>],
-    active_empty: Option<usize>,
-) -> Vec<Range<usize>> {
-    let mut out = Vec::new();
-    collect_doc_slots_into(text, blocks, active_empty, &mut out);
-    out
-}
-
-fn slot_index(slots: &[Range<usize>], target: &Range<usize>) -> Option<usize> {
-    slots
-        .binary_search_by(|s| s.start.cmp(&target.start).then(s.end.cmp(&target.end)))
-        .ok()
-}
-
 // ---------- 앱 ----------
 
 enum Dialog {
@@ -2246,6 +812,7 @@ enum Dialog {
     },
     Delete(String),
     Unsaved(After),
+    Conflict(String), // 저장하려는 파일이 그 사이 디스크에서 바뀜
     Image {
         url_tab: bool,
         url: String,
@@ -2428,6 +995,8 @@ struct App {
     line_num_buf: String,
     cached_scheme: (PathBuf, String),
     cached_root_label: (PathBuf, String),
+    recovery_at: Option<Instant>,
+    pasted: std::sync::Arc<std::sync::Mutex<Vec<Result<String, String>>>>, // 백그라운드 이미지 저장 결과
 }
 
 fn heading_slug(s: &str) -> String {
@@ -2453,7 +1022,14 @@ impl App {
             .unwrap_or_else(|| "auto".into());
         theme::install_fonts_with(&cc.egui_ctx, &font_family);
         let has_arg = arg.is_some();
-        let draft = get("draft").unwrap_or_default();
+        // "drafts": 비어 있지 않은 모든 임시 메모 탭(U+0001 구분). 없으면 예전 형식("draft") 하나만 복원한다.
+        let mut drafts: Vec<String> = get("drafts")
+            .map(|d| d.split('\u{1}').map(str::to_string).collect())
+            .unwrap_or_default();
+        if drafts.is_empty() {
+            drafts.push(get("draft").unwrap_or_default());
+        }
+        let draft = drafts.remove(0);
         let (root, open) = match arg {
             Some(p) => resolve_target(Some(&p), cwd),
             None => {
@@ -2528,6 +1104,8 @@ impl App {
             line_num_buf: String::new(),
             cached_scheme: (PathBuf::new(), String::new()),
             cached_root_label: (PathBuf::new(), String::new()),
+            recovery_at: None,
+            pasted: Default::default(),
         };
         if has_arg {
             app.switch_root(root, open);
@@ -2539,6 +1117,11 @@ impl App {
             // 인자 없이 실행하면 메모장/Notepad++처럼 항상 새 문서(또는 저장 없이 유지된 임시 메모)로 시작
             app.root = root;
             app.open_scratch(draft);
+        }
+        for body in drafts.into_iter().filter(|d| !d.is_empty()) {
+            let key = app.next_scratch_key();
+            app.docs.insert(key.clone(), Doc::scratch(body));
+            app.tabs.push(key);
         }
         if app.status.starts_with("작업 폴더") {
             app.status.clear(); // 시작할 때는 알림을 띄우지 않는다
@@ -2567,6 +1150,19 @@ impl App {
                     .find(|d| !d.text.is_empty())
             })
             .map_or("", |d| d.text.as_str())
+    }
+
+    // 비어 있지 않은 모든 임시 메모 탭의 내용 (현재 탭이 맨 앞). 종료 후 복원용.
+    fn drafts_joined(&self) -> String {
+        let cur = self.current.as_deref().filter(|k| is_scratch_key(k));
+        let mut keys: Vec<&String> = self.tabs.iter().filter(|k| is_scratch_key(k)).collect();
+        keys.sort_by_key(|k| Some(k.as_str()) != cur); // 안정 정렬: 현재 탭만 앞으로
+        keys.iter()
+            .filter_map(|k| self.docs.get(*k))
+            .filter(|d| !d.text.is_empty())
+            .map(|d| d.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\u{1}")
     }
 
     fn tab_title<'a>(&self, key: &'a str) -> std::borrow::Cow<'a, str> {
@@ -2600,12 +1196,14 @@ impl App {
             return;
         };
         if let Some(doc) = self.docs.get_mut(&cur) {
-            doc.view_active = self.active;
-            doc.view_blank = self.blank;
-            doc.view_block_sel = self.block_sel.clone();
-            doc.view_block_sel_anchor = self.block_sel_anchor;
-            doc.view_block_sel_head = self.block_sel_head;
-            doc.view_last_sel = self.last_sel;
+            doc.view = TabView {
+                active: self.active,
+                blank: self.blank,
+                block_sel: self.block_sel.clone(),
+                block_sel_anchor: self.block_sel_anchor,
+                block_sel_head: self.block_sel_head,
+                last_sel: self.last_sel,
+            };
         }
     }
 
@@ -2629,12 +1227,13 @@ impl App {
                 self.pending_sel = Some((0, 0));
                 self.focus_editor = true;
             } else {
-                self.active = doc.view_active.filter(|&a| a <= doc.text.len());
-                self.blank = doc.view_blank;
-                self.block_sel = doc.view_block_sel.clone();
-                self.block_sel_anchor = doc.view_block_sel_anchor;
-                self.block_sel_head = doc.view_block_sel_head;
-                self.last_sel = doc.view_last_sel;
+                let v = &doc.view;
+                self.active = v.active.filter(|&a| a <= doc.text.len());
+                self.blank = v.blank;
+                self.block_sel = v.block_sel.clone();
+                self.block_sel_anchor = v.block_sel_anchor;
+                self.block_sel_head = v.block_sel_head;
+                self.last_sel = v.last_sel;
                 if self.active.is_some() {
                     self.focus_editor = true;
                 }
@@ -2880,13 +1479,26 @@ impl App {
         if is_scratch_key(name) {
             return false;
         }
+        let path = self.root.join(name);
         let Some(doc) = self.docs.get_mut(name) else {
             return false;
         };
         if doc.scratch {
             return false;
         }
-        let path = self.root.join(name);
+        // 마지막으로 읽거나 쓴 뒤 다른 프로그램이 파일을 바꿨다면 덮어쓰지 않고 사용자에게 묻는다
+        // (mtime만 바뀌고 내용이 같으면 클라우드 동기화 등이므로 그냥 저장)
+        let external = doc.mtime.is_some()
+            && modified(&path).is_some_and(|d| Some(d) != doc.mtime)
+            && Doc::load(&path).map_or(true, |f| f.text != doc.saved);
+        if external {
+            doc.edited_at = None; // 자동 저장 재시도 반복 방지 (변경 표시는 유지)
+            self.status = format!("{name}: 다른 프로그램이 파일을 바꿨습니다");
+            if self.dialog.is_none() {
+                self.dialog = Some(Dialog::Conflict(name.to_string()));
+            }
+            return false;
+        }
         match save_atomic(&path, doc.encoded().as_bytes()) {
             Ok(()) => {
                 doc.saved.clear();
@@ -2904,27 +1516,34 @@ impl App {
         }
     }
 
-    // 창으로 돌아왔을 때: 다른 프로그램이 현재 문서를 바꿨으면 다시 읽는다 (편집 중이면 경고만)
+    // 창으로 돌아왔을 때: 다른 프로그램이 열린 문서를 바꿨으면 다시 읽는다 (편집 중이면 경고만, 저장 때 묻는다)
     fn sync_from_disk(&mut self) {
-        let Some(name) = self.current.clone().filter(|n| !is_scratch_key(n)) else {
-            return;
-        };
-        let path = self.root.join(&name);
-        let (Some(disk), Some(doc)) = (modified(&path), self.docs.get_mut(&name)) else {
-            return;
-        };
-        if doc.mtime == Some(disk) {
-            return;
-        }
-        if doc.dirty() {
-            doc.mtime = Some(disk);
-            self.status = format!("{name}: 다른 프로그램이 파일을 바꿨습니다. 저장하면 덮어씁니다");
-        } else if let Ok(fresh) = Doc::load(&path) {
-            if fresh.text != doc.text {
-                self.deactivate();
-                self.status = format!("{name}: 바뀐 내용을 다시 불러왔습니다");
+        let names: Vec<String> = self
+            .docs
+            .iter()
+            .filter(|(_, d)| !d.scratch)
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in names {
+            let path = self.root.join(&name);
+            let (Some(disk), Some(doc)) = (modified(&path), self.docs.get_mut(&name)) else {
+                continue;
+            };
+            if doc.mtime == Some(disk) {
+                continue;
             }
-            self.docs.insert(name, fresh);
+            if doc.dirty() {
+                self.status =
+                    format!("{name}: 다른 프로그램이 파일을 바꿨습니다. 저장할 때 선택합니다");
+            } else if let Ok(fresh) = Doc::load(&path) {
+                if fresh.text != doc.text {
+                    if self.current.as_deref() == Some(name.as_str()) {
+                        self.deactivate();
+                    }
+                    self.status = format!("{name}: 바뀐 내용을 다시 불러왔습니다");
+                }
+                self.docs.insert(name, fresh);
+            }
         }
     }
 
@@ -2972,6 +1591,10 @@ impl App {
             .map(|(n, _)| n.clone())
             .collect();
         dirty.iter().filter(|n| !self.save_quiet(n)).count() == 0 // 실패해도 나머지는 계속 저장
+    }
+
+    fn any_dirty_incl_scratch(&self) -> bool {
+        self.docs.values().any(Doc::dirty)
     }
 
     fn any_dirty(&self) -> bool {
@@ -3654,7 +2277,12 @@ impl App {
                 })
         });
         self.dialog = Some(match found {
-            Some((range, label, url)) => Dialog::Link { range, label, url, existing: true },
+            Some((range, label, url)) => Dialog::Link {
+                range,
+                label,
+                url,
+                existing: true,
+            },
             None => Dialog::Link {
                 range: sel,
                 label: text[byte_idx(text, sel.0)..byte_idx(text, sel.1)].to_string(),
@@ -4206,7 +2834,10 @@ impl App {
             } else if cl >= be {
                 b = ls + ce;
             } else {
-                let (open, close) = (text[ls + os..ls + bs].to_string(), text[ls + be..ls + ce].to_string());
+                let (open, close) = (
+                    text[ls + os..ls + bs].to_string(),
+                    text[ls + be..ls + ce].to_string(),
+                );
                 text.insert_str(b, &format!("{close}{open}"));
                 b += close.len();
             }
@@ -4294,7 +2925,8 @@ impl App {
                 let id = Self::editor_id(&name, r.start);
                 let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
                 let cc = egui::text::CCursor::new(c);
-                st.cursor.set_char_range(Some(egui::text::CCursorRange::one(cc)));
+                st.cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(cc)));
                 egui::TextEdit::store_state(ctx, id, st);
                 false
             }
@@ -4457,7 +3089,11 @@ impl App {
             return false;
         }
         // 뒤 블록의 숨긴 기호(## · - · > 등)는 떼고 내용만 붙인다. 여러 줄 구조(목록·인용)는 깨지니 그대로 둔다
-        let vis0 = if r.is_empty() { 0 } else { visible_bounds(nb).0 };
+        let vis0 = if r.is_empty() {
+            0
+        } else {
+            visible_bounds(nb).0
+        };
         if vis0 > 0 && nb.contains('\n') {
             return false;
         }
@@ -4837,34 +3473,54 @@ impl App {
             self.status = "이미지를 넣을 문서를 먼저 여세요".into();
             return;
         }
-        let rgba: Vec<u8> = img
-            .pixels
-            .iter()
-            .flat_map(|c| c.to_srgba_unmultiplied())
-            .collect();
-        let Some(buf) = image::RgbaImage::from_raw(img.size[0] as u32, img.size[1] as u32, rgba)
-        else {
-            return;
-        };
+        // PNG 인코딩·저장은 다른 스레드에서: 큰 스크린샷도 UI가 멈추지 않는다. 끝나면 poll_pasted가 링크를 넣는다.
+        let (w, h) = (img.size[0] as u32, img.size[1] as u32);
+        let pixels = img.pixels.clone();
         let dir = self.doc_dir().join("images");
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         let dst = unique_path(&dir, &format!("paste-{stamp}.png"));
-        let saved = std::fs::create_dir_all(&dir)
-            .map_err(|e| e.to_string())
-            .and_then(|_| buf.save(&dst).map_err(|e| e.to_string()));
-        match saved {
-            Ok(()) => {
-                let name = dst
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                self.insert(ctx, &format!("![image](images/{name})"));
-                self.status = format!("스크린샷 붙여넣기: images/{name}");
+        let (done, ctx) = (self.pasted.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let rgba: Vec<u8> = pixels
+                .iter()
+                .flat_map(|c| c.to_srgba_unmultiplied())
+                .collect();
+            let saved = image::RgbaImage::from_raw(w, h, rgba)
+                .ok_or_else(|| "이미지 형식 오류".to_string())
+                .and_then(|buf| {
+                    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                    buf.save(&dst).map_err(|e| e.to_string())
+                })
+                .map(|()| {
+                    dst.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                });
+            if let Ok(mut q) = done.lock() {
+                q.push(saved);
             }
-            Err(e) => self.status = format!("이미지 저장 실패: {e}"),
+            ctx.request_repaint();
+        });
+    }
+
+    // 백그라운드에서 저장이 끝난 붙여넣기 이미지를 문서에 넣는다
+    fn poll_pasted(&mut self, ctx: &egui::Context) {
+        let done: Vec<_> = self
+            .pasted
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default();
+        for r in done {
+            match r {
+                Ok(name) => {
+                    self.insert(ctx, &format!("![image](images/{name})"));
+                    self.status = format!("스크린샷 붙여넣기: images/{name}");
+                }
+                Err(e) => self.status = format!("이미지 저장 실패: {e}"),
+            }
         }
     }
 
@@ -4961,7 +3617,8 @@ impl App {
                 }
                 continue;
             }
-            let path = url.split('#').next().unwrap_or("").replace("%20", " ");
+            let path = url.split('#').next().unwrap_or("");
+            let path = pct_decode(path);
             if path.is_empty() {
                 continue;
             }
@@ -4983,6 +3640,42 @@ impl App {
         storage: Option<&mut (dyn eframe::Storage + 'static)>,
     ) {
         let now = Instant::now();
+        // 저장 안 된 문서가 있으면 1초마다 복구용 스냅샷을 갱신한다 (없으면 비운다)
+        if self.any_dirty_incl_scratch() {
+            if self
+                .recovery_at
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
+            {
+                self.recovery_at = Some(now);
+                let snap: Vec<(PathBuf, String)> = self
+                    .docs
+                    .iter()
+                    .filter(|(_, d)| d.dirty())
+                    .map(|(n, d)| {
+                        let path = if is_scratch_key(n) {
+                            let tag = n.replace(':', "");
+                            home()
+                                .join("Documents")
+                                .join("MDEditor")
+                                .join(format!("recovered-scratch{tag}.md"))
+                        } else {
+                            let mut p = self.root.join(n).into_os_string();
+                            p.push(".recovered.md");
+                            PathBuf::from(p)
+                        };
+                        (path, d.text.clone())
+                    })
+                    .collect();
+                if let Ok(mut r) = RECOVERY.lock() {
+                    *r = snap;
+                }
+            }
+            ctx.request_repaint_after(Duration::from_secs(1));
+        } else if self.recovery_at.take().is_some() {
+            if let Ok(mut r) = RECOVERY.lock() {
+                r.clear();
+            }
+        }
         let mut due = Vec::new();
         let mut flush_draft = false;
         for (name, doc) in &self.docs {
@@ -5001,8 +3694,10 @@ impl App {
         }
         if flush_draft {
             let draft_body = self.draft_text().to_string();
+            let drafts = self.drafts_joined();
             if let Some(st) = storage {
                 st.set_string("draft", draft_body);
+                st.set_string("drafts", drafts);
                 st.flush();
             }
             for doc in self.docs.values_mut() {
@@ -5306,7 +4001,8 @@ impl App {
                     self.context_menu = None;
                     // 코드·수식·접기 블록 안에서는 할 일 대신 블록 바로 아래 새 문단으로 (닫는 줄은 숨겨져 있음)
                     let fenced = self.active_block().filter(|r| {
-                        self.doc().is_some_and(|d| fenced_body_range(&d.text[r.clone()]).is_some())
+                        self.doc()
+                            .is_some_and(|d| fenced_body_range(&d.text[r.clone()]).is_some())
                     });
                     match fenced {
                         Some(r) => self.split(r.end),
@@ -5690,7 +4386,11 @@ impl App {
                     i.modifiers.is_none() && i.key_pressed(Key::Delete),
                 )
             });
-            if bs && (self.delete_hidden(ctx, true) || self.backspace_list(ctx) || self.backspace_at_start(ctx)) {
+            if bs
+                && (self.delete_hidden(ctx, true)
+                    || self.backspace_list(ctx)
+                    || self.backspace_at_start(ctx))
+            {
                 k(Modifiers::NONE, Key::Backspace);
             }
             if del && (self.delete_hidden(ctx, false) || self.delete_at_end(ctx)) {
@@ -5866,7 +4566,7 @@ impl App {
             .map_or("document".into(), |s| s.to_string_lossy().into_owned());
         let base = format!(
             "file:///{}/",
-            to_slash(&self.doc_dir()).trim_start_matches('/')
+            pct_encode(to_slash(&self.doc_dir()).trim_start_matches('/'))
         );
         let html = export_html(&stem, &doc.text)
             .replacen("<head>", &format!("<head>\n<base href=\"{base}\">"), 1)
@@ -5875,11 +4575,11 @@ impl App {
                 "<script>window.onload = () => window.print();</script>\n</body>",
                 1,
             );
-        let path = std::env::temp_dir().join("mdeditor-print.html");
+        let path = std::env::temp_dir().join(format!("mdeditor-print-{}.html", std::process::id()));
         match save_atomic(&path, html.as_bytes()) {
             Ok(()) => ctx.open_url(egui::OpenUrl::new_tab(format!(
                 "file:///{}",
-                to_slash(&path).trim_start_matches('/')
+                pct_encode(to_slash(&path).trim_start_matches('/'))
             ))),
             Err(e) => self.status = format!("인쇄 준비 실패: {e}"),
         }
@@ -6061,11 +4761,19 @@ mod tests {
     #[test]
     fn list_tab_builds_real_hierarchy() {
         let tab = |s: &str, line: usize| {
-            let c = s.split('\n').take(line).map(|l| l.chars().count() + 1).sum::<usize>();
+            let c = s
+                .split('\n')
+                .take(line)
+                .map(|l| l.chars().count() + 1)
+                .sum::<usize>();
             indent_list(s, (c, c), false).unwrap().0
         };
         let shift_tab = |s: &str, line: usize| {
-            let c = s.split('\n').take(line).map(|l| l.chars().count() + 1).sum::<usize>();
+            let c = s
+                .split('\n')
+                .take(line)
+                .map(|l| l.chars().count() + 1)
+                .sum::<usize>();
             indent_list(s, (c, c), true).unwrap().0
         };
         // 번호 목록: 3칸 들여써야 자식이 되고, 하위 번호는 1부터, 뒤 번호는 당겨진다
@@ -6107,13 +4815,25 @@ mod tests {
         // 제목 기호도 숨김: Home → 내용 시작
         assert_eq!(clamp_hidden("## 제목", 0, Some(5)), 3);
         // 숨긴 ** 옆 Backspace/Delete는 보이는 글자를 지우고, 마지막 한 글자면 서식째 지운다
-        assert_eq!(delete_near_hidden(s, 7, true), Some(Ok(("a**b**d".into(), 4))));
+        assert_eq!(
+            delete_near_hidden(s, 7, true),
+            Some(Ok(("a**b**d".into(), 4)))
+        );
         assert_eq!(delete_near_hidden(s, 3, true), Some(Err(1)));
-        assert_eq!(delete_near_hidden(s, 1, false), Some(Ok(("a**c**d".into(), 3))));
-        assert_eq!(delete_near_hidden("x**y**", 6, true), Some(Ok(("x".into(), 1))));
+        assert_eq!(
+            delete_near_hidden(s, 1, false),
+            Some(Ok(("a**c**d".into(), 3)))
+        );
+        assert_eq!(
+            delete_near_hidden("x**y**", 6, true),
+            Some(Ok(("x".into(), 1)))
+        );
         assert_eq!(delete_near_hidden("plain", 2, true), None);
         // 제목 맨 앞 Backspace → 일반 문단
-        assert_eq!(backspace_list_marker("## 제목", 3), Some(("제목".into(), 0)));
+        assert_eq!(
+            backspace_list_marker("## 제목", 3),
+            Some(("제목".into(), 0))
+        );
 
         // 편집 화면에서 숨기는 줄머리: 인용·알림 상자 제목(줄 전체)·구분선(줄 전체)·각주 정의·접기 제목
         assert_eq!(hidden_prefix("> 인용"), 2);
@@ -6127,12 +4847,29 @@ mod tests {
         let spans: Vec<_> = inline_spans(line).into_iter().map(|t| t.4).collect();
         assert_eq!(spans, [Inline::Link, Inline::FootRef]);
         let s = "x [ab](u) y";
-        assert_eq!(clamp_hidden(s, 3, Some(2)), 4, "링크 앞 [ 안에 머물지 않는다");
-        assert_eq!(clamp_hidden(s, 6, Some(5)), 10, "b 뒤에서 → 는 숨긴 ](u)를 건너 다음 글자 뒤로");
-        assert_eq!(delete_near_hidden("a[^1] b", 5, true), Some(Ok(("a b".into(), 1))));
+        assert_eq!(
+            clamp_hidden(s, 3, Some(2)),
+            4,
+            "링크 앞 [ 안에 머물지 않는다"
+        );
+        assert_eq!(
+            clamp_hidden(s, 6, Some(5)),
+            10,
+            "b 뒤에서 → 는 숨긴 ](u)를 건너 다음 글자 뒤로"
+        );
+        assert_eq!(
+            delete_near_hidden("a[^1] b", 5, true),
+            Some(Ok(("a b".into(), 1)))
+        );
         // 인용·알림 상자·접기 맨 앞 Backspace (노션식)
-        assert_eq!(backspace_list_marker("> a\n> b", 2), Some(("a\nb".into(), 0)));
-        assert_eq!(backspace_list_marker("> a\n> b", 6), Some(("> ab".into(), 3)));
+        assert_eq!(
+            backspace_list_marker("> a\n> b", 2),
+            Some(("a\nb".into(), 0))
+        );
+        assert_eq!(
+            backspace_list_marker("> a\n> b", 6),
+            Some(("> ab".into(), 3))
+        );
         assert_eq!(
             backspace_list_marker("> [!NOTE]\n> 내용", 12),
             Some(("내용".into(), 0))
@@ -6150,9 +4887,15 @@ mod tests {
         );
         assert_eq!(visible_bounds("> [!NOTE]\n> 내용"), (12, 14));
         // 내용 맨 앞 Backspace: 하위 → 내어쓰기, 첫 항목 → 문단, 그 외 → 윗줄과 합치기
-        assert_eq!(backspace_list_marker("- a\n  - b", 8), Some(("- a\n- b".into(), 6)));
+        assert_eq!(
+            backspace_list_marker("- a\n  - b", 8),
+            Some(("- a\n- b".into(), 6))
+        );
         assert_eq!(backspace_list_marker("- a", 2), Some(("a".into(), 0)));
-        assert_eq!(backspace_list_marker("- a\n- b", 6), Some(("- ab".into(), 3)));
+        assert_eq!(
+            backspace_list_marker("- a\n- b", 6),
+            Some(("- ab".into(), 3))
+        );
         assert_eq!(backspace_list_marker("- ab", 3), None);
         // 코드 블록: 숨긴 ``` 줄은 지켜지고 코드 변경은 유지
         let code = "```sas\ndata a;\n```";
@@ -6417,34 +5160,43 @@ mod tests {
         h.run_steps(2);
         h.key_press(egui::Key::Backspace);
         h.run_steps(3);
-        assert_eq!(text(&h), "# 제목
+        assert_eq!(
+            text(&h),
+            "# 제목
 
 첫 문단!
 
 소제목
 
 - [x] 할 일
-");
+"
+        );
         h.key_press(egui::Key::Backspace);
         h.run_steps(3);
-        assert_eq!(text(&h), "# 제목
+        assert_eq!(
+            text(&h),
+            "# 제목
 
 첫 문단!소제목
 
 - [x] 할 일
-");
+"
+        );
 
         // 8. Ctrl+Z는 블록 합치기 같은 구조 편집도 되돌리고, Ctrl+Y로 다시 실행한다
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
         h.run_steps(3);
-        assert_eq!(text(&h), "# 제목
+        assert_eq!(
+            text(&h),
+            "# 제목
 
 첫 문단!
 
 소제목
 
 - [x] 할 일
-");
+"
+        );
         assert!(h.state().active.is_some());
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Y);
         h.run_steps(3);
@@ -7447,14 +6199,22 @@ mod tests {
                     &job.text[usize::from(s.byte_range.start)..usize::from(s.byte_range.end)]
                         == needle
                 })
-                .map(|s| (s.format.background, s.format.font_id.family == theme::bold()))
+                .map(|s| {
+                    (
+                        s.format.background,
+                        s.format.font_id.family == theme::bold(),
+                    )
+                })
         };
         let src = "가 ==강조== 나 **굵게** 다";
         let view = ui::inline_md_view_job(src, 15.0, &p, false);
         let edit = ui::md_job(&ctx, src, 15.0, &p, false);
         assert_eq!(bg_of(&view, "강조"), bg_of(&edit, "강조"));
         assert_ne!(bg_of(&view, "강조").unwrap().0, egui::Color32::TRANSPARENT);
-        assert_eq!(bg_of(&view, "굵게"), Some((egui::Color32::TRANSPARENT, true)));
+        assert_eq!(
+            bg_of(&view, "굵게"),
+            Some((egui::Color32::TRANSPARENT, true))
+        );
 
         // 2. 편집 모드 LayoutJob: 바이트 100% 보존 + 내부 텍스트에 theme::bold() 적용
         let src = "앞 **편집굵게** __또굵게__ 뒤";
@@ -7661,12 +6421,21 @@ mod tests {
         assert!(h.query_by_label(img).is_none());
         let edit_y = h.get_by_label("뒤 문단").rect().top();
         assert!((edit_y - view_y).abs() < 1.0, "view {view_y} edit {edit_y}");
-        assert!(h.state().status.starts_with("이미지: images/p.png"), "{}", h.state().status);
+        assert!(
+            h.state().status.starts_with("이미지: images/p.png"),
+            "{}",
+            h.state().status
+        );
 
         // 글자를 치면 이미지는 그대로, 아래 새 문단으로
         h.input_mut().events.push(egui::Event::Text("가".into()));
         settle(&mut h);
-        assert!(h.state().doc().unwrap().text.contains(&format!("{img}\n\n가")));
+        assert!(h
+            .state()
+            .doc()
+            .unwrap()
+            .text
+            .contains(&format!("{img}\n\n가")));
 
         // 이미지 위 Backspace → 노션처럼 이미지 블록을 통째로 지운다
         h.state_mut().go(start, start + img.len());
@@ -7722,7 +6491,10 @@ mod tests {
     #[test]
     fn editing_keys_keep_markdown_structure() {
         use egui_kittest::kittest::Queryable;
-        assert_eq!(code_body_range("  ```python\n  print(1)\n  ```"), Some((14, 22)));
+        assert_eq!(
+            code_body_range("  ```python\n  print(1)\n  ```"),
+            Some((14, 22))
+        );
         assert_eq!(
             renumber_block_at("1. a\n2. \n2. b", 8),
             ("1. a\n2. \n3. b".to_string(), 8)
@@ -7748,19 +6520,91 @@ mod tests {
 
         // (문서, 블록 시작, 커서 바이트, 키, 기대 결과)
         let cases: &[(&str, &str, &str, egui::Key, &str)] = &[
-            ("빈 코드 블록 입력", "```\n```", "```\n", egui::Key::A, "```\nQ\n```"),
-            ("빈 코드 블록 Backspace", "앞\n\n```\n\n```", "앞\n\n```\n", egui::Key::Backspace, "앞\n\n"),
-            ("굵게 안 Enter", "가 **굵게** 나", "가 **굵", egui::Key::Enter, "가 **굵**\n\n**게** 나"),
-            ("링크 안 Enter", "[링크](u)", "[링", egui::Key::Enter, "[링](u)\n\n[크](u)"),
-            ("인용 중간 Enter", "> 인용 줄\n> 둘째", "> 인용", egui::Key::Enter, "> 인용\n>  줄\n> 둘째"),
-            ("제목 맨 앞 Enter", "## 제목", "## ", egui::Key::Enter, "\n\n## 제목"),
-            ("번호 목록 Enter", "1. 첫째\n2. 둘째", "1. 첫째", egui::Key::Enter, "1. 첫째\n2. \n3. 둘째"),
+            (
+                "빈 코드 블록 입력",
+                "```\n```",
+                "```\n",
+                egui::Key::A,
+                "```\nQ\n```",
+            ),
+            (
+                "빈 코드 블록 Backspace",
+                "앞\n\n```\n\n```",
+                "앞\n\n```\n",
+                egui::Key::Backspace,
+                "앞\n\n",
+            ),
+            (
+                "굵게 안 Enter",
+                "가 **굵게** 나",
+                "가 **굵",
+                egui::Key::Enter,
+                "가 **굵**\n\n**게** 나",
+            ),
+            (
+                "링크 안 Enter",
+                "[링크](u)",
+                "[링",
+                egui::Key::Enter,
+                "[링](u)\n\n[크](u)",
+            ),
+            (
+                "인용 중간 Enter",
+                "> 인용 줄\n> 둘째",
+                "> 인용",
+                egui::Key::Enter,
+                "> 인용\n>  줄\n> 둘째",
+            ),
+            (
+                "제목 맨 앞 Enter",
+                "## 제목",
+                "## ",
+                egui::Key::Enter,
+                "\n\n## 제목",
+            ),
+            (
+                "번호 목록 Enter",
+                "1. 첫째\n2. 둘째",
+                "1. 첫째",
+                egui::Key::Enter,
+                "1. 첫째\n2. \n3. 둘째",
+            ),
             ("구분선 Delete", "---\n\n뒤", "---", egui::Key::Delete, "뒤"),
-            ("이미지 앞 Delete", "앞\n\n![a](b.png)", "앞", egui::Key::Delete, "앞"),
-            ("구분선 뒤 Backspace", "---\n\n뒤", "---\n\n", egui::Key::Backspace, "뒤"),
-            ("제목 앞 Delete", "앞\n\n## 제목", "앞", egui::Key::Delete, "앞제목"),
-            ("한 줄 인용 앞 Delete", "앞\n\n> 인용", "앞", egui::Key::Delete, "앞인용"),
-            ("여러 줄 인용 앞 Delete", "앞\n\n> 인용\n> 둘", "앞", egui::Key::Delete, "앞\n\n> 인용\n> 둘"),
+            (
+                "이미지 앞 Delete",
+                "앞\n\n![a](b.png)",
+                "앞",
+                egui::Key::Delete,
+                "앞",
+            ),
+            (
+                "구분선 뒤 Backspace",
+                "---\n\n뒤",
+                "---\n\n",
+                egui::Key::Backspace,
+                "뒤",
+            ),
+            (
+                "제목 앞 Delete",
+                "앞\n\n## 제목",
+                "앞",
+                egui::Key::Delete,
+                "앞제목",
+            ),
+            (
+                "한 줄 인용 앞 Delete",
+                "앞\n\n> 인용",
+                "앞",
+                egui::Key::Delete,
+                "앞인용",
+            ),
+            (
+                "여러 줄 인용 앞 Delete",
+                "앞\n\n> 인용\n> 둘",
+                "앞",
+                egui::Key::Delete,
+                "앞\n\n> 인용\n> 둘",
+            ),
         ];
         for &(name, doc, caret, key, want) in cases {
             h.state_mut().set_text(doc.to_string(), (0, 0));
@@ -7789,6 +6633,168 @@ mod tests {
         h.event(egui::Event::Text("Q".into()));
         h.run_steps(3);
         assert_eq!(h.state().doc().unwrap().text, doc);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pct_roundtrip_and_html_export_is_inert() {
+        for p in ["a b/한글 #1%/x.md", "plain/path.md", "100%25"] {
+            assert_eq!(pct_decode(&pct_encode(p)), p);
+        }
+        assert_eq!(pct_decode("끝%"), "끝%"); // 잘린 이스케이프는 그대로 둔다
+        let html = md_to_html(
+            "<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n[x](javascript:alert(1))\n",
+        );
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        assert!(!html.contains("javascript:"), "{html}");
+    }
+
+    // 무작위 마크다운 조각에도 파서가 패닉하지 않고 블록이 UTF-8 경계·순서를 지킨다
+    #[test]
+    fn parsers_survive_random_markdown() {
+        const PARTS: &[&str] = &[
+            "# ",
+            "## 제목",
+            "**",
+            "*",
+            "~~",
+            "==",
+            "`",
+            "```",
+            "~~~",
+            "$$",
+            ":::toggle 접기",
+            ":::",
+            "> ",
+            "> [!NOTE]",
+            "- ",
+            "1. ",
+            "- [ ] ",
+            "  ",
+            "\t",
+            "\n",
+            "\n\n",
+            "\r\n",
+            "|a|b|",
+            "|---|:-:|",
+            "[l](u)",
+            "![i](p.png)",
+            "[[Ctrl]]",
+            "가나다",
+            "😀",
+            "é",
+            "text",
+            " ",
+            "---",
+            "[^1]",
+            "[^1]: n",
+            "<b>",
+            "\u{feff}",
+        ];
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..400 {
+            let n = (next() % 40) as usize;
+            let src: String = (0..n)
+                .map(|_| PARTS[(next() % PARTS.len() as u64) as usize])
+                .collect();
+            let mut end = 0;
+            for r in split_blocks(&src) {
+                assert!(
+                    r.start >= end && r.start <= r.end && r.end <= src.len(),
+                    "{src:?}"
+                );
+                assert!(
+                    src.is_char_boundary(r.start) && src.is_char_boundary(r.end),
+                    "{src:?}"
+                );
+                end = r.end;
+                let b = &src[r];
+                let _ = (block_inline_spans(b), hidden_runs(b), visible_bounds(b));
+                if let Some(t) = parse_md_table(b) {
+                    let _ = serialize_md_table(&t);
+                }
+            }
+            for l in src.lines() {
+                let _ = (inline_spans(l), detect_line_kind(l), list_marker(l));
+            }
+            let _ = (outline(&src), md_to_html(&src), find_all(&src, "가", false));
+        }
+    }
+
+    fn conflict_app(dir: &Path) -> egui_kittest::Harness<'static, App> {
+        let d = dir.to_path_buf();
+        let file = dir.join("a.md");
+        egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(file), &d))
+    }
+
+    #[test]
+    fn save_asks_instead_of_overwriting_external_change() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_conflict");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.md");
+        std::fs::write(&file, "원본\n").unwrap();
+        let bump = |f: &Path| {
+            let h = std::fs::OpenOptions::new().write(true).open(f).unwrap();
+            h.set_modified(std::time::SystemTime::now() + Duration::from_secs(30))
+                .unwrap();
+        };
+
+        let mut h = conflict_app(&dir);
+        h.run_steps(2);
+        {
+            let doc = h.state_mut().docs.get_mut("a.md").unwrap();
+            doc.text = "내 편집\n".into();
+            doc.refresh_meta();
+        }
+        // 다른 프로그램이 내용을 바꿈 → 저장하면 안 되고 대화상자가 떠야 한다
+        std::fs::write(&file, "외부 편집\n").unwrap();
+        bump(&file);
+        assert!(!h.state_mut().save_quiet("a.md"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "외부 편집\n");
+        assert!(matches!(h.state().dialog, Some(Dialog::Conflict(_))));
+
+        // 내용은 같고 시각만 바뀐 경우(클라우드 동기화 등)는 그냥 저장한다
+        h.state_mut().dialog = None;
+        std::fs::write(&file, "원본\n").unwrap();
+        bump(&file);
+        assert!(h.state_mut().save_quiet("a.md"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "내 편집\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_scratch_tab_is_kept_in_drafts() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_drafts");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, None, &d));
+        h.run_steps(2);
+        h.event(egui::Event::Text("첫째".into()));
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
+        h.run_steps(2);
+        h.event(egui::Event::Text("둘째".into()));
+        h.run_steps(2);
+        let joined = h.state().drafts_joined();
+        let mut parts: Vec<&str> = joined.split('\u{1}').collect();
+        assert_eq!(parts[0], "둘째"); // 현재 탭이 맨 앞
+        parts.sort();
+        assert_eq!(parts, ["둘째", "첫째"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
