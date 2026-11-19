@@ -51,6 +51,7 @@ impl eframe::App for App {
             self.insert_pasted_image(&ctx, &img);
         }
         self.poll_pasted(&ctx);
+        self.poll_scan();
         self.handle_shortcuts(&ctx);
         self.auto_save_tick(&ctx, frame.storage_mut());
         self.title_bar(&ctx);

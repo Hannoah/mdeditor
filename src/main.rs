@@ -44,6 +44,25 @@ fn tab_base_name(key: &str) -> std::borrow::Cow<'_, str> {
 // 패닉(release는 abort)으로 죽기 직전에 저장 안 된 문서를 *.recovered.md 로 남기기 위한 스냅샷 (경로, 내용)
 static RECOVERY: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
 
+// 인쇄용 임시 HTML(mdeditor-print-<pid>.html)은 브라우저가 읽고 나면 필요 없다: 시작할 때 10분 지난 것을 지운다
+fn clean_old_print_files() {
+    let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("mdeditor-print-")
+            && name.ends_with(".html")
+            && e.metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t.elapsed().is_ok_and(|d| d > Duration::from_secs(600)))
+        {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 fn install_panic_recovery() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -58,6 +77,7 @@ fn install_panic_recovery() {
 
 fn main() -> eframe::Result {
     install_panic_recovery();
+    clean_old_print_files();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().unwrap_or_default();
     #[cfg(windows)]
@@ -184,6 +204,13 @@ fn is_image_name(name: &str) -> bool {
 
 fn to_slash(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
+}
+
+fn scan_markdown_files(root: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_markdown_files(root, root, 0, &mut names);
+    names.sort_by_key(|n| n.to_lowercase());
+    names
 }
 
 fn collect_markdown_files(dir: &Path, base: &Path, depth: usize, out: &mut Vec<String>) {
@@ -995,8 +1022,24 @@ struct App {
     line_num_buf: String,
     cached_scheme: (PathBuf, String),
     cached_root_label: (PathBuf, String),
+    scan: ScanSlot, // 백그라운드 폴더 스캔 결과 (세대, 목록)
+    scan_gen: u64,
+    ectx: egui::Context,
     recovery_at: Option<Instant>,
     pasted: std::sync::Arc<std::sync::Mutex<Vec<Result<String, String>>>>, // 백그라운드 이미지 저장 결과
+}
+
+type ScanSlot = std::sync::Arc<std::sync::Mutex<Option<(u64, Vec<String>)>>>; // (세대, 파일 목록)
+
+// 한 프레임의 키 입력 요약 (handle_shortcuts가 계산해 하위 처리 함수로 넘긴다)
+#[derive(Clone, Copy)]
+struct Keys {
+    has_cmd: bool,
+    has_alt: bool,
+    nav_or_edit: bool,
+    focused: bool,
+    bs_del_tab: bool,
+    block_ev: bool,
 }
 
 fn heading_slug(s: &str) -> String {
@@ -1104,6 +1147,9 @@ impl App {
             line_num_buf: String::new(),
             cached_scheme: (PathBuf::new(), String::new()),
             cached_root_label: (PathBuf::new(), String::new()),
+            scan: Default::default(),
+            scan_gen: 0,
+            ectx: cc.egui_ctx.clone(),
             recovery_at: None,
             pasted: Default::default(),
         };
@@ -1406,7 +1452,7 @@ impl App {
         // 열 파일이 정해져 있으면 폴더 스캔을 미룬다 (파일 탐색기를 열 때 스캔) → 큰 폴더에서도 바로 뜬다
         let mut first = open.filter(|n| self.root.join(n).is_file());
         if first.is_none() {
-            self.refresh_files();
+            self.scan_files_now();
             first = self.files.first().cloned();
         }
         if let Some(name) = first {
@@ -1416,11 +1462,33 @@ impl App {
         }
     }
 
+    // 폴더 전체 스캔 (시작 시 첫 파일을 정해야 할 때만 동기로)
+    fn scan_files_now(&mut self) {
+        self.scan_gen += 1; // 진행 중이던 백그라운드 스캔 결과는 버린다
+        self.files = scan_markdown_files(&self.root);
+    }
+
+    // 파일 목록 갱신은 다른 스레드에서: 큰 폴더에서도 UI가 멈추지 않는다. 끝나면 poll_scan이 반영한다.
     fn refresh_files(&mut self) {
-        let mut names = Vec::new();
-        collect_markdown_files(&self.root, &self.root, 0, &mut names);
-        names.sort_by_key(|n| n.to_lowercase());
-        self.files = names;
+        self.scan_gen += 1;
+        let (gen, root) = (self.scan_gen, self.root.clone());
+        let (done, ctx) = (self.scan.clone(), self.ectx.clone());
+        std::thread::spawn(move || {
+            let names = scan_markdown_files(&root);
+            if let Ok(mut r) = done.lock() {
+                *r = Some((gen, names));
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_scan(&mut self) {
+        let done = self.scan.lock().ok().and_then(|mut r| r.take());
+        if let Some((gen, names)) = done {
+            if gen == self.scan_gen {
+                self.files = names;
+            }
+        }
     }
 
     fn open_file(&mut self, name: &str) -> bool {
@@ -3714,6 +3782,439 @@ impl App {
         }
     }
 
+    // Ctrl 조합 단축키. 처리했으면 true (이후 단축키 처리를 건너뛴다)
+    fn shortcuts_cmd(&mut self, ctx: &egui::Context, ks: Keys) -> bool {
+        let Keys {
+            has_alt, focused, ..
+        } = ks;
+        let cmd = Modifiers::COMMAND;
+        let shift_cmd = Modifiers::COMMAND | Modifiers::SHIFT;
+        let alt_cmd = Modifiers::COMMAND | Modifiers::ALT;
+        let k = |m, key| ctx.input_mut(|i| i.consume_key(m, key));
+        // Shift / Alt 조합을 먼저 본다 (consume_key는 추가 Shift를 무시하므로)
+        if k(shift_cmd, Key::O) {
+            self.context_menu = None;
+            self.pick_folder();
+            return true;
+        } else if has_alt && k(alt_cmd, Key::O) {
+            self.context_menu = None;
+            self.open_local_file();
+            return true;
+        } else if k(cmd, Key::O) {
+            self.context_menu = None;
+            self.open_files();
+            return true;
+        }
+        if k(shift_cmd, Key::I) {
+            self.context_menu = None;
+            self.dialog = Some(Dialog::Image {
+                url_tab: false,
+                url: String::new(),
+                alt: String::new(),
+            });
+            return true;
+        }
+        if k(shift_cmd, Key::N) {
+            self.context_menu = None;
+            self.dialog = Some(Dialog::NewFile(String::new()));
+            return true;
+        }
+        if k(cmd, Key::N) || k(cmd, Key::T) {
+            self.context_menu = None;
+            self.new_tab();
+            return true;
+        }
+        if k(shift_cmd, Key::E) {
+            self.context_menu = None;
+            self.export();
+            return true;
+        }
+        if k(shift_cmd, Key::L) {
+            self.context_menu = None;
+            self.toc_open = !self.toc_open;
+            return true;
+        }
+        if k(shift_cmd, Key::F) {
+            self.context_menu = None;
+            self.focus_mode = !self.focus_mode;
+            return true;
+        }
+        if k(shift_cmd, Key::C) {
+            self.context_menu = None;
+            self.copy_markdown_source(ctx);
+            return true;
+        }
+        if has_alt {
+            if k(alt_cmd, Key::C) {
+                self.context_menu = None;
+                self.copy_html_code(ctx);
+                return true;
+            }
+            if k(alt_cmd, Key::D) {
+                self.context_menu = None;
+                self.dark = !self.dark;
+                theme::apply(ctx, self.dark);
+                return true;
+            }
+            if k(alt_cmd, Key::W) {
+                self.context_menu = None;
+                self.full_width = !self.full_width;
+                return true;
+            }
+            if k(alt_cmd, Key::F) {
+                self.context_menu = None;
+                self.small_text = !self.small_text;
+                return true;
+            }
+            // 블록 전환 및 삽입 단축키 (Ctrl+Alt+0~9, G, T, M, -)
+            if !self.find.open && self.current.is_some() {
+                for (key, kind) in [
+                    (Key::Num0, BlockKind::Paragraph),
+                    (Key::Num1, BlockKind::Heading(1)),
+                    (Key::Num2, BlockKind::Heading(2)),
+                    (Key::Num3, BlockKind::Heading(3)),
+                    (Key::Num4, BlockKind::Todo),
+                    (Key::Num5, BlockKind::Bullet),
+                    (Key::Num6, BlockKind::Numbered),
+                    (Key::Num7, BlockKind::Quote),
+                    (Key::Num8, BlockKind::Code),
+                    (Key::Num9, BlockKind::Callout),
+                    (Key::G, BlockKind::Toggle),
+                ] {
+                    if k(alt_cmd, key) {
+                        self.context_menu = None;
+                        self.convert_block(ctx, kind);
+                        return true;
+                    }
+                }
+                if k(alt_cmd, Key::T) {
+                    self.context_menu = None;
+                    self.insert_block_template("| 제목 | 내용 |\n| --- | --- |\n|  |  |", 2);
+                    return true;
+                }
+                if k(alt_cmd, Key::M) {
+                    self.context_menu = None;
+                    self.insert_block_template("```mermaid\ngraph TD\n  A --> B\n```", 11);
+                    return true;
+                }
+                if k(alt_cmd, Key::Minus) {
+                    self.context_menu = None;
+                    self.insert_block_template("---", 3);
+                    return true;
+                }
+            }
+        }
+        if k(cmd, Key::W) {
+            self.context_menu = None;
+            if let Some(cur) = self.current.clone() {
+                self.close_tab(&cur);
+            }
+            return true;
+        }
+        if k(shift_cmd, Key::Tab) || k(cmd, Key::PageUp) {
+            self.context_menu = None;
+            self.cycle_tab(-1);
+            return true;
+        } else if k(cmd, Key::Tab) || k(cmd, Key::PageDown) {
+            self.context_menu = None;
+            self.cycle_tab(1);
+            return true;
+        }
+        for (i, key) in [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if k(cmd, key) {
+                self.context_menu = None;
+                if let Some(target) = self.tabs.get(i).cloned() {
+                    self.switch_to_tab(&target);
+                }
+                return true;
+            }
+        }
+        // 서식 단축키 중 Shift 조합을 먼저 처리 (Ctrl+Shift+S 취소선, Ctrl+Shift+H 형광펜, Ctrl+Shift+K 키캡)
+        let can_edit_blocks = !self.find.open && (focused || self.block_sel.is_some());
+        if can_edit_blocks {
+            if k(shift_cmd, Key::S) {
+                self.context_menu = None;
+                self.format(ctx, Fmt::Wrap("~~", "~~", "취소선"));
+                return true;
+            }
+            if k(shift_cmd, Key::H) {
+                self.context_menu = None;
+                self.format(ctx, Fmt::Wrap("==", "==", "강조"));
+                return true;
+            }
+            if k(shift_cmd, Key::K) {
+                self.context_menu = None;
+                self.format(ctx, Fmt::Wrap("[[", "]]", "Ctrl"));
+                return true;
+            }
+            if k(shift_cmd, Key::D) {
+                self.context_menu = None;
+                self.delete_current_blocks();
+                return true;
+            }
+            if k(shift_cmd, Key::Enter) {
+                self.context_menu = None;
+                self.insert_block_below();
+                return true;
+            }
+            if k(cmd, Key::Enter) {
+                self.context_menu = None;
+                // 코드·수식·접기 블록 안에서는 할 일 대신 블록 바로 아래 새 문단으로 (닫는 줄은 숨겨져 있음)
+                let fenced = self.active_block().filter(|r| {
+                    self.doc()
+                        .is_some_and(|d| fenced_body_range(&d.text[r.clone()]).is_some())
+                });
+                match fenced {
+                    Some(r) => self.split(r.end),
+                    None => self.toggle_todo(ctx),
+                }
+                return true;
+            }
+            if k(cmd, Key::E) {
+                self.context_menu = None;
+                self.format(ctx, Fmt::Wrap("`", "`", "code"));
+                return true;
+            }
+            if k(cmd, Key::Backslash) {
+                self.context_menu = None;
+                self.format(ctx, Fmt::Clear);
+                return true;
+            }
+        }
+        if k(cmd, Key::S) {
+            self.context_menu = None;
+            self.trigger_save();
+            return true;
+        }
+        if k(cmd, Key::H) {
+            self.context_menu = None;
+            self.open_find(ctx, true);
+        } else if k(cmd, Key::F) {
+            self.context_menu = None;
+            self.open_find(ctx, false);
+        }
+        if k(cmd, Key::P) {
+            self.context_menu = None;
+            self.print(ctx);
+        }
+        if k(cmd, Key::Q) {
+            self.context_menu = None;
+            self.guarded(After::Close);
+        }
+        // 실행 취소: 찾기 입력창 등 다른 입력란에 포커스가 있으면 그쪽 기본 동작에 맡긴다
+        if focused || ctx.memory(|m| m.focused().is_none()) {
+            if k(shift_cmd, Key::Z) || k(cmd, Key::Y) {
+                self.context_menu = None;
+                self.history(false);
+                return true;
+            }
+            if k(cmd, Key::Z) {
+                self.context_menu = None;
+                self.history(true);
+                return true;
+            }
+        }
+        // Ctrl+Home / Ctrl+End: 문서 맨 처음 / 맨 끝으로 이동
+        if !self.find.open && self.current.is_some() {
+            if k(cmd, Key::Home) {
+                self.jump_doc_edge(false);
+                return true;
+            }
+            if k(cmd, Key::End) {
+                self.jump_doc_edge(true);
+                return true;
+            }
+        }
+        // Ctrl+A: 비활성 상태이거나 현재 블록이 이미 전부 선택된 상태면 문서 전체 선택
+        if !self.find.open && ctx.input(|i| i.key_pressed(Key::A) && i.modifiers.command_only()) {
+            let select_all_doc = if focused {
+                let sel = self.cursor(ctx);
+                match (self.active_block(), self.doc()) {
+                    (Some(r), Some(doc)) if !r.is_empty() => {
+                        let base = char_len(&doc.text[..r.start]);
+                        let blen = char_len(&doc.text[r]);
+                        sel.0 == base && sel.1 == base + blen
+                    }
+                    _ => true,
+                }
+            } else {
+                true
+            };
+            if select_all_doc {
+                k(cmd, Key::A);
+                if let Some(len) = self.doc().map(|d| d.text.len()).filter(|&l| l > 0) {
+                    self.leave_blank();
+                    self.active = None;
+                    self.block_sel = Some(0..len);
+                    self.block_sel_anchor = Some(0);
+                    self.block_sel_head = Some(len);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    // 다중 블록 / 문서 전체 선택 상태의 키 처리. 처리했으면 true
+    fn shortcuts_block_sel(&mut self, ctx: &egui::Context, ks: Keys) -> bool {
+        let Keys {
+            has_cmd,
+            has_alt,
+            nav_or_edit,
+            bs_del_tab,
+            block_ev,
+            ..
+        } = ks;
+        let cmd = Modifiers::COMMAND;
+        let k = |m, key| ctx.input_mut(|i| i.consume_key(m, key));
+        if let Some(bs) = self.block_sel.clone().filter(|_| !self.find.open) {
+            if nav_or_edit {
+                if k(Modifiers::SHIFT, Key::ArrowUp) && self.shift_arrow(ctx, true, false) {
+                    return true;
+                }
+                if k(Modifiers::SHIFT, Key::ArrowDown) && self.shift_arrow(ctx, false, false) {
+                    return true;
+                }
+                if k(Modifiers::SHIFT, Key::ArrowLeft) && self.shift_arrow(ctx, true, true) {
+                    return true;
+                }
+                if k(Modifiers::SHIFT, Key::ArrowRight) && self.shift_arrow(ctx, false, true) {
+                    return true;
+                }
+                if has_alt && k(Modifiers::ALT, Key::ArrowUp) {
+                    self.move_blocks(ctx, true);
+                    return true;
+                }
+                if has_alt && k(Modifiers::ALT, Key::ArrowDown) {
+                    self.move_blocks(ctx, false);
+                    return true;
+                }
+            }
+            if has_cmd && k(cmd, Key::D) {
+                self.duplicate_blocks();
+                return true;
+            }
+            if nav_or_edit
+                && (k(Modifiers::NONE, Key::ArrowUp)
+                    || k(Modifiers::NONE, Key::ArrowLeft)
+                    || k(Modifiers::NONE, Key::Home))
+            {
+                let start = self
+                    .doc()
+                    .and_then(|d| {
+                        d.blocks
+                            .iter()
+                            .find(|b| b.end > bs.start && b.start < bs.end)
+                    })
+                    .map_or(bs.start, |b| b.start);
+                self.go(start, start);
+                return true;
+            }
+            if nav_or_edit
+                && (k(Modifiers::NONE, Key::ArrowDown)
+                    || k(Modifiers::NONE, Key::ArrowRight)
+                    || k(Modifiers::NONE, Key::End))
+            {
+                let (start, end) = self
+                    .doc()
+                    .and_then(|d| {
+                        d.blocks
+                            .iter()
+                            .rfind(|b| b.end > bs.start && b.start < bs.end)
+                    })
+                    .map_or((bs.end, bs.end), |b| (b.start, b.end));
+                self.go(start, end);
+                return true;
+            }
+            if bs_del_tab {
+                if k(Modifiers::SHIFT, Key::Tab) {
+                    self.edit(ctx, |t, sel| Some(indent_lines(t, sel, true)));
+                    return true;
+                } else if k(Modifiers::NONE, Key::Tab) {
+                    self.edit(ctx, |t, sel| Some(indent_lines(t, sel, false)));
+                    return true;
+                }
+                if k(Modifiers::NONE, Key::Backspace) || k(Modifiers::NONE, Key::Delete) {
+                    self.delete_block_sel();
+                    return true;
+                }
+            }
+            if nav_or_edit && k(Modifiers::NONE, Key::Enter) {
+                self.delete_block_sel();
+                return true;
+            }
+            if has_cmd || block_ev {
+                let mut do_copy = has_cmd && k(cmd, Key::C);
+                let mut do_cut = has_cmd && k(cmd, Key::X);
+                let mut replace_with: Option<String> = None;
+                ctx.input_mut(|i| {
+                    i.events.retain(|e| match e {
+                        egui::Event::Copy => {
+                            do_copy = true;
+                            false
+                        }
+                        egui::Event::Cut => {
+                            do_cut = true;
+                            false
+                        }
+                        egui::Event::Paste(s) => {
+                            replace_with = Some(s.clone());
+                            false
+                        }
+                        // 노션처럼 블록 선택 중 글자 입력은 무시 (Shift+↑ 한 번 뒤 한 글자로 블록 통째가 사라지지 않게)
+                        egui::Event::Text(_) if !i.modifiers.command && !i.modifiers.ctrl => false,
+                        _ => true,
+                    });
+                });
+                if do_copy || do_cut {
+                    if let (Some(bs), Some(doc)) = (&self.block_sel, self.doc()) {
+                        let s = bs.start.min(doc.text.len());
+                        let e = bs.end.min(doc.text.len());
+                        if s < e {
+                            ctx.copy_text(doc.text[s..e].to_string());
+                        }
+                    }
+                    if do_cut {
+                        self.delete_block_sel();
+                        return true;
+                    }
+                }
+                if let Some(s) = replace_with {
+                    self.replace_block_sel(&s);
+                    return true;
+                }
+            }
+            if has_cmd {
+                if k(cmd, Key::B) {
+                    self.format(ctx, Fmt::Wrap("**", "**", "굵게"));
+                    return true;
+                }
+                if k(cmd, Key::I) {
+                    self.format(ctx, Fmt::Wrap("*", "*", "기울임"));
+                    return true;
+                }
+                if k(cmd, Key::K) {
+                    self.format(ctx, Fmt::Wrap("[", "](https://)", "링크"));
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if self.dialog.is_some() {
             return;
@@ -3812,287 +4313,19 @@ impl App {
         }
 
         let cmd = Modifiers::COMMAND;
-        let shift_cmd = Modifiers::COMMAND | Modifiers::SHIFT;
-        let alt_cmd = Modifiers::COMMAND | Modifiers::ALT;
         let k = |m, key| ctx.input_mut(|i| i.consume_key(m, key));
         let focused = self.editor_focused(ctx);
+        let ks = Keys {
+            has_cmd,
+            has_alt,
+            nav_or_edit,
+            focused,
+            bs_del_tab,
+            block_ev,
+        };
 
-        if has_cmd {
-            // Shift / Alt 조합을 먼저 본다 (consume_key는 추가 Shift를 무시하므로)
-            if k(shift_cmd, Key::O) {
-                self.context_menu = None;
-                self.pick_folder();
-                return;
-            } else if has_alt && k(alt_cmd, Key::O) {
-                self.context_menu = None;
-                self.open_local_file();
-                return;
-            } else if k(cmd, Key::O) {
-                self.context_menu = None;
-                self.open_files();
-                return;
-            }
-            if k(shift_cmd, Key::I) {
-                self.context_menu = None;
-                self.dialog = Some(Dialog::Image {
-                    url_tab: false,
-                    url: String::new(),
-                    alt: String::new(),
-                });
-                return;
-            }
-            if k(shift_cmd, Key::N) {
-                self.context_menu = None;
-                self.dialog = Some(Dialog::NewFile(String::new()));
-                return;
-            }
-            if k(cmd, Key::N) || k(cmd, Key::T) {
-                self.context_menu = None;
-                self.new_tab();
-                return;
-            }
-            if k(shift_cmd, Key::E) {
-                self.context_menu = None;
-                self.export();
-                return;
-            }
-            if k(shift_cmd, Key::L) {
-                self.context_menu = None;
-                self.toc_open = !self.toc_open;
-                return;
-            }
-            if k(shift_cmd, Key::F) {
-                self.context_menu = None;
-                self.focus_mode = !self.focus_mode;
-                return;
-            }
-            if k(shift_cmd, Key::C) {
-                self.context_menu = None;
-                self.copy_markdown_source(ctx);
-                return;
-            }
-            if has_alt {
-                if k(alt_cmd, Key::C) {
-                    self.context_menu = None;
-                    self.copy_html_code(ctx);
-                    return;
-                }
-                if k(alt_cmd, Key::D) {
-                    self.context_menu = None;
-                    self.dark = !self.dark;
-                    theme::apply(ctx, self.dark);
-                    return;
-                }
-                if k(alt_cmd, Key::W) {
-                    self.context_menu = None;
-                    self.full_width = !self.full_width;
-                    return;
-                }
-                if k(alt_cmd, Key::F) {
-                    self.context_menu = None;
-                    self.small_text = !self.small_text;
-                    return;
-                }
-                // 블록 전환 및 삽입 단축키 (Ctrl+Alt+0~9, G, T, M, -)
-                if !self.find.open && self.current.is_some() {
-                    for (key, kind) in [
-                        (Key::Num0, BlockKind::Paragraph),
-                        (Key::Num1, BlockKind::Heading(1)),
-                        (Key::Num2, BlockKind::Heading(2)),
-                        (Key::Num3, BlockKind::Heading(3)),
-                        (Key::Num4, BlockKind::Todo),
-                        (Key::Num5, BlockKind::Bullet),
-                        (Key::Num6, BlockKind::Numbered),
-                        (Key::Num7, BlockKind::Quote),
-                        (Key::Num8, BlockKind::Code),
-                        (Key::Num9, BlockKind::Callout),
-                        (Key::G, BlockKind::Toggle),
-                    ] {
-                        if k(alt_cmd, key) {
-                            self.context_menu = None;
-                            self.convert_block(ctx, kind);
-                            return;
-                        }
-                    }
-                    if k(alt_cmd, Key::T) {
-                        self.context_menu = None;
-                        self.insert_block_template("| 제목 | 내용 |\n| --- | --- |\n|  |  |", 2);
-                        return;
-                    }
-                    if k(alt_cmd, Key::M) {
-                        self.context_menu = None;
-                        self.insert_block_template("```mermaid\ngraph TD\n  A --> B\n```", 11);
-                        return;
-                    }
-                    if k(alt_cmd, Key::Minus) {
-                        self.context_menu = None;
-                        self.insert_block_template("---", 3);
-                        return;
-                    }
-                }
-            }
-            if k(cmd, Key::W) {
-                self.context_menu = None;
-                if let Some(cur) = self.current.clone() {
-                    self.close_tab(&cur);
-                }
-                return;
-            }
-            if k(shift_cmd, Key::Tab) || k(cmd, Key::PageUp) {
-                self.context_menu = None;
-                self.cycle_tab(-1);
-                return;
-            } else if k(cmd, Key::Tab) || k(cmd, Key::PageDown) {
-                self.context_menu = None;
-                self.cycle_tab(1);
-                return;
-            }
-            for (i, key) in [
-                Key::Num1,
-                Key::Num2,
-                Key::Num3,
-                Key::Num4,
-                Key::Num5,
-                Key::Num6,
-                Key::Num7,
-                Key::Num8,
-                Key::Num9,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if k(cmd, key) {
-                    self.context_menu = None;
-                    if let Some(target) = self.tabs.get(i).cloned() {
-                        self.switch_to_tab(&target);
-                    }
-                    return;
-                }
-            }
-            // 서식 단축키 중 Shift 조합을 먼저 처리 (Ctrl+Shift+S 취소선, Ctrl+Shift+H 형광펜, Ctrl+Shift+K 키캡)
-            let can_edit_blocks = !self.find.open && (focused || self.block_sel.is_some());
-            if can_edit_blocks {
-                if k(shift_cmd, Key::S) {
-                    self.context_menu = None;
-                    self.format(ctx, Fmt::Wrap("~~", "~~", "취소선"));
-                    return;
-                }
-                if k(shift_cmd, Key::H) {
-                    self.context_menu = None;
-                    self.format(ctx, Fmt::Wrap("==", "==", "강조"));
-                    return;
-                }
-                if k(shift_cmd, Key::K) {
-                    self.context_menu = None;
-                    self.format(ctx, Fmt::Wrap("[[", "]]", "Ctrl"));
-                    return;
-                }
-                if k(shift_cmd, Key::D) {
-                    self.context_menu = None;
-                    self.delete_current_blocks();
-                    return;
-                }
-                if k(shift_cmd, Key::Enter) {
-                    self.context_menu = None;
-                    self.insert_block_below();
-                    return;
-                }
-                if k(cmd, Key::Enter) {
-                    self.context_menu = None;
-                    // 코드·수식·접기 블록 안에서는 할 일 대신 블록 바로 아래 새 문단으로 (닫는 줄은 숨겨져 있음)
-                    let fenced = self.active_block().filter(|r| {
-                        self.doc()
-                            .is_some_and(|d| fenced_body_range(&d.text[r.clone()]).is_some())
-                    });
-                    match fenced {
-                        Some(r) => self.split(r.end),
-                        None => self.toggle_todo(ctx),
-                    }
-                    return;
-                }
-                if k(cmd, Key::E) {
-                    self.context_menu = None;
-                    self.format(ctx, Fmt::Wrap("`", "`", "code"));
-                    return;
-                }
-                if k(cmd, Key::Backslash) {
-                    self.context_menu = None;
-                    self.format(ctx, Fmt::Clear);
-                    return;
-                }
-            }
-            if k(cmd, Key::S) {
-                self.context_menu = None;
-                self.trigger_save();
-                return;
-            }
-            if k(cmd, Key::H) {
-                self.context_menu = None;
-                self.open_find(ctx, true);
-            } else if k(cmd, Key::F) {
-                self.context_menu = None;
-                self.open_find(ctx, false);
-            }
-            if k(cmd, Key::P) {
-                self.context_menu = None;
-                self.print(ctx);
-            }
-            if k(cmd, Key::Q) {
-                self.context_menu = None;
-                self.guarded(After::Close);
-            }
-            // 실행 취소: 찾기 입력창 등 다른 입력란에 포커스가 있으면 그쪽 기본 동작에 맡긴다
-            if focused || ctx.memory(|m| m.focused().is_none()) {
-                if k(shift_cmd, Key::Z) || k(cmd, Key::Y) {
-                    self.context_menu = None;
-                    self.history(false);
-                    return;
-                }
-                if k(cmd, Key::Z) {
-                    self.context_menu = None;
-                    self.history(true);
-                    return;
-                }
-            }
-            // Ctrl+Home / Ctrl+End: 문서 맨 처음 / 맨 끝으로 이동
-            if !self.find.open && self.current.is_some() {
-                if k(cmd, Key::Home) {
-                    self.jump_doc_edge(false);
-                    return;
-                }
-                if k(cmd, Key::End) {
-                    self.jump_doc_edge(true);
-                    return;
-                }
-            }
-            // Ctrl+A: 비활성 상태이거나 현재 블록이 이미 전부 선택된 상태면 문서 전체 선택
-            if !self.find.open && ctx.input(|i| i.key_pressed(Key::A) && i.modifiers.command_only())
-            {
-                let select_all_doc = if focused {
-                    let sel = self.cursor(ctx);
-                    match (self.active_block(), self.doc()) {
-                        (Some(r), Some(doc)) if !r.is_empty() => {
-                            let base = char_len(&doc.text[..r.start]);
-                            let blen = char_len(&doc.text[r]);
-                            sel.0 == base && sel.1 == base + blen
-                        }
-                        _ => true,
-                    }
-                } else {
-                    true
-                };
-                if select_all_doc {
-                    k(cmd, Key::A);
-                    if let Some(len) = self.doc().map(|d| d.text.len()).filter(|&l| l > 0) {
-                        self.leave_blank();
-                        self.active = None;
-                        self.block_sel = Some(0..len);
-                        self.block_sel_anchor = Some(0);
-                        self.block_sel_head = Some(len);
-                    }
-                    return;
-                }
-            }
+        if has_cmd && self.shortcuts_cmd(ctx, ks) {
+            return;
         }
 
         if fn_key {
@@ -4164,137 +4397,8 @@ impl App {
         }
 
         // 다중 블록 / 문서 전체 선택 상태에서의 삭제·복사·잘라내기·붙여넣기·서식·이동·타이핑
-        if let Some(bs) = self.block_sel.clone().filter(|_| !self.find.open) {
-            if nav_or_edit {
-                if k(Modifiers::SHIFT, Key::ArrowUp) && self.shift_arrow(ctx, true, false) {
-                    return;
-                }
-                if k(Modifiers::SHIFT, Key::ArrowDown) && self.shift_arrow(ctx, false, false) {
-                    return;
-                }
-                if k(Modifiers::SHIFT, Key::ArrowLeft) && self.shift_arrow(ctx, true, true) {
-                    return;
-                }
-                if k(Modifiers::SHIFT, Key::ArrowRight) && self.shift_arrow(ctx, false, true) {
-                    return;
-                }
-                if has_alt && k(Modifiers::ALT, Key::ArrowUp) {
-                    self.move_blocks(ctx, true);
-                    return;
-                }
-                if has_alt && k(Modifiers::ALT, Key::ArrowDown) {
-                    self.move_blocks(ctx, false);
-                    return;
-                }
-            }
-            if has_cmd && k(cmd, Key::D) {
-                self.duplicate_blocks();
-                return;
-            }
-            if nav_or_edit
-                && (k(Modifiers::NONE, Key::ArrowUp)
-                    || k(Modifiers::NONE, Key::ArrowLeft)
-                    || k(Modifiers::NONE, Key::Home))
-            {
-                let start = self
-                    .doc()
-                    .and_then(|d| {
-                        d.blocks
-                            .iter()
-                            .find(|b| b.end > bs.start && b.start < bs.end)
-                    })
-                    .map_or(bs.start, |b| b.start);
-                self.go(start, start);
-                return;
-            }
-            if nav_or_edit
-                && (k(Modifiers::NONE, Key::ArrowDown)
-                    || k(Modifiers::NONE, Key::ArrowRight)
-                    || k(Modifiers::NONE, Key::End))
-            {
-                let (start, end) = self
-                    .doc()
-                    .and_then(|d| {
-                        d.blocks
-                            .iter()
-                            .rfind(|b| b.end > bs.start && b.start < bs.end)
-                    })
-                    .map_or((bs.end, bs.end), |b| (b.start, b.end));
-                self.go(start, end);
-                return;
-            }
-            if bs_del_tab {
-                if k(Modifiers::SHIFT, Key::Tab) {
-                    self.edit(ctx, |t, sel| Some(indent_lines(t, sel, true)));
-                    return;
-                } else if k(Modifiers::NONE, Key::Tab) {
-                    self.edit(ctx, |t, sel| Some(indent_lines(t, sel, false)));
-                    return;
-                }
-                if k(Modifiers::NONE, Key::Backspace) || k(Modifiers::NONE, Key::Delete) {
-                    self.delete_block_sel();
-                    return;
-                }
-            }
-            if nav_or_edit && k(Modifiers::NONE, Key::Enter) {
-                self.delete_block_sel();
-                return;
-            }
-            if has_cmd || block_ev {
-                let mut do_copy = has_cmd && k(cmd, Key::C);
-                let mut do_cut = has_cmd && k(cmd, Key::X);
-                let mut replace_with: Option<String> = None;
-                ctx.input_mut(|i| {
-                    i.events.retain(|e| match e {
-                        egui::Event::Copy => {
-                            do_copy = true;
-                            false
-                        }
-                        egui::Event::Cut => {
-                            do_cut = true;
-                            false
-                        }
-                        egui::Event::Paste(s) => {
-                            replace_with = Some(s.clone());
-                            false
-                        }
-                        // 노션처럼 블록 선택 중 글자 입력은 무시 (Shift+↑ 한 번 뒤 한 글자로 블록 통째가 사라지지 않게)
-                        egui::Event::Text(_) if !i.modifiers.command && !i.modifiers.ctrl => false,
-                        _ => true,
-                    });
-                });
-                if do_copy || do_cut {
-                    if let (Some(bs), Some(doc)) = (&self.block_sel, self.doc()) {
-                        let s = bs.start.min(doc.text.len());
-                        let e = bs.end.min(doc.text.len());
-                        if s < e {
-                            ctx.copy_text(doc.text[s..e].to_string());
-                        }
-                    }
-                    if do_cut {
-                        self.delete_block_sel();
-                        return;
-                    }
-                }
-                if let Some(s) = replace_with {
-                    self.replace_block_sel(&s);
-                    return;
-                }
-            }
-            if has_cmd {
-                if k(cmd, Key::B) {
-                    self.format(ctx, Fmt::Wrap("**", "**", "굵게"));
-                    return;
-                }
-                if k(cmd, Key::I) {
-                    self.format(ctx, Fmt::Wrap("*", "*", "기울임"));
-                    return;
-                }
-                if k(cmd, Key::K) {
-                    self.format(ctx, Fmt::Wrap("[", "](https://)", "링크"));
-                    return;
-                }
-            }
+        if self.shortcuts_block_sel(ctx, ks) {
+            return;
         }
 
         if !focused {
