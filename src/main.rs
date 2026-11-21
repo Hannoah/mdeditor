@@ -1026,10 +1026,12 @@ struct App {
     scan_gen: u64,
     ectx: egui::Context,
     recovery_at: Option<Instant>,
-    pasted: std::sync::Arc<std::sync::Mutex<Vec<Result<String, String>>>>, // 백그라운드 이미지 저장 결과
+    draft_dirty: bool,
+    pasted: PastedSlot, // (대상 탭 키, 백그라운드 이미지 저장 결과)
 }
 
 type ScanSlot = std::sync::Arc<std::sync::Mutex<Option<(u64, Vec<String>)>>>; // (세대, 파일 목록)
+type PastedSlot = std::sync::Arc<std::sync::Mutex<Vec<(String, Result<String, String>)>>>;
 
 // 한 프레임의 키 입력 요약 (handle_shortcuts가 계산해 하위 처리 함수로 넘긴다)
 #[derive(Clone, Copy)]
@@ -1151,6 +1153,7 @@ impl App {
             scan_gen: 0,
             ectx: cc.egui_ctx.clone(),
             recovery_at: None,
+            draft_dirty: false,
             pasted: Default::default(),
         };
         if has_arg {
@@ -1163,6 +1166,16 @@ impl App {
             // 인자 없이 실행하면 메모장/Notepad++처럼 항상 새 문서(또는 저장 없이 유지된 임시 메모)로 시작
             app.root = root;
             app.open_scratch(draft);
+            if let Some(last_file) = get("file").filter(|f| !f.is_empty()) {
+                if app.root.join(&last_file).is_file() {
+                    if let Ok(doc) = Doc::load(&app.root.join(&last_file)) {
+                        app.docs.insert(last_file.clone(), doc);
+                        if !app.tabs.contains(&last_file) {
+                            app.tabs.push(last_file);
+                        }
+                    }
+                }
+            }
         }
         for body in drafts.into_iter().filter(|d| !d.is_empty()) {
             let key = app.next_scratch_key();
@@ -1350,6 +1363,9 @@ impl App {
     }
 
     fn force_close_tab(&mut self, name: &str, idx: usize) {
+        if is_scratch_key(name) {
+            self.draft_dirty = true;
+        }
         self.tabs.remove(idx);
         self.docs.remove(name);
         if self.current.as_deref() == Some(name) {
@@ -1702,6 +1718,7 @@ impl App {
             self.tabs.push(name.clone());
         }
         self.current = Some(name.clone());
+        self.draft_dirty = true;
         self.refresh_files();
         self.status = format!("저장됨: {name}");
         Ok(())
@@ -2392,10 +2409,7 @@ impl App {
                 if a == b {
                     return None;
                 }
-                let mut s = t[byte_idx(t, a)..byte_idx(t, b)].to_string();
-                for m in ["**", "~~", "==", "[[", "]]", "`", "*"] {
-                    s = s.replace(m, "");
-                }
+                let s = clear_inline_formatting(&t[byte_idx(t, a)..byte_idx(t, b)]);
                 Some((replace_range(t, (a, b), &s), (a, a + char_len(&s))))
             }),
         }
@@ -2403,11 +2417,36 @@ impl App {
 
     // 블록 유형 전환 (단축키 Ctrl+Alt+0~9 / Ctrl+Alt+G 또는 우클릭 컨텍스트 메뉴)
     fn convert_block(&mut self, ctx: &egui::Context, kind: BlockKind) {
-        if self.current.is_none() {
+        if self.current.is_none() || self.is_visual_table_active() {
             return;
         }
         if self.active_block().is_none() && self.block_sel.is_none() {
             self.append_block();
+        }
+        // 현재 블록이 코드·콜아웃·토글인데 일반 줄 블록(문단·제목·목록·인용)으로 전환할 때는 먼저 래퍼를 벗긴다
+        if !matches!(
+            kind,
+            BlockKind::Code | BlockKind::Callout | BlockKind::Toggle
+        ) {
+            if let (Some(r), Some(doc)) = (
+                self.block_sel.clone().or_else(|| self.active_block()),
+                self.doc(),
+            ) {
+                let t = doc.text[r.clone()].trim_start();
+                if t.starts_with("```") || t.starts_with("~~~") {
+                    self.convert_block(ctx, BlockKind::Code);
+                } else if callout_kind(&doc.text[r.clone()]).is_some() {
+                    self.convert_block(ctx, BlockKind::Callout);
+                } else if is_toggle_block(&doc.text[r.clone()]) {
+                    self.convert_block(ctx, BlockKind::Toggle);
+                } else if parse_md_table(&doc.text[r]).is_some() {
+                    return;
+                }
+            }
+            if kind == BlockKind::Paragraph {
+                self.edit(ctx, move |t, sel| Some(convert_lines_kind(t, sel, kind)));
+                return;
+            }
         }
         if matches!(
             kind,
@@ -3510,9 +3549,26 @@ impl App {
         }
         let dir = self.doc_dir();
         let src = canon(src).unwrap_or_else(|| src.to_path_buf());
-        let link = match src.strip_prefix(&dir) {
-            Ok(rel) if !to_slash(rel).contains(' ') => to_slash(rel),
-            _ => {
+        let rel_inside = src
+            .strip_prefix(&dir)
+            .ok()
+            .map(to_slash)
+            .or_else(|| {
+                // 작업 루트 안의 다른 하위 폴더 이미지면 상대 경로(../ 등) 계산
+                let rel_src = src.strip_prefix(&self.root).ok()?;
+                let rel_dir = dir.strip_prefix(&self.root).ok()?;
+                let depth = rel_dir.components().count();
+                let mut up = String::new();
+                for _ in 0..depth {
+                    up.push_str("../");
+                }
+                Some(format!("{up}{}", to_slash(rel_src)))
+            })
+            .filter(|r| !r.contains(['(', ')', '\n']));
+        let link = match rel_inside {
+            Some(rel) if !rel.contains(' ') => rel,
+            Some(rel) => rel.replace(' ', "%20"),
+            None => {
                 let name =
                     sanitize_file_name(&src.file_name().unwrap_or_default().to_string_lossy());
                 let dst = unique_path(&dir.join("images"), &name);
@@ -3530,17 +3586,17 @@ impl App {
         };
         let alt = Path::new(&link)
             .file_stem()
-            .map_or("image".into(), |s| s.to_string_lossy().into_owned());
+            .map_or("image".into(), |s| pct_decode(&s.to_string_lossy()));
         self.insert(ctx, &format!("![{alt}]({link})"));
         self.status = format!("이미지 삽입: {link}");
     }
 
     // 클립보드 이미지(스크린샷) → 문서 폴더/images/paste-<시각>.png
     fn insert_pasted_image(&mut self, ctx: &egui::Context, img: &egui::ColorImage) {
-        if self.current.is_none() {
+        let Some(target_tab) = self.current.clone() else {
             self.status = "이미지를 넣을 문서를 먼저 여세요".into();
             return;
-        }
+        };
         // PNG 인코딩·저장은 다른 스레드에서: 큰 스크린샷도 UI가 멈추지 않는다. 끝나면 poll_pasted가 링크를 넣는다.
         let (w, h) = (img.size[0] as u32, img.size[1] as u32);
         let pixels = img.pixels.clone();
@@ -3568,23 +3624,35 @@ impl App {
                         .into_owned()
                 });
             if let Ok(mut q) = done.lock() {
-                q.push(saved);
+                q.push((target_tab, saved));
             }
             ctx.request_repaint();
         });
     }
 
-    // 백그라운드에서 저장이 끝난 붙여넣기 이미지를 문서에 넣는다
+    // 백그라운드에서 저장이 끝난 붙여넣기 이미지를 원래 요청한 탭 문서에 넣는다
     fn poll_pasted(&mut self, ctx: &egui::Context) {
         let done: Vec<_> = self
             .pasted
             .lock()
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default();
-        for r in done {
+        for (target_tab, r) in done {
             match r {
                 Ok(name) => {
-                    self.insert(ctx, &format!("![image](images/{name})"));
+                    let md = format!("![image](images/{name})");
+                    if self.current.as_deref() == Some(target_tab.as_str()) {
+                        self.insert(ctx, &md);
+                    } else if let Some(doc) = self.docs.get_mut(&target_tab) {
+                        if !doc.text.is_empty() && !doc.text.ends_with('\n') {
+                            doc.text.push_str("\n\n");
+                        } else if doc.text.ends_with('\n') && !doc.text.ends_with("\n\n") {
+                            doc.text.push('\n');
+                        }
+                        doc.text.push_str(&md);
+                        doc.edited_at = Some(Instant::now());
+                        doc.refresh_meta();
+                    }
                     self.status = format!("스크린샷 붙여넣기: images/{name}");
                 }
                 Err(e) => self.status = format!("이미지 저장 실패: {e}"),
@@ -3745,7 +3813,7 @@ impl App {
             }
         }
         let mut due = Vec::new();
-        let mut flush_draft = false;
+        let mut flush_draft = std::mem::take(&mut self.draft_dirty);
         for (name, doc) in &self.docs {
             if let (true, Some(t)) = (doc.dirty(), doc.edited_at) {
                 let elapsed = now.duration_since(t);
@@ -6899,6 +6967,81 @@ mod tests {
         assert_eq!(parts[0], "둘째"); // 현재 탭이 맨 앞
         parts.sort();
         assert_eq!(parts, ["둘째", "첫째"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_inline_formatting_and_structural_block_conversion() {
+        // 1. 인라인 서식 지우기: 서식 기호와 링크·키캡은 벗기되 수식 곱셈(3 * 4)이나 이스케이프(\*)는 보존
+        assert_eq!(
+            clear_inline_formatting(
+                "**굵게** *기울임* ~~취소~~ ==강조== `코드` [[Ctrl]] [구글](https://g.com)"
+            ),
+            "굵게 기울임 취소 강조 코드 Ctrl 구글"
+        );
+        assert_eq!(
+            clear_inline_formatting("수식 3 * 4 = 12 와 \\*별표\\* 및 ~~==중첩==~~"),
+            "수식 3 * 4 = 12 와 \\*별표\\* 및 중첩"
+        );
+
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_review_fixes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([0, 150, 255, 255]))
+            .save(dir.join("images/root.png"))
+            .unwrap();
+        let sub_file = dir.join("sub/note.md");
+        std::fs::write(&sub_file, "```rust\nlet a = 1;\n```\n").unwrap();
+
+        let d2 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.open_file("sub/note.md");
+                app
+            });
+        h.run_steps(2);
+
+        // 2. 닫힌 코드 블록에서 제목 1(Ctrl+Alt+1) 전환 시 펜스가 안전하게 벗겨지고 제목으로 전환
+        h.state_mut().go(0, 8);
+        h.run_steps(2);
+        let ctx = h.ctx.clone();
+        h.state_mut().convert_block(&ctx, BlockKind::Heading(1));
+        assert_eq!(h.state().doc().unwrap().text, "# let a = 1;\n");
+
+        // 3. 하위 폴더 문서(sub/note.md)에서 루트 images/root.png 삽입 시 중복 복사 없이 ../images/root.png 상대 경로 사용
+        h.state_mut()
+            .insert_image_file(&ctx, &dir.join("images/root.png"));
+        assert!(
+            h.state()
+                .doc()
+                .unwrap()
+                .text
+                .contains("![root](../images/root.png)"),
+            "{}",
+            h.state().doc().unwrap().text
+        );
+        assert!(!dir.join("sub/images/root.png").exists());
+
+        // 4. 백그라운드 붙여넣기 완료 시 탭이 바뀌어 있어도 원래 탭에 이미지가 들어간다
+        h.state_mut().new_tab();
+        h.run_steps(1);
+        let scratch_tab = h.state().current.clone().unwrap();
+        h.state_mut()
+            .pasted
+            .lock()
+            .unwrap()
+            .push(("sub/note.md".to_string(), Ok("paste-123.png".to_string())));
+        h.state_mut().poll_pasted(&ctx);
+        assert_eq!(h.state().current.as_deref(), Some(scratch_tab.as_str()));
+        assert_eq!(h.state().docs[&scratch_tab].text, "");
+        assert!(h.state().docs["sub/note.md"]
+            .text
+            .contains("![image](images/paste-123.png)"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

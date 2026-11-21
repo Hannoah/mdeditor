@@ -74,6 +74,76 @@ pub(crate) fn wrap_selection(
     }
 }
 
+// 선택 영역에서 인라인 마크다운 서식(**굵게**, __굵게__, *기울임*, ~~취소선~~, ==강조==, `코드`, [[키]], [글자](주소))만 벗기고
+// 수식 곱셈(3 * 4)이나 이스케이프된 기호(\*)는 그대로 보존한다.
+pub(crate) fn clear_inline_formatting(s: &str) -> String {
+    let mut lines_out = Vec::new();
+    for line in s.split('\n') {
+        let mut stripped = String::with_capacity(line.len());
+        let mut cur = 0usize;
+        for (os, bs, be, ce, kind) in inline_spans(line) {
+            if kind == Inline::FootRef {
+                continue;
+            }
+            if cur < os {
+                stripped.push_str(&line[cur..os]);
+            }
+            let inner = &line[bs..be];
+            // 중첩된 인라인 서식(예: ~~==강조==~~)도 재귀적으로 벗긴다
+            if inner
+                .bytes()
+                .any(|b| matches!(b, b'*' | b'_' | b'~' | b'=' | b'`' | b'['))
+            {
+                stripped.push_str(&clear_inline_formatting(inner));
+            } else {
+                stripped.push_str(inner);
+            }
+            cur = ce;
+        }
+        if cur < line.len() {
+            stripped.push_str(&line[cur..]);
+        }
+        // 키보드 키캡 [[키]] 제거 (내부에 '['나 공백 줄바꿈이 없는 쌍만)
+        let mut final_line = String::with_capacity(stripped.len());
+        let bytes = stripped.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                let step = 1 + stripped[i + 1..].chars().next().map_or(1, char::len_utf8);
+                final_line.push_str(&stripped[i..i + step]);
+                i += step;
+                continue;
+            }
+            if bytes[i..].starts_with(b"[[") {
+                if let Some(rel) = stripped[i + 2..].find("]]") {
+                    let key_body = &stripped[i + 2..i + 2 + rel];
+                    if !key_body.is_empty() && !key_body.contains('[') {
+                        final_line.push_str(key_body);
+                        i += 2 + rel + 2;
+                        continue;
+                    }
+                }
+            }
+            let step = stripped[i..].chars().next().map_or(1, char::len_utf8);
+            final_line.push_str(&stripped[i..i + step]);
+            i += step;
+        }
+        // 선택 범위가 서식 기호 바로 안팎으로 걸친 경우 양끝의 짝 잃은 기호 정리
+        let mut trimmed = final_line.as_str();
+        for tok in ["**", "__", "~~", "==", "[[", "]]", "`", "*"] {
+            if let Some(r) = trimmed
+                .strip_prefix(tok)
+                .and_then(|r| r.strip_suffix(tok))
+                .filter(|r| !r.is_empty())
+            {
+                trimmed = r;
+            }
+        }
+        lines_out.push(trimmed.to_string());
+    }
+    lines_out.join("\n")
+}
+
 // Tab / Shift+Tab: 선택된 줄 전체를 2칸 들여쓰기·내어쓰기
 pub(crate) fn indent_lines(s: &str, (a, b): Sel, outdent: bool) -> (String, Sel) {
     let (ls, le) = (line_start(s, a), line_end(s, b));

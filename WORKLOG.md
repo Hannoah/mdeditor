@@ -1,5 +1,21 @@
 # MDEditor 작업 기록
 
+## 2026-11-21 — v0.11.2: 코드 리뷰 전 항목 수정 및 `ui.rs` 거대 함수 분해
+
+- **Mermaid UTF-8 문자 경계 패닉 방지 (`src/mermaid.rs`)**: `to_lowercase()` 시 바이트 길이가 변하는 유니코드 문자(예: `İ`)가 포함된 라인을 슬라이싱할 때 패닉이 발생할 수 있던 문제를 `to_ascii_lowercase()`로 통일해 해결하고, `render_pie`에도 가로 스크롤(`ScrollArea::horizontal`)과 동적 범례 폭 측정을 적용.
+- **크로스플랫폼 클립보드 텍스트 읽기 (`src/theme.rs`)**: 비-Windows(macOS 등)에서 `None`만 반환하던 `theme::clipboard_text()`를 `arboard::Clipboard`로 연결해 우클릭 메뉴 `붙여넣기`가 모든 OS에서 동작하도록 수정.
+- **백그라운드 스크린샷 붙여넣기 탭 고정 (`src/main.rs`)**: `insert_pasted_image` 스레드에 요청 당시 탭 키를 함께 전달해, 인코딩 도중 다른 탭으로 전환해도 원래 탭에 이미지 링크가 삽입되도록 수정.
+- **구조 블록 전환 안전장치 및 인라인 서식 지우기 정밀화 (`src/main.rs`, `src/textops.rs`)**:
+  - 시각적 표 편집 중이나 코드·콜아웃·토글 블록에서 `Ctrl+Alt+1~7`(제목·목록·인용) 전환 시 블록 구조가 깨지지 않도록 래퍼를 먼저 해제하거나 표를 보호.
+  - `Ctrl+\`(`Fmt::Clear`)가 단순 문자열 치환 대신 `inline_spans()` 파서 기반 `clear_inline_formatting()`을 사용해 `[링크](주소)`·`[[키캡]]`·중첩 서식은 벗기고 수식 곱셈(`3 * 4`)과 이스케이프(`\*`)는 보존.
+- **임시 메모 저장 즉시 반영·마지막 파일 복원·하위 폴더 이미지 상대 경로 (`src/main.rs`)**:
+  - 임시 메모를 파일로 저장(`save_scratch_as`)하거나 닫을 때 `draft_dirty`로 스토리지 `"draft"`/`"drafts"`를 즉시 갱신.
+  - 종료 시 저장한 마지막 파일(`storage["file"]`)을 재실행 시 보조 탭으로 복원하고, 하위 폴더 문서(`sub/note.md`)에서 작업 폴더 안의 이미지를 넣을 때 중복 복사 대신 `../` 상대 경로를 계산.
+- **렌더링·함수 분해 및 문서 동기화 (`src/ui.rs`, `README.md`)**:
+  - `paint_block_decor`에서 화면(`clip_rect`) 밖 줄의 장식·이미지 그리기를 생략.
+  - 편집 중인 블록을 그리는 `block_editor`를 860줄에서 403줄로 줄이고, `canvas`(`handle_canvas_drag`, `paint_block_selection`), `render_table_editor`(`table_editor_toolbar`), `render_block`(`render_toggle_view`, `render_code_card_view`)도 보조 메서드로 분해.
+  - `README.md` 아키텍처(`src/textops.rs`, `src/sas.rs`) 및 테스트 개수(46개) 갱신.
+
 ## 2026-11-19 — v0.11.1: 폴더 스캔 비동기, 단축키 처리 분해
 
 - **파일 목록 갱신**(새 파일·이름 변경·삭제·`Ctrl+O`)을 다른 스레드에서 한다. 큰 폴더에서도 UI가 멈추지 않는다. 세대 번호로 오래된 스캔 결과는 버린다. 시작 때 첫 파일을 정해야 할 때만 동기 스캔.

@@ -1099,6 +1099,9 @@ fn paint_block_decor(
     }
     let toggle = is_toggle_block(text);
     let callout = callout_kind(text).is_some();
+    let clip = painter.clip_rect();
+    let vis_y_min = clip.top() - 120.0;
+    let vis_y_max = clip.bottom() + 120.0;
     let mut stack = Vec::new();
     let (mut ci, mut fence) = (0, false);
     let mut quote_rows: Option<(f32, f32)> = None;
@@ -1111,6 +1114,7 @@ fn paint_block_decor(
     };
     for (li, line) in text.split('\n').enumerate() {
         let t = line.trim_start();
+        let line_chars = line.chars().count();
         let row = |c: usize| g.pos_from_cursor(CCursor::new(c));
         let is_quote = !callout && !fence && t.starts_with('>');
         if !is_quote {
@@ -1137,37 +1141,47 @@ fn paint_block_decor(
             );
         } else if is_hr_line(line) {
             let y = origin.y + row(ci).top() + 4.5;
-            painter.hline(origin.x..=origin.x + width, y, Stroke::new(1.0, p.border));
+            if y >= vis_y_min && y <= vis_y_max {
+                painter.hline(origin.x..=origin.x + width, y, Stroke::new(1.0, p.border));
+            }
         } else if let Some(url) = image_line(line) {
-            let (size, tex) = image_fit(painter.ctx(), scheme, url, width);
-            let rect = Rect::from_min_size(origin + vec2(0.0, row(ci).top()), size);
-            match tex {
-                Some(id) => {
-                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                    painter.image(id, rect, uv, Color32::WHITE);
-                }
-                None => {
-                    painter.rect_filled(rect, 4.0, p.surface);
+            let y_top = origin.y + row(ci).top();
+            if y_top <= vis_y_max {
+                let (size, tex) = image_fit(painter.ctx(), scheme, url, width);
+                let rect = Rect::from_min_size(pos2(origin.x, y_top), size);
+                if rect.bottom() >= vis_y_min {
+                    match tex {
+                        Some(id) => {
+                            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                            painter.image(id, rect, uv, Color32::WHITE);
+                        }
+                        None => {
+                            painter.rect_filled(rect, 4.0, p.surface);
+                        }
+                    }
+                    // 노션처럼 선택된 이미지는 테두리로 표시 (원문 대신)
+                    painter.rect_stroke(
+                        rect.expand(2.0),
+                        4.0,
+                        Stroke::new(2.0, p.accent.gamma_multiply(0.6)),
+                        egui::StrokeKind::Outside,
+                    );
                 }
             }
-            // 노션처럼 선택된 이미지는 테두리로 표시 (원문 대신)
-            painter.rect_stroke(
-                rect.expand(2.0),
-                4.0,
-                Stroke::new(2.0, p.accent.gamma_multiply(0.6)),
-                egui::StrokeKind::Outside,
-            );
         } else if is_quote {
-            let (top, bottom) = (row(ci).top(), row(ci + line.chars().count()).bottom());
+            let (top, bottom) = (row(ci).top(), row(ci + line_chars).bottom());
             quote_rows = Some(quote_rows.map_or((top, bottom), |q| (q.0, bottom)));
         } else if let Some((name, _)) = footnote_def(line) {
-            painter.text(
-                origin + vec2(0.0, row(ci).top()),
-                Align2::LEFT_TOP,
-                format!("[{name}]:"),
-                FontId::monospace(body * 0.85),
-                p.accent,
-            );
+            let r_top = origin.y + row(ci).top();
+            if r_top >= vis_y_min && r_top <= vis_y_max {
+                painter.text(
+                    pos2(origin.x, r_top),
+                    Align2::LEFT_TOP,
+                    format!("[{name}]:"),
+                    FontId::monospace(body * 0.85),
+                    p.accent,
+                );
+            }
         } else if let (Some(len), Some((depth, num))) =
             (list_marker_bytes(line), list_item_step(&mut stack, line))
         {
@@ -1178,21 +1192,24 @@ fn paint_block_decor(
                     x0 + LIST_STEP * depth as f32 + LIST_PAD + LIST_MARKER_W * 0.5,
                     row_top + body * 0.75,
                 );
-            let m = line[..len].trim_start();
-            if m.ends_with("] ") {
-                paint_checkbox(painter, c, m.contains(['x', 'X']));
-            } else {
-                let label = num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
-                painter.text(
-                    c,
-                    Align2::CENTER_CENTER,
-                    label,
-                    FontId::proportional(body),
-                    p.muted,
-                );
+            if c.y >= vis_y_min && c.y <= vis_y_max {
+                let m = line[..len].trim_start();
+                if m.ends_with("] ") {
+                    paint_checkbox(painter, c, m.contains(['x', 'X']));
+                } else {
+                    let label =
+                        num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
+                    painter.text(
+                        c,
+                        Align2::CENTER_CENTER,
+                        label,
+                        FontId::proportional(body),
+                        p.muted,
+                    );
+                }
             }
         }
-        ci += line.chars().count() + 1;
+        ci += line_chars + 1;
     }
     if let Some(q) = quote_rows {
         bar(q);
@@ -1235,6 +1252,429 @@ fn editor_galley_cached(
     let g = ctx.fonts_mut(|f| f.layout_job(job));
     *cache = Some((key.0, key.1, key.2, key.3, std::sync::Arc::clone(&g)));
     g
+}
+
+// 편집 칸(id)의 커서/선택 범위를 정한다
+fn set_cursor_range(ctx: &egui::Context, id: egui::Id, cr: CCursorRange) {
+    let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+    st.cursor.set_char_range(Some(cr));
+    egui::TextEdit::store_state(ctx, id, st);
+}
+
+// 코드 카드 머리줄 결과
+struct CodeHeader {
+    picked_lang: Option<&'static str>,
+    interacted: bool,
+    done: bool,
+    copy: Option<String>,
+}
+
+// 코드 카드 머리줄: 언어 선택, 복사, 완료 버튼. 본문(buf)은 읽기만 한다.
+fn code_card_header(
+    ui: &mut egui::Ui,
+    p: &Pal,
+    cur_lang: &str,
+    lead: usize,
+    fence: &str,
+    first_nl_rel: usize,
+    buf: &str,
+) -> CodeHeader {
+    let mut picked_lang: Option<&'static str> = None;
+    let mut header_interacted = false;
+    let mut deactivate = false;
+    let mut copy_inner_code: Option<String> = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add(img(theme::CODE, 13.0, p.accent));
+        ui.label(
+            RichText::new("코드 블록")
+                .size(11.5)
+                .strong()
+                .color(p.muted),
+        );
+        let lang_label = if cur_lang.is_empty() {
+            "언어 선택"
+        } else {
+            cur_lang
+        };
+        let lang_btn = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(format!("{lang_label} ▾"))
+                        .family(FontFamily::Monospace)
+                        .size(11.0)
+                        .color(if cur_lang.is_empty() {
+                            p.muted
+                        } else {
+                            p.accent
+                        }),
+                )
+                .fill(p.surface)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(6)
+                .min_size(vec2(0.0, 23.0)),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("코드 언어 선택");
+        if lang_btn.clicked() {
+            header_interacted = true;
+        }
+        egui::Popup::menu(&lang_btn).show(|ui| {
+            ui.set_width(140.0);
+            ui.spacing_mut().item_spacing.y = 1.0;
+            for lang_opt in [
+                "",
+                "rust",
+                "python",
+                "javascript",
+                "typescript",
+                "json",
+                "bash",
+                "sql",
+                "sas",
+                "c",
+                "cpp",
+                "go",
+                "yaml",
+                "toml",
+                "mermaid",
+            ] {
+                let lbl = if lang_opt.is_empty() {
+                    "없음 (일반)"
+                } else {
+                    lang_opt
+                };
+                let selected = cur_lang.eq_ignore_ascii_case(lang_opt);
+                if ui
+                    .selectable_label(
+                        selected,
+                        RichText::new(lbl).family(FontFamily::Monospace).size(11.5),
+                    )
+                    .clicked()
+                {
+                    picked_lang = Some(lang_opt);
+                    header_interacted = true;
+                }
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("완료 (Esc)").size(11.0).color(p.accent))
+                        .fill(p.accent.gamma_multiply(0.12))
+                        .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.35)))
+                        .corner_radius(6)
+                        .min_size(vec2(0.0, 23.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("편집 마치고 코드 카드로 보기 (Esc)")
+                .clicked()
+            {
+                deactivate = true;
+                header_interacted = true;
+            }
+            if ui
+                .add(
+                    egui::Button::image_and_text(
+                        img(theme::COPY, 11.0, p.muted),
+                        RichText::new("복사").size(11.0).color(p.muted),
+                    )
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(6)
+                    .min_size(vec2(50.0, 23.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("코드 내용 복사")
+                .clicked()
+            {
+                let body_start = lead + first_nl_rel + 1;
+                let body_part = if body_start < buf.len() {
+                    &buf[body_start..]
+                } else {
+                    ""
+                };
+                let inner = body_part
+                    .trim_end()
+                    .strip_suffix(fence)
+                    .unwrap_or(body_part)
+                    .trim_end_matches(['\n', '\r']);
+                copy_inner_code = Some(inner.to_string());
+                header_interacted = true;
+            }
+        });
+    });
+    CodeHeader {
+        picked_lang,
+        interacted: header_interacted,
+        done: deactivate,
+        copy: copy_inner_code,
+    }
+}
+
+// 편집 중인 블록이 Mermaid 펜스면 코드 입력란 바로 아래에 실시간 다이어그램 미리보기를 그린다
+fn mermaid_preview(ui: &mut egui::Ui, p: &Pal, buf: &str, body: f32) -> Option<Rect> {
+    let bt = buf.trim_start();
+    if !((bt.starts_with("```") || bt.starts_with("~~~"))
+        && bt[3..]
+            .lines()
+            .next()
+            .is_some_and(|l| l.trim().eq_ignore_ascii_case("mermaid")))
+    {
+        return None;
+    }
+    let fence = &bt[..3];
+    let first_nl = bt.find('\n').unwrap_or(bt.len());
+    let body_part = if first_nl < bt.len() {
+        &bt[first_nl + 1..]
+    } else {
+        ""
+    };
+    let m_code = body_part
+        .trim_end()
+        .strip_suffix(fence)
+        .unwrap_or(body_part)
+        .trim_end_matches(['\n', '\r']);
+    let preview_w = ui.available_width();
+    let resp = ui.vertical(|ui| {
+        let _ = card(
+            ui,
+            p,
+            Some("Mermaid 다이어그램 (실시간 미리보기)"),
+            false,
+            |ui| {
+                let _ = crate::mermaid::render(ui, p, m_code, body, (preview_w - 44.0).max(160.0));
+            },
+        );
+    });
+    Some(resp.response.rect)
+}
+
+// 커서가 블록의 첫/마지막 보이는 줄에 있는지 (↑/↓ 이동이 블록 경계를 넘을지 판단)
+fn cursor_info_for(
+    galley: &egui::Galley,
+    pc: CCursor,
+    block_start: usize,
+    doc_rev: u64,
+) -> EditorCursorInfo {
+    // 접어 둔(높이 0) ``` 줄은 빼고 보이는 줄 기준으로 첫·마지막 줄을 판단
+    let rows: Vec<_> = galley
+        .rows
+        .iter()
+        .filter(|r| r.rect().height() > 1.0)
+        .collect();
+    let (on_first_row, on_last_row) = if rows.len() <= 1 {
+        (true, true)
+    } else {
+        let cy = galley.pos_from_cursor(pc).center().y;
+        (
+            cy <= rows[0].rect().bottom() + 0.5,
+            cy >= rows[rows.len() - 1].rect().top() - 0.5,
+        )
+    };
+    EditorCursorInfo {
+        block_start,
+        doc_rev,
+        on_first_row,
+        on_last_row,
+    }
+}
+
+// 알림 상자 제목줄: 눌러서 종류(NOTE/TIP/...)를 바꾼다. (눌렀는지, 고른 종류)
+fn callout_header(
+    ui: &mut egui::Ui,
+    kind: &str,
+    accent: Color32,
+    title: &str,
+    body: f32,
+    dark: bool,
+) -> (bool, Option<&'static str>) {
+    let mut header_interacted = false;
+    let mut picked_callout: Option<&'static str> = None;
+    let hdr = ui
+        .add(
+            egui::Label::new(
+                RichText::new(title)
+                    .font(FontId::new(body * 0.94, theme::bold()))
+                    .color(accent),
+            )
+            .sense(Sense::click()),
+        )
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("알림 종류 바꾸기");
+    if hdr.clicked() {
+        header_interacted = true;
+    }
+    egui::Popup::menu(&hdr).show(|ui| {
+        ui.set_width(150.0);
+        for k in ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"] {
+            let (c, label) = md_alert_meta(alert_kind(k), dark);
+            if ui
+                .selectable_label(kind == k, RichText::new(label).color(c))
+                .clicked()
+            {
+                picked_callout = Some(k);
+                header_interacted = true;
+            }
+        }
+    });
+    (header_interacted, picked_callout)
+}
+
+// 접기 블록의 화살표 (제목 줄 왼쪽): 눌러서 펼치기/접기. 눌렀으면 true
+fn toggle_arrow(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    id: egui::Id,
+    toggle_id: egui::Id,
+    folded: bool,
+    out: &egui::text_edit::TextEditOutput,
+    buf: &str,
+) -> bool {
+    let mut header_interacted = false;
+    if is_toggle_block(buf) {
+        let row0 = out
+            .galley
+            .rows
+            .first()
+            .map_or(Rect::NOTHING, |row| row.rect());
+        let arrow = Rect::from_center_size(
+            out.galley_pos + vec2(11.0, row0.center().y),
+            vec2(22.0, 22.0),
+        );
+        let resp = ui
+            .interact(arrow, id.with("toggle-arrow"), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("클릭하여 펼치기/접기");
+        if resp.clicked() {
+            ctx.data_mut(|d| d.insert_temp(toggle_id, folded));
+            header_interacted = true;
+            ctx.request_repaint();
+        }
+    }
+    header_interacted
+}
+
+// 편집 결과 보정: 구분선·이미지 뒤에 친 글자는 아래 새 문단으로, 지워진 숨김 줄(``` / $$ / :::toggle)은 되돌린다
+fn fix_edited_buf(
+    ctx: &egui::Context,
+    id: egui::Id,
+    old_block: &str,
+    buf: &mut String,
+    sel: &mut Option<SelRange>,
+    primary_cursor: &mut Option<CCursor>,
+) {
+    // 구분선·이미지에 글자를 치면 그대로 두고 아래 새 문단으로 옮긴다
+    if (is_hr_line(old_block) || image_line(old_block).is_some())
+        && !old_block.contains('\n')
+        && *buf != old_block
+    {
+        if let Some(typed) = buf.strip_prefix(old_block).filter(|t| !t.starts_with('\n')) {
+            let fixed = format!("{old_block}\n\n{typed}");
+            let caret = char_len(&fixed);
+            *buf = fixed;
+            set_cursor_range(ctx, id, CCursorRange::one(CCursor::new(caret)));
+        }
+    }
+    // 숨긴 ``` / $$ / :::toggle 줄이 지워지거나 바뀌었으면 그 부분만 되돌린다 (전체 선택 후 입력, 맨 앞 Backspace 등)
+    {
+        if let Some((fixed, caret)) = keep_code_fences(old_block, buf) {
+            *buf = fixed;
+            let cr = CCursorRange::one(CCursor::new(caret));
+            set_cursor_range(ctx, id, cr);
+            *sel = Some(cr.as_sorted_char_range());
+            *primary_cursor = Some(cr.primary);
+            ctx.request_repaint();
+        }
+    }
+}
+
+// 커서가 숨긴 목록 기호·코드 펜스 안으로 들어가면 보이는 자리로 옮긴다
+#[allow(clippy::too_many_arguments)]
+fn clamp_caret_visible(
+    ctx: &egui::Context,
+    id: egui::Id,
+    buf: &str,
+    folded: bool,
+    base: usize,
+    ime_composing: bool,
+    last_sel: Option<Sel>,
+    sel: &mut Option<SelRange>,
+    primary_cursor: &mut Option<CCursor>,
+) {
+    // 커서가 숨긴 목록 기호·코드 펜스 안으로 들어가면 보이는 자리로 옮긴다
+    if let Some(s) = sel.clone().filter(|s| s.start == s.end && !ime_composing) {
+        let c = s.start.0;
+        // 코드·수식·접기: 숨긴 앞뒤 줄 안쪽으로 (접혀 있으면 제목 줄 안으로)
+        let c1 = fenced_body_range(buf).map_or(c, |(a, b)| {
+            let b = if folded {
+                a.max(char_len(buf.split('\n').next().unwrap_or("")))
+            } else {
+                b
+            };
+            c.clamp(a, b)
+        });
+        let prev = last_sel.and_then(|(a, b)| (a == b && a >= base).then(|| a - base));
+        let to = clamp_hidden(buf, c1, prev);
+        if to != c {
+            let cr = CCursorRange::one(CCursor::new(to));
+            set_cursor_range(ctx, id, cr);
+            *sel = Some(cr.as_sorted_char_range());
+            *primary_cursor = Some(cr.primary);
+            ctx.request_repaint();
+        }
+    }
+}
+
+// 편집 칸의 선택 범위(문자 인덱스)
+type SelRange = std::ops::Range<egui::text::CharIndex>;
+
+// 편집 칸 커서/선택의 두 끝을 f로 옮긴다 (앞쪽 줄을 고쳐 글자 수가 달라졌을 때)
+fn shift_cursor(ctx: &egui::Context, id: egui::Id, f: impl Fn(usize) -> usize) {
+    if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
+        if let Some(cr) = st.cursor.char_range() {
+            st.cursor.set_char_range(Some(CCursorRange::two(
+                CCursor::new(f(cr.primary.index.into())),
+                CCursor::new(f(cr.secondary.index.into())),
+            )));
+            egui::TextEdit::store_state(ctx, id, st);
+        }
+    }
+}
+
+// 코드 블록 여는 줄의 언어를 바꾸고 커서를 길이 차이만큼 옮긴다
+fn change_code_lang(
+    ctx: &egui::Context,
+    id: egui::Id,
+    buf: &mut String,
+    lead: usize,
+    fence: &str,
+    first_nl_rel: usize,
+    new_lang: &str,
+) {
+    let old_end = lead + first_nl_rel;
+    let old_l0_chars = char_len(&buf[..old_end]);
+    let new_l0 = format!("{}{fence}{new_lang}", &buf[..lead]);
+    let new_l0_chars = char_len(&new_l0);
+    buf.replace_range(..old_end, &new_l0);
+    let delta = new_l0_chars as isize - old_l0_chars as isize;
+    shift_cursor(ctx, id, |idx| {
+        if idx >= old_l0_chars {
+            (idx as isize + delta).max(0) as usize
+        } else {
+            idx.min(new_l0_chars)
+        }
+    });
+}
+
+// 알림 종류 바꾸기: 제목 줄만 바꾸고 커서는 길이 차이만큼 옮긴다
+fn change_callout_kind(ctx: &egui::Context, id: egui::Id, buf: &mut String, kind: &str) {
+    let l0 = buf.find('\n').unwrap_or(buf.len());
+    let new_l0 = format!("> [!{kind}]");
+    let diff = char_len(&new_l0) as isize - char_len(&buf[..l0]) as isize;
+    buf.replace_range(..l0, &new_l0);
+    shift_cursor(ctx, id, |c| (c as isize + diff).max(0) as usize);
 }
 
 struct EditorOut {
@@ -2334,123 +2774,28 @@ impl App {
                         }
 
                         // 마우스 드래그: 단일 블록 텍스트 선택 또는 다중 블록 범위 선택
-                        let (drag_active, origin_opt, pos_opt) = ctx.input(|i| {
-                            let active = !menu_was_open
-                                && (i.pointer.primary_down() || i.pointer.primary_released())
-                                && i.pointer.is_decidedly_dragging();
-                            (active, i.pointer.press_origin(), i.pointer.interact_pos())
-                        });
-                        if drag_active && !consumed && self.dialog.is_none() {
-                            if let (Some(origin), Some(pos)) = (origin_opt, pos_opt) {
-                                let on_fg = ctx
-                                    .layer_id_at(origin)
-                                    .is_some_and(|l| l.order == Order::Foreground);
-                                if area.contains(origin) && !on_fg {
-                                    let edge = 32.0;
-                                    if pos.y < area.top() + edge {
-                                        ui.scroll_with_delta(vec2(
-                                            0.0,
-                                            (area.top() + edge - pos.y).min(18.0),
-                                        ));
-                                        ctx.request_repaint();
-                                    } else if pos.y > area.bottom() - edge {
-                                        ui.scroll_with_delta(vec2(
-                                            0.0,
-                                            -(pos.y - (area.bottom() - edge)).min(18.0),
-                                        ));
-                                        ctx.request_repaint();
-                                    }
-                                    let y_min = origin.y.min(pos.y);
-                                    let y_max = origin.y.max(pos.y);
-                                    let mut first_hit: Option<Range<usize>> = None;
-                                    let mut last_hit: Option<Range<usize>> = None;
-                                    let mut hit_count = 0usize;
-                                    for (r, rect) in &block_rects {
-                                        if !r.is_empty()
-                                            && rect.bottom() + 2.0 >= y_min
-                                            && rect.top() - 2.0 <= y_max
-                                        {
-                                            if first_hit.is_none() {
-                                                first_hit = Some(r.clone());
-                                            }
-                                            last_hit = Some(r.clone());
-                                            hit_count += 1;
-                                        }
-                                    }
-                                    if hit_count == 1 {
-                                        let b = first_hit.unwrap();
-                                        self.block_sel = None;
-                                        self.block_sel_anchor = None;
-                                        self.block_sel_head = None;
-                                        go_click_pos = None;
-                                        if self.active != Some(b.start) {
-                                            self.drag_anchor = Some((b.start, origin));
-                                            self.drag_last_pos = Some(pos);
-                                            go_to = Some((b.start, b.end));
-                                            consumed = true;
-                                            ctx.request_repaint();
-                                        } else if self.drag_anchor.is_some() {
-                                            self.drag_last_pos = Some(pos);
-                                            consumed = true;
-                                        }
-                                    } else if hit_count >= 2 {
-                                        let first = first_hit.unwrap();
-                                        let last = last_hit.unwrap();
-                                        let start = first.start;
-                                        let end = last.end;
-                                        let (anchor_blk, head_blk) = if pos.y >= origin.y {
-                                            (first, last)
-                                        } else {
-                                            (last, first)
-                                        };
-                                        self.leave_blank();
-                                        self.active = None;
-                                        self.drag_anchor = None;
-                                        self.drag_last_pos = None;
-                                        self.block_sel_anchor = Some(anchor_blk.start);
-                                        self.block_sel_head = Some(head_blk.start);
-                                        self.block_sel = Some(start..end);
-                                        go_to = None;
-                                        go_click_pos = None;
-                                        consumed = true;
-                                    }
-                                }
-                            }
-                        }
+                        self.handle_canvas_drag(
+                            ui,
+                            &ctx,
+                            area,
+                            menu_was_open,
+                            &block_rects,
+                            &mut consumed,
+                            &mut go_to,
+                            &mut go_click_pos,
+                        );
 
                         // 다중 블록 / 전체 문서 선택 하이라이트 및 서식 막대 표시
-                        let mut first_sel_rect: Option<Rect> = None;
-                        if let Some(sel_range) = self.block_sel.clone() {
-                            for (r, full_row) in &block_rects {
-                                if !r.is_empty()
-                                    && r.start < sel_range.end
-                                    && r.end > sel_range.start
-                                {
-                                    let box_rect = Rect::from_x_y_ranges(
-                                        ui.min_rect().x_range(),
-                                        full_row.y_range(),
-                                    )
-                                    .expand2(vec2(6.0, 2.0));
-                                    ui.painter().rect(
-                                        box_rect,
-                                        6.0,
-                                        p.accent.gamma_multiply(0.16),
-                                        Stroke::new(1.0, p.accent.gamma_multiply(0.45)),
-                                        egui::StrokeKind::Inside,
-                                    );
-                                    if first_sel_rect.is_none() && box_rect.bottom() >= clip.top() {
-                                        first_sel_rect = Some(box_rect);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(sr) = first_sel_rect.filter(|_| {
-                            self.context_menu.is_none() && !ctx.input(|i| i.pointer.primary_down())
-                        }) {
-                            let (f, bar_hit) = self.show_format_bar(&ctx, p, sr, area);
-                            fmt = fmt.or(f);
-                            consumed |= bar_hit;
-                        }
+                        self.paint_block_selection(
+                            ui,
+                            &ctx,
+                            p,
+                            area,
+                            clip,
+                            &block_rects,
+                            &mut fmt,
+                            &mut consumed,
+                        );
 
                         // 마지막 블록 아래 빈 곳을 누르면 새 블록 (노션과 같음)
                         let rest = ui.available_height().max(140.0);
@@ -2628,6 +2973,139 @@ impl App {
             self.apply_slash(i);
         }
         self.find_bar(&ctx, p, area);
+    }
+
+    // 캔버스 마우스 드래그: 단일 블록 내 텍스트 선택 또는 교차 블록(block_sel) 선택
+    #[allow(clippy::too_many_arguments)]
+    fn handle_canvas_drag(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        area: Rect,
+        menu_was_open: bool,
+        block_rects: &[(Range<usize>, Rect)],
+        consumed: &mut bool,
+        go_to: &mut Option<(usize, usize)>,
+        go_click_pos: &mut Option<egui::Pos2>,
+    ) {
+        let (drag_active, origin_opt, pos_opt) = ctx.input(|i| {
+            let active = !menu_was_open
+                && (i.pointer.primary_down() || i.pointer.primary_released())
+                && i.pointer.is_decidedly_dragging();
+            (active, i.pointer.press_origin(), i.pointer.interact_pos())
+        });
+        if !drag_active || *consumed || self.dialog.is_some() {
+            return;
+        }
+        let (Some(origin), Some(pos)) = (origin_opt, pos_opt) else {
+            return;
+        };
+        let on_fg = ctx
+            .layer_id_at(origin)
+            .is_some_and(|l| l.order == Order::Foreground);
+        if !area.contains(origin) || on_fg {
+            return;
+        }
+        let edge = 32.0;
+        if pos.y < area.top() + edge {
+            ui.scroll_with_delta(vec2(0.0, (area.top() + edge - pos.y).min(18.0)));
+            ctx.request_repaint();
+        } else if pos.y > area.bottom() - edge {
+            ui.scroll_with_delta(vec2(0.0, -(pos.y - (area.bottom() - edge)).min(18.0)));
+            ctx.request_repaint();
+        }
+        let y_min = origin.y.min(pos.y);
+        let y_max = origin.y.max(pos.y);
+        let mut first_hit: Option<Range<usize>> = None;
+        let mut last_hit: Option<Range<usize>> = None;
+        let mut hit_count = 0usize;
+        for (r, rect) in block_rects {
+            if !r.is_empty() && rect.bottom() + 2.0 >= y_min && rect.top() - 2.0 <= y_max {
+                if first_hit.is_none() {
+                    first_hit = Some(r.clone());
+                }
+                last_hit = Some(r.clone());
+                hit_count += 1;
+            }
+        }
+        if hit_count == 1 {
+            let b = first_hit.unwrap();
+            self.block_sel = None;
+            self.block_sel_anchor = None;
+            self.block_sel_head = None;
+            *go_click_pos = None;
+            if self.active != Some(b.start) {
+                self.drag_anchor = Some((b.start, origin));
+                self.drag_last_pos = Some(pos);
+                *go_to = Some((b.start, b.end));
+                *consumed = true;
+                ctx.request_repaint();
+            } else if self.drag_anchor.is_some() {
+                self.drag_last_pos = Some(pos);
+                *consumed = true;
+            }
+        } else if hit_count >= 2 {
+            let first = first_hit.unwrap();
+            let last = last_hit.unwrap();
+            let start = first.start;
+            let end = last.end;
+            let (anchor_blk, head_blk) = if pos.y >= origin.y {
+                (first, last)
+            } else {
+                (last, first)
+            };
+            self.leave_blank();
+            self.active = None;
+            self.drag_anchor = None;
+            self.drag_last_pos = None;
+            self.block_sel_anchor = Some(anchor_blk.start);
+            self.block_sel_head = Some(head_blk.start);
+            self.block_sel = Some(start..end);
+            *go_to = None;
+            *go_click_pos = None;
+            *consumed = true;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_block_selection(
+        &self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        p: &Pal,
+        area: Rect,
+        clip: Rect,
+        block_rects: &[(Range<usize>, Rect)],
+        fmt: &mut Option<Fmt>,
+        consumed: &mut bool,
+    ) {
+        let mut first_sel_rect: Option<Rect> = None;
+        if let Some(sel_range) = self.block_sel.clone() {
+            for (r, full_row) in block_rects {
+                if !r.is_empty() && r.start < sel_range.end && r.end > sel_range.start {
+                    let box_rect =
+                        Rect::from_x_y_ranges(ui.min_rect().x_range(), full_row.y_range())
+                            .expand2(vec2(6.0, 2.0));
+                    ui.painter().rect(
+                        box_rect,
+                        6.0,
+                        p.accent.gamma_multiply(0.16),
+                        Stroke::new(1.0, p.accent.gamma_multiply(0.45)),
+                        egui::StrokeKind::Inside,
+                    );
+                    if first_sel_rect.is_none() && box_rect.bottom() >= clip.top() {
+                        first_sel_rect = Some(box_rect);
+                    }
+                }
+            }
+        }
+        if let Some(sr) = first_sel_rect
+            .filter(|_| self.context_menu.is_none() && !ctx.input(|i| i.pointer.primary_down()))
+        {
+            let (f, bar_hit) = self.show_format_bar(ctx, p, sr, area);
+            *fmt = (*fmt).or(f);
+            *consumed |= bar_hit;
+        }
     }
 
     // 열린 문서가 없을 때: 첫 실행·빈 폴더에서 바로 시작할 수 있는 화면
@@ -2974,9 +3452,7 @@ impl App {
                 );
                 let c = g.cursor_from_pos(click_pos - pre_pos);
                 let cr = CCursorRange::one(c);
-                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                st.cursor.set_char_range(Some(cr));
-                egui::TextEdit::store_state(ctx, id, st);
+                set_cursor_range(ctx, id, cr);
                 pre_click = Some((pre_pos, click_pos));
             }
         }
@@ -2985,40 +3461,9 @@ impl App {
         let mut delete_block = false;
         let is_raw_table = self.raw_table_mode && parse_md_table(&buf).is_some();
         if is_raw_table {
-            ui.horizontal(|ui| {
-                ui.add(img(theme::TABLE, 13.0, p.accent));
-                ui.label(
-                    RichText::new("표 마크다운 편집")
-                        .size(11.5)
-                        .strong()
-                        .color(p.muted),
-                );
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    if table_delete_btn(ui).clicked() {
-                        delete_block = true;
-                        header_interacted = true;
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("표 직접 편집").size(11.0).color(p.accent),
-                            )
-                            .fill(p.surface)
-                            .stroke(Stroke::new(1.0, p.border))
-                            .corner_radius(6)
-                            .min_size(vec2(0.0, 23.0)),
-                        )
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        self.raw_table_mode = false;
-                        self.table_focus_cell = Some((0, 0));
-                        header_interacted = true;
-                    }
-                });
-            });
-            ui.add_space(4.0);
+            let (hi, del) = self.raw_table_header(ui, p);
+            header_interacted |= hi;
+            delete_block |= del;
         }
         let code_meta = {
             let bt_init = buf.trim_start();
@@ -3051,8 +3496,6 @@ impl App {
             });
         }
         let out = if let Some((lead, fence, first_nl_rel, cur_lang)) = code_meta {
-            let mut picked_lang: Option<&'static str> = None;
-
             let framed = Frame::new()
                 .fill(p.code_bg)
                 .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.55)))
@@ -3060,153 +3503,15 @@ impl App {
                 .inner_margin(Margin::symmetric(14, 9))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.add(img(theme::CODE, 13.0, p.accent));
-                        ui.label(
-                            RichText::new("코드 블록")
-                                .size(11.5)
-                                .strong()
-                                .color(p.muted),
-                        );
-                        let lang_label = if cur_lang.is_empty() {
-                            "언어 선택"
-                        } else {
-                            cur_lang.as_str()
-                        };
-                        let lang_btn = ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("{lang_label} ▾"))
-                                        .family(FontFamily::Monospace)
-                                        .size(11.0)
-                                        .color(if cur_lang.is_empty() {
-                                            p.muted
-                                        } else {
-                                            p.accent
-                                        }),
-                                )
-                                .fill(p.surface)
-                                .stroke(Stroke::new(1.0, p.border))
-                                .corner_radius(6)
-                                .min_size(vec2(0.0, 23.0)),
-                            )
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text("코드 언어 선택");
-                        if lang_btn.clicked() {
-                            header_interacted = true;
-                        }
-                        egui::Popup::menu(&lang_btn).show(|ui| {
-                            ui.set_width(140.0);
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            for lang_opt in [
-                                "",
-                                "rust",
-                                "python",
-                                "javascript",
-                                "typescript",
-                                "json",
-                                "bash",
-                                "sql",
-                                "sas",
-                                "c",
-                                "cpp",
-                                "go",
-                                "yaml",
-                                "toml",
-                                "mermaid",
-                            ] {
-                                let lbl = if lang_opt.is_empty() {
-                                    "없음 (일반)"
-                                } else {
-                                    lang_opt
-                                };
-                                let selected = cur_lang.eq_ignore_ascii_case(lang_opt);
-                                if ui
-                                    .selectable_label(
-                                        selected,
-                                        RichText::new(lbl).family(FontFamily::Monospace).size(11.5),
-                                    )
-                                    .clicked()
-                                {
-                                    picked_lang = Some(lang_opt);
-                                    header_interacted = true;
-                                }
-                            }
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("완료 (Esc)").size(11.0).color(p.accent),
-                                    )
-                                    .fill(p.accent.gamma_multiply(0.12))
-                                    .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.35)))
-                                    .corner_radius(6)
-                                    .min_size(vec2(0.0, 23.0)),
-                                )
-                                .on_hover_cursor(CursorIcon::PointingHand)
-                                .on_hover_text("편집 마치고 코드 카드로 보기 (Esc)")
-                                .clicked()
-                            {
-                                deactivate = true;
-                                header_interacted = true;
-                            }
-                            if ui
-                                .add(
-                                    egui::Button::image_and_text(
-                                        img(theme::COPY, 11.0, p.muted),
-                                        RichText::new("복사").size(11.0).color(p.muted),
-                                    )
-                                    .fill(p.surface)
-                                    .stroke(Stroke::new(1.0, p.border))
-                                    .corner_radius(6)
-                                    .min_size(vec2(50.0, 23.0)),
-                                )
-                                .on_hover_cursor(CursorIcon::PointingHand)
-                                .on_hover_text("코드 내용 복사")
-                                .clicked()
-                            {
-                                let body_start = lead + first_nl_rel + 1;
-                                let body_part = if body_start < buf.len() {
-                                    &buf[body_start..]
-                                } else {
-                                    ""
-                                };
-                                let inner = body_part
-                                    .trim_end()
-                                    .strip_suffix(fence.as_str())
-                                    .unwrap_or(body_part)
-                                    .trim_end_matches(['\n', '\r']);
-                                copy_inner_code = Some(inner.to_string());
-                                header_interacted = true;
-                            }
-                        });
-                    });
+                    let h = code_card_header(ui, p, &cur_lang, lead, &fence, first_nl_rel, &buf);
+                    header_interacted |= h.interacted;
+                    deactivate |= h.done;
+                    if h.copy.is_some() {
+                        copy_inner_code = h.copy;
+                    }
+                    let picked_lang = h.picked_lang;
                     if let Some(new_lang) = picked_lang {
-                        let old_end = lead + first_nl_rel;
-                        let old_l0_chars = char_len(&buf[..old_end]);
-                        let new_l0 = format!("{}{fence}{new_lang}", &buf[..lead]);
-                        let new_l0_chars = char_len(&new_l0);
-                        buf.replace_range(..old_end, &new_l0);
-                        let delta = new_l0_chars as isize - old_l0_chars as isize;
-                        if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
-                            if let Some(cr) = st.cursor.char_range() {
-                                let shift = |idx: usize| -> usize {
-                                    if idx >= old_l0_chars {
-                                        (idx as isize + delta).max(0) as usize
-                                    } else {
-                                        idx.min(new_l0_chars)
-                                    }
-                                };
-                                st.cursor.set_char_range(Some(CCursorRange::two(
-                                    CCursor::new(shift(cr.primary.index.into())),
-                                    CCursor::new(shift(cr.secondary.index.into())),
-                                )));
-                                egui::TextEdit::store_state(ctx, id, st);
-                            }
-                        }
+                        change_code_lang(ctx, id, &mut buf, lead, &fence, first_nl_rel, new_lang);
                         galley_cache = None;
                         self.focus_editor = true;
                     }
@@ -3297,33 +3602,11 @@ impl App {
                     })
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        let hdr = ui
-                            .add(
-                                egui::Label::new(
-                                    RichText::new(title)
-                                        .font(FontId::new(body * 0.94, theme::bold()))
-                                        .color(accent),
-                                )
-                                .sense(Sense::click()),
-                            )
-                            .on_hover_cursor(CursorIcon::PointingHand)
-                            .on_hover_text("알림 종류 바꾸기");
-                        if hdr.clicked() {
-                            header_interacted = true;
+                        let (hi, pk) = callout_header(ui, kind, accent, title, body, dark);
+                        header_interacted |= hi;
+                        if pk.is_some() {
+                            picked_callout = pk;
                         }
-                        egui::Popup::menu(&hdr).show(|ui| {
-                            ui.set_width(150.0);
-                            for k in ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"] {
-                                let (c, label) = md_alert_meta(alert_kind(k), dark);
-                                if ui
-                                    .selectable_label(kind == k, RichText::new(label).color(c))
-                                    .clicked()
-                                {
-                                    picked_callout = Some(k);
-                                    header_interacted = true;
-                                }
-                            }
-                        });
                         text_edit(ui)
                     });
                 let r = framed.response.rect;
@@ -3376,130 +3659,31 @@ impl App {
                 &scheme,
             );
         }
-        // 접기 화살표 (제목 줄 왼쪽): 눌러서 펼치기/접기
-        if is_toggle_block(&buf) {
-            let row0 = out
-                .galley
-                .rows
-                .first()
-                .map_or(Rect::NOTHING, |row| row.rect());
-            let arrow = Rect::from_center_size(
-                out.galley_pos + vec2(11.0, row0.center().y),
-                vec2(22.0, 22.0),
-            );
-            let resp = ui
-                .interact(arrow, id.with("toggle-arrow"), Sense::click())
-                .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text("클릭하여 펼치기/접기");
-            if resp.clicked() {
-                ctx.data_mut(|d| d.insert_temp(toggle_id, folded));
-                header_interacted = true;
-                ctx.request_repaint();
-            }
-        }
+        header_interacted |= toggle_arrow(ui, ctx, id, toggle_id, folded, &out, &buf);
         // 알림 종류 바꾸기: 제목 줄만 바꾸고 커서는 길이 차이만큼 옮긴다
         if let Some(k) = picked_callout {
-            let l0 = buf.find('\n').unwrap_or(buf.len());
-            let new_l0 = format!("> [!{k}]");
-            let diff = char_len(&new_l0) as isize - char_len(&buf[..l0]) as isize;
-            buf.replace_range(..l0, &new_l0);
-            if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
-                if let Some(cr) = st.cursor.char_range() {
-                    let shift = |c: usize| (c as isize + diff).max(0) as usize;
-                    st.cursor.set_char_range(Some(CCursorRange::two(
-                        CCursor::new(shift(cr.primary.index.into())),
-                        CCursor::new(shift(cr.secondary.index.into())),
-                    )));
-                    egui::TextEdit::store_state(ctx, id, st);
-                }
-            }
+            change_callout_kind(ctx, id, &mut buf, k);
             self.focus_editor = true;
         }
         let mut sel = out.cursor_range.map(|c| c.as_sorted_char_range());
         let mut primary_cursor = out.cursor_range.map(|c| c.primary);
-        if let Some((pre_pos, click_pos)) = pre_click {
-            if (out.galley_pos - pre_pos).length_sq() > 0.25 {
-                let c = out.galley.cursor_from_pos(click_pos - out.galley_pos);
-                let cr = CCursorRange::one(c);
-                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                st.cursor.set_char_range(Some(cr));
-                egui::TextEdit::store_state(ctx, id, st);
-                sel = Some(cr.as_sorted_char_range());
-                primary_cursor = Some(cr.primary);
-                ctx.request_repaint();
-            }
-        }
-        if let Some((target_start, click_pos)) = self.pending_click_pos {
-            if target_start == r.start {
-                self.pending_click_pos = None;
-                if self.drag_anchor.is_none() {
-                    let c = out.galley.cursor_from_pos(click_pos - out.galley_pos);
-                    let cr = CCursorRange::one(c);
-                    let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                    st.cursor.set_char_range(Some(cr));
-                    egui::TextEdit::store_state(ctx, id, st);
-                    sel = Some(cr.as_sorted_char_range());
-                    primary_cursor = Some(cr.primary);
-                    ctx.request_repaint();
-                }
-            }
-        }
-        if let Some((anchor_start, origin)) = self.drag_anchor {
-            if anchor_start == r.start {
-                let (down, i_pos) =
-                    ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
-                if let Some(p_cur) = i_pos {
-                    self.drag_last_pos = Some(p_cur);
-                }
-                let cur_pos = self.drag_last_pos.unwrap_or(origin);
-                let c1 = out.galley.cursor_from_pos(origin - out.galley_pos);
-                let c2 = out.galley.cursor_from_pos(cur_pos - out.galley_pos);
-                let cr = CCursorRange::two(c1, c2);
-                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                st.cursor.set_char_range(Some(cr));
-                egui::TextEdit::store_state(ctx, id, st);
-                sel = Some(cr.as_sorted_char_range());
-                primary_cursor = Some(cr.primary);
-                out.response.request_focus();
-                ctx.request_repaint();
-                if !down {
-                    self.drag_anchor = None;
-                    self.drag_last_pos = None;
-                }
-            } else {
-                self.drag_anchor = None;
-                self.drag_last_pos = None;
-            }
-        }
-        // 구분선·이미지에 글자를 치면 그대로 두고 아래 새 문단으로 옮긴다
-        let old_block = &text[r.clone()];
-        if (is_hr_line(old_block) || image_line(old_block).is_some())
-            && !old_block.contains('\n')
-            && buf != old_block
-        {
-            if let Some(typed) = buf.strip_prefix(old_block).filter(|t| !t.starts_with('\n')) {
-                let fixed = format!("{old_block}\n\n{typed}");
-                let caret = char_len(&fixed);
-                buf = fixed;
-                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                st.cursor
-                    .set_char_range(Some(CCursorRange::one(CCursor::new(caret))));
-                egui::TextEdit::store_state(ctx, id, st);
-            }
-        }
-        // 숨긴 ``` / $$ / :::toggle 줄이 지워지거나 바뀌었으면 그 부분만 되돌린다 (전체 선택 후 입력, 맨 앞 Backspace 등)
-        {
-            if let Some((fixed, caret)) = keep_code_fences(&text[r.clone()], &buf) {
-                buf = fixed;
-                let cr = CCursorRange::one(CCursor::new(caret));
-                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                st.cursor.set_char_range(Some(cr));
-                egui::TextEdit::store_state(ctx, id, st);
-                sel = Some(cr.as_sorted_char_range());
-                primary_cursor = Some(cr.primary);
-                ctx.request_repaint();
-            }
-        }
+        self.apply_pointer_selection(
+            ctx,
+            id,
+            r.start,
+            pre_click,
+            &out,
+            &mut sel,
+            &mut primary_cursor,
+        );
+        fix_edited_buf(
+            ctx,
+            id,
+            &text[r.clone()],
+            &mut buf,
+            &mut sel,
+            &mut primary_cursor,
+        );
         let is_changed = buf != text[r.clone()];
         let (base, blen) =
             if self.active_char_cache.0 == r.start && self.active_char_cache.1 == doc_rev {
@@ -3516,101 +3700,21 @@ impl App {
                 let l = if is_changed { char_len(&buf) } else { orig_l };
                 (b, l)
             };
-        // 커서가 숨긴 목록 기호·코드 펜스 안으로 들어가면 보이는 자리로 옮긴다
-        if let Some(s) = sel
-            .clone()
-            .filter(|s| s.start == s.end && !self.ime_composing)
-        {
-            let c = s.start.0;
-            // 코드·수식·접기: 숨긴 앞뒤 줄 안쪽으로 (접혀 있으면 제목 줄 안으로)
-            let c1 = fenced_body_range(&buf).map_or(c, |(a, b)| {
-                let b = if folded {
-                    a.max(char_len(buf.split('\n').next().unwrap_or("")))
-                } else {
-                    b
-                };
-                c.clamp(a, b)
-            });
-            let prev = self
-                .last_sel
-                .and_then(|(a, b)| (a == b && a >= base).then(|| a - base));
-            let to = clamp_hidden(&buf, c1, prev);
-            if to != c {
-                let cr = CCursorRange::one(CCursor::new(to));
-                let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-                st.cursor.set_char_range(Some(cr));
-                egui::TextEdit::store_state(ctx, id, st);
-                sel = Some(cr.as_sorted_char_range());
-                primary_cursor = Some(cr.primary);
-                ctx.request_repaint();
-            }
-        }
-        // 링크 주소는 화면에 숨겨져 있으니 커서가 링크 위에 있으면 상태 표시줄에 보여준다
-        if let Some(c) = sel.as_ref().filter(|s| s.start == s.end).map(|s| s.start.0) {
-            let link = block_inline_spans(&buf)
-                .into_iter()
-                .find(|&([os, _, _, ce], k)| k == Inline::Link && c >= os && c <= ce);
-            let msg = if let Some(([_, _, be, ce], _)) = link {
-                let url: String = buf.chars().skip(be + 2).take(ce - 1 - (be + 2)).collect();
-                Some(format!("링크: {url}  ·  Ctrl+K로 고치기"))
-            } else {
-                image_line(&buf).map(|u| format!("이미지: {u}  ·  Backspace로 지우기"))
-            };
-            if let Some(msg) = msg.filter(|m| *m != self.status) {
-                self.status = msg;
-            }
-        }
-        let has_range_sel = self
-            .last_sel
-            .is_some_and(|(la, lb)| la < lb && la >= base && lb <= base + blen);
-        if has_range_sel
-            && (self.context_menu.is_some()
-                || ctx.input(|i| {
-                    i.pointer.button_pressed(egui::PointerButton::Secondary)
-                        || i.pointer.button_down(egui::PointerButton::Secondary)
-                        || i.pointer.secondary_clicked()
-                }))
-        {
-            let (la, lb) = self.last_sel.unwrap();
-            let cr = CCursorRange::two(CCursor::new(la - base), CCursor::new(lb - base));
-            let mut st = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-            st.cursor.set_char_range(Some(cr));
-            egui::TextEdit::store_state(ctx, id, st);
-            sel = Some(cr.as_sorted_char_range());
-            primary_cursor = Some(cr.primary);
-        } else if let Some(s) = &sel {
-            if !self.ime_composing
-                && ((out.response.has_focus() && self.context_menu.is_none())
-                    || s.start.0 < s.end.0)
-            {
-                self.last_sel = Some((base + s.start.0.min(blen), base + s.end.0.min(blen)));
-            }
-        }
-        self.cursor_info = primary_cursor.map(|pc| {
-            // 접어 둔(높이 0) ``` 줄은 빼고 보이는 줄 기준으로 첫·마지막 줄을 판단
-            let rows: Vec<_> = out
-                .galley
-                .rows
-                .iter()
-                .filter(|r| r.rect().height() > 1.0)
-                .collect();
-            if rows.len() <= 1 {
-                EditorCursorInfo {
-                    block_start: r.start,
-                    doc_rev,
-                    on_first_row: true,
-                    on_last_row: true,
-                }
-            } else {
-                let cy = out.galley.pos_from_cursor(pc).center().y;
-                EditorCursorInfo {
-                    block_start: r.start,
-                    doc_rev,
-                    on_first_row: cy <= rows[0].rect().bottom() + 0.5,
-                    on_last_row: cy >= rows[rows.len() - 1].rect().top() - 0.5,
-                }
-            }
-        });
+        clamp_caret_visible(
+            ctx,
+            id,
+            &buf,
+            folded,
+            base,
+            self.ime_composing,
+            self.last_sel,
+            &mut sel,
+            &mut primary_cursor,
+        );
+        self.show_link_hint(&buf, sel.as_ref());
+        self.track_last_sel(ctx, id, &out, base, blen, &mut sel, &mut primary_cursor);
+        self.cursor_info =
+            primary_cursor.map(|pc| cursor_info_for(&out.galley, pc, r.start, doc_rev));
         let cursor_of = |c: usize| {
             out.galley
                 .pos_from_cursor(CCursor::new(c))
@@ -3643,7 +3747,45 @@ impl App {
         }
 
         // 슬래시 메뉴
+        let (slash, slash_hit) = self.slash_menu(ctx, p, &buf, out.response.rect, canvas_area);
+        interacted |= slash_hit;
+
+        // 편집 중인 블록이 Mermaid 펜스면 코드 입력란 바로 아래에 실시간 다이어그램 미리보기를 함께 렌더링한다
+        let mut total_rect =
+            code_frame_rect.map_or(out.response.rect, |fr| fr.union(out.response.rect));
+        if let Some(r) = mermaid_preview(ui, p, &buf, body) {
+            total_rect = total_rect.union(r);
+        }
+
+        let changed = if is_changed {
+            Some(buf)
+        } else {
+            buf.clear();
+            self.edit_buf = buf;
+            None
+        };
+        EditorOut {
+            rect: total_rect,
+            changed,
+            fmt,
+            slash,
+            interacted,
+            deactivate,
+            delete_block,
+        }
+    }
+
+    // 슬래시(/) 명령어 메뉴. 고른 항목과, 메뉴 위를 눌렀는지(편집 칸 포커스를 잃지 않게)를 돌려준다.
+    fn slash_menu(
+        &self,
+        ctx: &egui::Context,
+        p: &Pal,
+        buf: &str,
+        anchor: Rect,
+        canvas_area: Rect,
+    ) -> (Option<usize>, bool) {
         let mut slash = None;
+        let mut hit = false;
         if let Some(q) = buf
             .strip_prefix('/')
             .filter(|q| !q.contains(char::is_whitespace))
@@ -3651,18 +3793,18 @@ impl App {
             let matches = slash_matches(q);
             let sel_idx = self.slash_sel.min(matches.len().saturating_sub(1));
             let est_h = ((matches.len().max(1) as f32) * 40.0 + 48.0).min(352.0);
-            let below_y = out.response.rect.bottom() + 4.0;
+            let below_y = anchor.bottom() + 4.0;
             let slash_pos = if below_y + est_h <= canvas_area.bottom()
-                || out.response.rect.top() - est_h - 4.0 < canvas_area.top()
+                || anchor.top() - est_h - 4.0 < canvas_area.top()
             {
                 pos2(
-                    out.response.rect.left(),
+                    anchor.left(),
                     below_y.min((canvas_area.bottom() - est_h).max(canvas_area.top())),
                 )
             } else {
                 pos2(
-                    out.response.rect.left(),
-                    (out.response.rect.top() - est_h - 4.0).max(canvas_area.top()),
+                    anchor.left(),
+                    (anchor.top() - est_h - 4.0).max(canvas_area.top()),
                 )
             };
             let slash_resp = egui::Area::new(egui::Id::unique("slash-menu"))
@@ -3709,70 +3851,169 @@ impl App {
                                 });
                         });
                 });
-            interacted |= slash.is_some()
+            hit |= slash.is_some()
                 || ctx
                     .input(|i| i.pointer.interact_pos())
                     .is_some_and(|pos| slash_resp.response.rect.contains(pos));
         }
+        (slash, hit)
+    }
 
-        // 편집 중인 블록이 Mermaid 펜스면 코드 입력란 바로 아래에 실시간 다이어그램 미리보기를 함께 렌더링한다
-        let mut total_rect =
-            code_frame_rect.map_or(out.response.rect, |fr| fr.union(out.response.rect));
-        let bt = buf.trim_start();
-        if (bt.starts_with("```") || bt.starts_with("~~~"))
-            && bt[3..]
-                .lines()
-                .next()
-                .is_some_and(|l| l.trim().eq_ignore_ascii_case("mermaid"))
-        {
-            let fence = &bt[..3];
-            let first_nl = bt.find('\n').unwrap_or(bt.len());
-            let body_part = if first_nl < bt.len() {
-                &bt[first_nl + 1..]
-            } else {
-                ""
-            };
-            let m_code = body_part
-                .trim_end()
-                .strip_suffix(fence)
-                .unwrap_or(body_part)
-                .trim_end_matches(['\n', '\r']);
-            let preview_w = ui.available_width();
-            let preview_resp = ui.vertical(|ui| {
-                let _ = card(
-                    ui,
-                    p,
-                    Some("Mermaid 다이어그램 (실시간 미리보기)"),
-                    false,
-                    |ui| {
-                        let _ = crate::mermaid::render(
-                            ui,
-                            p,
-                            m_code,
-                            body,
-                            (preview_w - 44.0).max(160.0),
-                        );
-                    },
-                );
+    // 표를 마크다운 원문으로 편집할 때의 머리줄 (표 직접 편집으로 돌아가기, 표 삭제). (눌렀는지, 삭제했는지)
+    fn raw_table_header(&mut self, ui: &mut egui::Ui, p: &Pal) -> (bool, bool) {
+        let mut delete_block = false;
+        let mut header_interacted = false;
+        ui.horizontal(|ui| {
+            ui.add(img(theme::TABLE, 13.0, p.accent));
+            ui.label(
+                RichText::new("표 마크다운 편집")
+                    .size(11.5)
+                    .strong()
+                    .color(p.muted),
+            );
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                if table_delete_btn(ui).clicked() {
+                    delete_block = true;
+                    header_interacted = true;
+                }
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("표 직접 편집").size(11.0).color(p.accent))
+                            .fill(p.surface)
+                            .stroke(Stroke::new(1.0, p.border))
+                            .corner_radius(6)
+                            .min_size(vec2(0.0, 23.0)),
+                    )
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.raw_table_mode = false;
+                    self.table_focus_cell = Some((0, 0));
+                    header_interacted = true;
+                }
             });
-            total_rect = total_rect.union(preview_resp.response.rect);
-        }
+        });
+        ui.add_space(4.0);
+        (header_interacted, delete_block)
+    }
 
-        let changed = if is_changed {
-            Some(buf)
-        } else {
-            buf.clear();
-            self.edit_buf = buf;
-            None
-        };
-        EditorOut {
-            rect: total_rect,
-            changed,
-            fmt,
-            slash,
-            interacted,
-            deactivate,
-            delete_block,
+    // 클릭한 자리·드래그 범위를 편집 칸의 커서/선택에 반영한다 (블록을 처음 눌렀을 때의 글자 위치 포함)
+    #[allow(clippy::too_many_arguments)]
+    fn apply_pointer_selection(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        r_start: usize,
+        pre_click: Option<(egui::Pos2, egui::Pos2)>,
+        out: &egui::text_edit::TextEditOutput,
+        sel: &mut Option<SelRange>,
+        primary_cursor: &mut Option<CCursor>,
+    ) {
+        if let Some((pre_pos, click_pos)) = pre_click {
+            if (out.galley_pos - pre_pos).length_sq() > 0.25 {
+                let c = out.galley.cursor_from_pos(click_pos - out.galley_pos);
+                let cr = CCursorRange::one(c);
+                set_cursor_range(ctx, id, cr);
+                *sel = Some(cr.as_sorted_char_range());
+                *primary_cursor = Some(cr.primary);
+                ctx.request_repaint();
+            }
+        }
+        if let Some((target_start, click_pos)) = self.pending_click_pos {
+            if target_start == r_start {
+                self.pending_click_pos = None;
+                if self.drag_anchor.is_none() {
+                    let c = out.galley.cursor_from_pos(click_pos - out.galley_pos);
+                    let cr = CCursorRange::one(c);
+                    set_cursor_range(ctx, id, cr);
+                    *sel = Some(cr.as_sorted_char_range());
+                    *primary_cursor = Some(cr.primary);
+                    ctx.request_repaint();
+                }
+            }
+        }
+        if let Some((anchor_start, origin)) = self.drag_anchor {
+            if anchor_start == r_start {
+                let (down, i_pos) =
+                    ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
+                if let Some(p_cur) = i_pos {
+                    self.drag_last_pos = Some(p_cur);
+                }
+                let cur_pos = self.drag_last_pos.unwrap_or(origin);
+                let c1 = out.galley.cursor_from_pos(origin - out.galley_pos);
+                let c2 = out.galley.cursor_from_pos(cur_pos - out.galley_pos);
+                let cr = CCursorRange::two(c1, c2);
+                set_cursor_range(ctx, id, cr);
+                *sel = Some(cr.as_sorted_char_range());
+                *primary_cursor = Some(cr.primary);
+                out.response.request_focus();
+                ctx.request_repaint();
+                if !down {
+                    self.drag_anchor = None;
+                    self.drag_last_pos = None;
+                }
+            } else {
+                self.drag_anchor = None;
+                self.drag_last_pos = None;
+            }
+        }
+    }
+
+    // 링크 주소는 화면에 숨겨져 있으니 커서가 링크 위에 있으면 상태 표시줄에 보여준다
+    fn show_link_hint(&mut self, buf: &str, sel: Option<&SelRange>) {
+        // 링크 주소는 화면에 숨겨져 있으니 커서가 링크 위에 있으면 상태 표시줄에 보여준다
+        if let Some(c) = sel.filter(|s| s.start == s.end).map(|s| s.start.0) {
+            let link = block_inline_spans(buf)
+                .into_iter()
+                .find(|&([os, _, _, ce], k)| k == Inline::Link && c >= os && c <= ce);
+            let msg = if let Some(([_, _, be, ce], _)) = link {
+                let url: String = buf.chars().skip(be + 2).take(ce - 1 - (be + 2)).collect();
+                Some(format!("링크: {url}  ·  Ctrl+K로 고치기"))
+            } else {
+                image_line(buf).map(|u| format!("이미지: {u}  ·  Backspace로 지우기"))
+            };
+            if let Some(msg) = msg.filter(|m| *m != self.status) {
+                self.status = msg;
+            }
+        }
+    }
+
+    // 우클릭 메뉴가 열려 있으면 직전 범위 선택을 되살리고, 아니면 현재 선택을 last_sel(문서 기준 문자 위치)로 기억한다
+    #[allow(clippy::too_many_arguments)]
+    fn track_last_sel(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        out: &egui::text_edit::TextEditOutput,
+        base: usize,
+        blen: usize,
+        sel: &mut Option<SelRange>,
+        primary_cursor: &mut Option<CCursor>,
+    ) {
+        let has_range_sel = self
+            .last_sel
+            .is_some_and(|(la, lb)| la < lb && la >= base && lb <= base + blen);
+        if has_range_sel
+            && (self.context_menu.is_some()
+                || ctx.input(|i| {
+                    i.pointer.button_pressed(egui::PointerButton::Secondary)
+                        || i.pointer.button_down(egui::PointerButton::Secondary)
+                        || i.pointer.secondary_clicked()
+                }))
+        {
+            let (la, lb) = self.last_sel.unwrap();
+            let cr = CCursorRange::two(CCursor::new(la - base), CCursor::new(lb - base));
+            set_cursor_range(ctx, id, cr);
+            *sel = Some(cr.as_sorted_char_range());
+            *primary_cursor = Some(cr.primary);
+        } else if let Some(s) = sel.as_ref() {
+            if !self.ime_composing
+                && ((out.response.has_focus() && self.context_menu.is_none())
+                    || s.start.0 < s.end.0)
+            {
+                self.last_sel = Some((base + s.start.0.min(blen), base + s.end.0.min(blen)));
+            }
         }
     }
 
@@ -3854,144 +4095,19 @@ impl App {
             ui.spacing_mut().item_spacing.y = 6.0;
 
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(5.0, 4.0);
-                Frame::new()
-                    .fill(p.surface)
-                    .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(6)
-                    .inner_margin(Margin::symmetric(8, 3))
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 5.0;
-                        ui.add(img(theme::TABLE, 12.5, p.accent));
-                        ui.label(RichText::new("표").size(11.5).strong().color(p.text));
-                        ui.label(
-                            RichText::new(format!("{cols}×{row_count}"))
-                                .family(FontFamily::Monospace)
-                                .size(10.5)
-                                .color(p.faint),
-                        );
-                    });
-                let tool_btn = |ui: &mut egui::Ui, label: &str, color: Color32, tip: &str| {
-                    ui.add(
-                        egui::Button::new(RichText::new(label).size(11.0).color(color))
-                            .fill(p.surface)
-                            .stroke(Stroke::new(1.0, p.border))
-                            .corner_radius(6)
-                            .min_size(vec2(0.0, 23.0)),
-                    )
-                    .on_hover_cursor(CursorIcon::PointingHand)
-                    .on_hover_text(tip)
-                };
-                if tool_btn(
+                self.table_editor_toolbar(
                     ui,
-                    "+ 행",
-                    p.text,
-                    "맨 아래에 새 행 추가 (마지막 셀에서 Tab)",
-                )
-                .clicked()
-                {
-                    tbl.rows.push(vec![String::new(); cols]);
-                    table_changed = true;
-                    next_focus = Some((tbl.rows.len(), 0));
-                    interacted = true;
-                }
-                if tool_btn(ui, "+ 열", p.text, "오른쪽에 새 열 추가").clicked() {
-                    let c_new = tbl.headers.len();
-                    tbl.headers.push(format!("열 {}", c_new + 1));
-                    tbl.aligns.push(TableAlign::None);
-                    for row in &mut tbl.rows {
-                        row.push(String::new());
-                    }
-                    table_changed = true;
-                    next_focus = Some((0, c_new));
-                    interacted = true;
-                }
-                if !tbl.rows.is_empty()
-                    && tool_btn(ui, "- 행", p.muted, "선택(또는 마지막) 행 삭제").clicked()
-                {
-                    let rm = cur_cell
-                        .and_then(|(r_i, _)| r_i.checked_sub(1))
-                        .unwrap_or(tbl.rows.len() - 1)
-                        .min(tbl.rows.len() - 1);
-                    tbl.rows.remove(rm);
-                    table_changed = true;
-                    next_focus = Some((rm.min(tbl.rows.len()), 0));
-                    interacted = true;
-                }
-                if cols > 1 && tool_btn(ui, "- 열", p.muted, "선택(또는 마지막) 열 삭제").clicked()
-                {
-                    let rm = cur_cell.map_or(cols - 1, |(_, c_i)| c_i).min(cols - 1);
-                    tbl.headers.remove(rm);
-                    if rm < tbl.aligns.len() {
-                        tbl.aligns.remove(rm);
-                    }
-                    for row in &mut tbl.rows {
-                        if rm < row.len() {
-                            row.remove(rm);
-                        }
-                    }
-                    table_changed = true;
-                    next_focus = Some((0, rm.min(tbl.headers.len().saturating_sub(1))));
-                    interacted = true;
-                }
-                let align_col = cur_cell.map_or(0, |(_, c_i)| c_i).min(cols - 1);
-                let align_lbl = match tbl
-                    .aligns
-                    .get(align_col)
-                    .copied()
-                    .unwrap_or(TableAlign::None)
-                {
-                    TableAlign::None => "정렬: 기본",
-                    TableAlign::Left => "정렬: 왼쪽",
-                    TableAlign::Center => "정렬: 가운데",
-                    TableAlign::Right => "정렬: 오른쪽",
-                };
-                if tool_btn(ui, align_lbl, p.muted, "현재 열의 정렬 방향 전환").clicked()
-                {
-                    if align_col >= tbl.aligns.len() {
-                        tbl.aligns.resize(cols, TableAlign::None);
-                    }
-                    tbl.aligns[align_col] = match tbl.aligns[align_col] {
-                        TableAlign::None => TableAlign::Left,
-                        TableAlign::Left => TableAlign::Center,
-                        TableAlign::Center => TableAlign::Right,
-                        TableAlign::Right => TableAlign::None,
-                    };
-                    table_changed = true;
-                    next_focus = cur_cell.or(Some((0, align_col)));
-                    interacted = true;
-                }
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
-                    if table_delete_btn(ui).clicked() {
-                        delete_table = true;
-                        interacted = true;
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("완료 (Esc)").size(11.0).color(p.accent),
-                            )
-                            .fill(p.accent.gamma_multiply(0.12))
-                            .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.35)))
-                            .corner_radius(6)
-                            .min_size(vec2(0.0, 23.0)),
-                        )
-                        .on_hover_cursor(CursorIcon::PointingHand)
-                        .on_hover_text("표 편집 마치기 (Esc)")
-                        .clicked()
-                    {
-                        deactivate = true;
-                        interacted = true;
-                    }
-                    if tool_btn(ui, "마크다운 보기", p.muted, "마크다운 원문(| |)으로 전환")
-                        .clicked()
-                    {
-                        self.raw_table_mode = true;
-                        self.focus_editor = true;
-                        interacted = true;
-                    }
-                });
+                    p,
+                    cols,
+                    row_count,
+                    cur_cell,
+                    &mut tbl,
+                    &mut table_changed,
+                    &mut next_focus,
+                    &mut interacted,
+                    &mut deactivate,
+                    &mut delete_table,
+                );
             });
 
             let avail_w = ui.available_width().max(240.0);
@@ -4147,6 +4263,157 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn table_editor_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Pal,
+        cols: usize,
+        row_count: usize,
+        cur_cell: Option<(usize, usize)>,
+        tbl: &mut MdTable,
+        table_changed: &mut bool,
+        next_focus: &mut Option<(usize, usize)>,
+        interacted: &mut bool,
+        deactivate: &mut bool,
+        delete_table: &mut bool,
+    ) {
+        ui.spacing_mut().item_spacing = vec2(5.0, 4.0);
+        Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(6)
+            .inner_margin(Margin::symmetric(8, 3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                ui.add(img(theme::TABLE, 12.5, p.accent));
+                ui.label(RichText::new("표").size(11.5).strong().color(p.text));
+                ui.label(
+                    RichText::new(format!("{cols}×{row_count}"))
+                        .family(FontFamily::Monospace)
+                        .size(10.5)
+                        .color(p.faint),
+                );
+            });
+        let tool_btn = |ui: &mut egui::Ui, label: &str, color: Color32, tip: &str| {
+            ui.add(
+                egui::Button::new(RichText::new(label).size(11.0).color(color))
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(6)
+                    .min_size(vec2(0.0, 23.0)),
+            )
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(tip)
+        };
+        if tool_btn(
+            ui,
+            "+ 행",
+            p.text,
+            "맨 아래에 새 행 추가 (마지막 셀에서 Tab)",
+        )
+        .clicked()
+        {
+            tbl.rows.push(vec![String::new(); cols]);
+            *table_changed = true;
+            *next_focus = Some((tbl.rows.len(), 0));
+            *interacted = true;
+        }
+        if tool_btn(ui, "+ 열", p.text, "오른쪽에 새 열 추가").clicked() {
+            let c_new = tbl.headers.len();
+            tbl.headers.push(format!("열 {}", c_new + 1));
+            tbl.aligns.push(TableAlign::None);
+            for row in &mut tbl.rows {
+                row.push(String::new());
+            }
+            *table_changed = true;
+            *next_focus = Some((0, c_new));
+            *interacted = true;
+        }
+        if !tbl.rows.is_empty()
+            && tool_btn(ui, "- 행", p.muted, "선택(또는 마지막) 행 삭제").clicked()
+        {
+            let rm = cur_cell
+                .and_then(|(r_i, _)| r_i.checked_sub(1))
+                .unwrap_or(tbl.rows.len() - 1)
+                .min(tbl.rows.len() - 1);
+            tbl.rows.remove(rm);
+            *table_changed = true;
+            *next_focus = Some((rm.min(tbl.rows.len()), 0));
+            *interacted = true;
+        }
+        if cols > 1 && tool_btn(ui, "- 열", p.muted, "선택(또는 마지막) 열 삭제").clicked()
+        {
+            let rm = cur_cell.map_or(cols - 1, |(_, c_i)| c_i).min(cols - 1);
+            tbl.headers.remove(rm);
+            if rm < tbl.aligns.len() {
+                tbl.aligns.remove(rm);
+            }
+            for row in &mut tbl.rows {
+                if rm < row.len() {
+                    row.remove(rm);
+                }
+            }
+            *table_changed = true;
+            *next_focus = Some((0, rm.min(tbl.headers.len().saturating_sub(1))));
+            *interacted = true;
+        }
+        let align_col = cur_cell.map_or(0, |(_, c_i)| c_i).min(cols - 1);
+        let align_lbl = match tbl
+            .aligns
+            .get(align_col)
+            .copied()
+            .unwrap_or(TableAlign::None)
+        {
+            TableAlign::None => "정렬: 기본",
+            TableAlign::Left => "정렬: 왼쪽",
+            TableAlign::Center => "정렬: 가운데",
+            TableAlign::Right => "정렬: 오른쪽",
+        };
+        if tool_btn(ui, align_lbl, p.muted, "현재 열의 정렬 방향 전환").clicked() {
+            if align_col >= tbl.aligns.len() {
+                tbl.aligns.resize(cols, TableAlign::None);
+            }
+            tbl.aligns[align_col] = match tbl.aligns[align_col] {
+                TableAlign::None => TableAlign::Left,
+                TableAlign::Left => TableAlign::Center,
+                TableAlign::Center => TableAlign::Right,
+                TableAlign::Right => TableAlign::None,
+            };
+            *table_changed = true;
+            *next_focus = cur_cell.or(Some((0, align_col)));
+            *interacted = true;
+        }
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+            if table_delete_btn(ui).clicked() {
+                *delete_table = true;
+                *interacted = true;
+            }
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("완료 (Esc)").size(11.0).color(p.accent))
+                        .fill(p.accent.gamma_multiply(0.12))
+                        .stroke(Stroke::new(1.0, p.accent.gamma_multiply(0.35)))
+                        .corner_radius(6)
+                        .min_size(vec2(0.0, 23.0)),
+                )
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("표 편집 마치기 (Esc)")
+                .clicked()
+            {
+                *deactivate = true;
+                *interacted = true;
+            }
+            if tool_btn(ui, "마크다운 보기", p.muted, "마크다운 원문(| |)으로 전환").clicked()
+            {
+                self.raw_table_mode = true;
+                self.focus_editor = true;
+                *interacted = true;
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render_table_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -4252,6 +4519,299 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn render_toggle_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Pal,
+        src: &str,
+        rest: &str,
+        r_start: usize,
+        body: f32,
+        width: f32,
+        scheme: &str,
+        dark: bool,
+    ) -> (Option<String>, bool) {
+        let mut changed = None;
+        let mut consumed = false;
+        let first = rest.find('\n').unwrap_or(rest.len());
+        let title = rest[..first].trim();
+        let body_start = (src.len() - src.trim_start().len()) + ":::toggle".len() + first + 1;
+        let body_end = src
+            .trim_end()
+            .strip_suffix(":::")
+            .map_or(src.len(), str::len);
+        let inner = src.get(body_start.min(body_end)..body_end).unwrap_or("");
+        let open_id = egui::Id::unique(("toggle-open", r_start)); // 편집 화면과 공유
+        let mut open = ui.data(|d| d.get_temp(open_id).unwrap_or(false));
+        Frame::new()
+            .fill(p.surface)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(8)
+            .inner_margin(Margin::symmetric(12, 9))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 7.0;
+                    let arrow = ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(if open { "▼" } else { "▶" })
+                                    .size(10.5)
+                                    .color(if open { p.accent } else { p.muted }),
+                            )
+                            .fill(if open {
+                                p.accent.gamma_multiply(0.10)
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(5)
+                            .min_size(vec2(22.0, 22.0)),
+                        )
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("클릭하여 펼치기/접기");
+                    if arrow.clicked() {
+                        open = !open;
+                        consumed = true;
+                        ui.data_mut(|d| d.insert_temp(open_id, open));
+                    }
+                    ui.label(
+                        RichText::new(title)
+                            .font(FontId::new(body, theme::bold()))
+                            .color(p.text),
+                    );
+                });
+                if open {
+                    ui.add_space(6.0);
+                    let inner_resp = ui.horizontal(|ui| {
+                        ui.add_space(22.0);
+                        ui.vertical(|ui| {
+                            self.markdown(ui, p, body, inner, width - 64.0, scheme, dark)
+                        })
+                        .inner
+                    });
+                    let rr = inner_resp.response.rect;
+                    ui.painter().vline(
+                        rr.left() + 10.0,
+                        rr.y_range(),
+                        Stroke::new(2.0, p.accent.gamma_multiply(0.35)),
+                    );
+                    if let Some(new_inner) = inner_resp.inner {
+                        changed = Some(format!(
+                            "{}{}{}",
+                            &src[..body_start],
+                            new_inner,
+                            &src[body_end..]
+                        ));
+                    }
+                }
+            });
+        (changed, consumed)
+    }
+
+    fn render_code_card_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Pal,
+        t: &str,
+        body: f32,
+        width: f32,
+        dark: bool,
+    ) -> bool {
+        let mut consumed = false;
+        let fence = &t[..3];
+        let first_nl = t.find('\n').unwrap_or(t.len());
+        let lang = t[3..first_nl].trim();
+        let body_part = if first_nl < t.len() {
+            &t[first_nl + 1..]
+        } else {
+            ""
+        };
+        let code = body_part
+            .trim_end()
+            .strip_suffix(fence)
+            .unwrap_or(body_part)
+            .trim_end_matches(['\n', '\r']);
+        if lang.eq_ignore_ascii_case("mermaid") {
+            if card(ui, p, Some("Mermaid 다이어그램"), true, |ui| {
+                if !crate::mermaid::render(ui, p, code, body, (width - 44.0).max(160.0)) {
+                    ui.label(
+                        RichText::new(code)
+                            .family(FontFamily::Monospace)
+                            .size(body * 0.84)
+                            .color(p.text),
+                    );
+                }
+            }) {
+                ui.ctx().copy_text(code.to_string());
+                self.status = "코드를 복사했습니다".into();
+                consumed = true;
+            }
+            return consumed;
+        }
+        let line_count = if code.is_empty() {
+            1
+        } else {
+            code.split('\n').count()
+        };
+        let mut copied = false;
+        ui.add_space(6.0);
+        Frame::new()
+            .fill(p.code_bg)
+            .stroke(Stroke::new(1.0, p.border))
+            .corner_radius(8)
+            .inner_margin(Margin::ZERO)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                Frame::new()
+                    .fill(p.surface)
+                    .corner_radius(egui::CornerRadius {
+                        nw: 8,
+                        ne: 8,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .inner_margin(Margin::symmetric(14, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let lang_badge = if lang.is_empty() { "CODE" } else { lang };
+                            Frame::new()
+                                .fill(p.elevated)
+                                .stroke(Stroke::new(1.0, p.border))
+                                .corner_radius(5)
+                                .inner_margin(Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(lang_badge)
+                                            .family(FontFamily::Monospace)
+                                            .size(10.5)
+                                            .strong()
+                                            .color(if lang.is_empty() {
+                                                p.muted
+                                            } else {
+                                                p.accent
+                                            }),
+                                    );
+                                });
+                            ui.label(
+                                RichText::new(format!("{line_count}줄"))
+                                    .size(11.0)
+                                    .color(p.faint),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                let btn = ui
+                                    .add(
+                                        egui::Button::image_and_text(
+                                            img(theme::COPY, 11.5, p.muted),
+                                            RichText::new("복사").size(11.0).color(p.muted),
+                                        )
+                                        .fill(p.elevated)
+                                        .stroke(Stroke::new(1.0, p.border))
+                                        .corner_radius(6)
+                                        .min_size(vec2(52.0, 22.0)),
+                                    )
+                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                    .on_hover_text("코드 원문 복사");
+                                if btn.clicked() {
+                                    copied = true;
+                                }
+                            });
+                        });
+                    });
+                hline(ui, p);
+                Frame::new()
+                    .inner_margin(Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        use std::fmt::Write;
+                        let avail_w = ui.available_width().max(160.0);
+                        let digits = line_count
+                            .checked_ilog10()
+                            .map_or(1, |d| d as usize + 1)
+                            .max(2);
+                        let code_size = body * 0.84;
+                        let code_lh = code_size * 1.5;
+                        let gutter_w = (digits as f32) * (code_size * 0.62) + 12.0;
+                        let text_gap = 12.0;
+                        let code_w = (avail_w - gutter_w - text_gap).max(100.0);
+                        let ppp_bits = ui.ctx().pixels_per_point().to_bits();
+                        let c_key = cache_hash((
+                            code,
+                            lang,
+                            code_w.to_bits(),
+                            code_size.to_bits(),
+                            dark,
+                            ppp_bits,
+                        ));
+                        let cached = self
+                            .code_galley_cache
+                            .get(&c_key)
+                            .filter(|(g, _)| g.text() == code)
+                            .map(|(g, ys)| (std::sync::Arc::clone(g), ys.clone()));
+                        let (galley, line_ys) = match cached {
+                            Some(hit) => hit,
+                            None => {
+                                let job = build_code_layout_job(
+                                    ui.ctx(),
+                                    code,
+                                    lang,
+                                    code_size,
+                                    code_w,
+                                    code_lh,
+                                    p,
+                                    dark,
+                                );
+                                let g = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                                let mut ys = Vec::with_capacity(line_count);
+                                let mut at_line_start = true;
+                                for row in &g.rows {
+                                    if at_line_start {
+                                        ys.push(row.rect().center().y);
+                                    }
+                                    at_line_start = row.ends_with_newline;
+                                }
+                                if self.code_galley_cache.len() >= 128 {
+                                    self.code_galley_cache.clear();
+                                }
+                                self.code_galley_cache
+                                    .insert(c_key, (std::sync::Arc::clone(&g), ys.clone()));
+                                (g, ys)
+                            }
+                        };
+                        let total_h = galley.size().y.max(code_lh);
+                        let (rect, code_resp) =
+                            ui.allocate_exact_size(vec2(avail_w, total_h), Sense::hover());
+                        let div_x = rect.left() + gutter_w;
+                        ui.painter()
+                            .vline(div_x, rect.y_range(), Stroke::new(1.0, p.border));
+                        let num_font = FontId::monospace(code_size * 0.88);
+                        for (idx, &y_off) in line_ys.iter().enumerate() {
+                            self.line_num_buf.clear();
+                            let _ = write!(self.line_num_buf, "{}", idx + 1);
+                            ui.painter().text(
+                                pos2(div_x - 8.0, rect.top() + y_off),
+                                Align2::RIGHT_CENTER,
+                                &self.line_num_buf,
+                                num_font.clone(),
+                                p.faint,
+                            );
+                        }
+                        ui.painter()
+                            .galley(pos2(div_x + text_gap, rect.top()), galley, p.text);
+                        code_resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), code)
+                        });
+                    });
+            });
+        ui.add_space(6.0);
+        if copied {
+            ui.ctx().copy_text(code.to_string());
+            self.status = "코드를 복사했습니다".into();
+            consumed = true;
+        }
+        consumed
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn render_block(
         &mut self,
         ui: &mut egui::Ui,
@@ -4298,87 +4858,11 @@ impl App {
                             );
                         }
                     } else if let Some(rest) = t.strip_prefix(":::toggle") {
-                        let first = rest.find('\n').unwrap_or(rest.len());
-                        let title = rest[..first].trim();
-                        let body_start = (src.len() - t.len()) + ":::toggle".len() + first + 1;
-                        let body_end = src
-                            .trim_end()
-                            .strip_suffix(":::")
-                            .map_or(src.len(), str::len);
-                        let inner = src.get(body_start.min(body_end)..body_end).unwrap_or("");
-                        let open_id = egui::Id::unique(("toggle-open", r.start)); // 편집 화면과 공유
-                        let mut open = ui.data(|d| d.get_temp(open_id).unwrap_or(false));
-                        Frame::new()
-                            .fill(p.surface)
-                            .stroke(Stroke::new(1.0, p.border))
-                            .corner_radius(8)
-                            .inner_margin(Margin::symmetric(12, 9))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 7.0;
-                                    let arrow = ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new(if open { "▼" } else { "▶" })
-                                                    .size(10.5)
-                                                    .color(if open { p.accent } else { p.muted }),
-                                            )
-                                            .fill(if open {
-                                                p.accent.gamma_multiply(0.10)
-                                            } else {
-                                                Color32::TRANSPARENT
-                                            })
-                                            .stroke(Stroke::NONE)
-                                            .corner_radius(5)
-                                            .min_size(vec2(22.0, 22.0)),
-                                        )
-                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                        .on_hover_text("클릭하여 펼치기/접기");
-                                    if arrow.clicked() {
-                                        open = !open;
-                                        consumed = true;
-                                        ui.data_mut(|d| d.insert_temp(open_id, open));
-                                    }
-                                    ui.label(
-                                        RichText::new(title)
-                                            .font(FontId::new(body, theme::bold()))
-                                            .color(p.text),
-                                    );
-                                });
-                                if open {
-                                    ui.add_space(6.0);
-                                    let inner_resp = ui.horizontal(|ui| {
-                                        ui.add_space(22.0);
-                                        ui.vertical(|ui| {
-                                            self.markdown(
-                                                ui,
-                                                p,
-                                                body,
-                                                inner,
-                                                width - 64.0,
-                                                scheme,
-                                                dark,
-                                            )
-                                        })
-                                        .inner
-                                    });
-                                    let rr = inner_resp.response.rect;
-                                    ui.painter().vline(
-                                        rr.left() + 10.0,
-                                        rr.y_range(),
-                                        Stroke::new(2.0, p.accent.gamma_multiply(0.35)),
-                                    );
-                                    if let Some(new_inner) = inner_resp.inner {
-                                        changed = Some(format!(
-                                            "{}{}{}",
-                                            &src[..body_start],
-                                            new_inner,
-                                            &src[body_end..]
-                                        ));
-                                    }
-                                }
-                            });
+                        let (ch, c) = self.render_toggle_view(
+                            ui, p, src, rest, r.start, body, width, scheme, dark,
+                        );
+                        changed = ch;
+                        consumed |= c;
                     } else if t.starts_with("$$") {
                         let inner = t
                             .trim_start_matches('$')
@@ -4396,228 +4880,7 @@ impl App {
                             });
                         });
                     } else if t.starts_with("```") || t.starts_with("~~~") {
-                        let fence = &t[..3];
-                        let first_nl = t.find('\n').unwrap_or(t.len());
-                        let lang = t[3..first_nl].trim();
-                        let body_part = if first_nl < t.len() {
-                            &t[first_nl + 1..]
-                        } else {
-                            ""
-                        };
-                        let code = body_part
-                            .trim_end()
-                            .strip_suffix(fence)
-                            .unwrap_or(body_part)
-                            .trim_end_matches(['\n', '\r']);
-                        if lang.eq_ignore_ascii_case("mermaid") {
-                            if card(ui, p, Some("Mermaid 다이어그램"), true, |ui| {
-                                if !crate::mermaid::render(
-                                    ui,
-                                    p,
-                                    code,
-                                    body,
-                                    (width - 44.0).max(160.0),
-                                ) {
-                                    ui.label(
-                                        RichText::new(code)
-                                            .family(FontFamily::Monospace)
-                                            .size(body * 0.84)
-                                            .color(p.text),
-                                    );
-                                }
-                            }) {
-                                ui.ctx().copy_text(code.to_string());
-                                self.status = "코드를 복사했습니다".into();
-                                consumed = true;
-                            }
-                        } else {
-                            let line_count = if code.is_empty() {
-                                1
-                            } else {
-                                code.split('\n').count()
-                            };
-                            let mut copied = false;
-                            ui.add_space(6.0);
-                            Frame::new()
-                                .fill(p.code_bg)
-                                .stroke(Stroke::new(1.0, p.border))
-                                .corner_radius(8)
-                                .inner_margin(Margin::ZERO)
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    Frame::new()
-                                        .fill(p.surface)
-                                        .corner_radius(egui::CornerRadius {
-                                            nw: 8,
-                                            ne: 8,
-                                            sw: 0,
-                                            se: 0,
-                                        })
-                                        .inner_margin(Margin::symmetric(14, 7))
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                let lang_badge =
-                                                    if lang.is_empty() { "CODE" } else { lang };
-                                                Frame::new()
-                                                    .fill(p.elevated)
-                                                    .stroke(Stroke::new(1.0, p.border))
-                                                    .corner_radius(5)
-                                                    .inner_margin(Margin::symmetric(6, 2))
-                                                    .show(ui, |ui| {
-                                                        ui.label(
-                                                            RichText::new(lang_badge)
-                                                                .family(FontFamily::Monospace)
-                                                                .size(10.5)
-                                                                .strong()
-                                                                .color(if lang.is_empty() {
-                                                                    p.muted
-                                                                } else {
-                                                                    p.accent
-                                                                }),
-                                                        );
-                                                    });
-                                                ui.label(
-                                                    RichText::new(format!("{line_count}줄"))
-                                                        .size(11.0)
-                                                        .color(p.faint),
-                                                );
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(Align::Center),
-                                                    |ui| {
-                                                        let btn = ui
-                                                            .add(
-                                                                egui::Button::image_and_text(
-                                                                    img(theme::COPY, 11.5, p.muted),
-                                                                    RichText::new("복사")
-                                                                        .size(11.0)
-                                                                        .color(p.muted),
-                                                                )
-                                                                .fill(p.elevated)
-                                                                .stroke(Stroke::new(1.0, p.border))
-                                                                .corner_radius(6)
-                                                                .min_size(vec2(52.0, 22.0)),
-                                                            )
-                                                            .on_hover_cursor(
-                                                                CursorIcon::PointingHand,
-                                                            )
-                                                            .on_hover_text("코드 원문 복사");
-                                                        if btn.clicked() {
-                                                            copied = true;
-                                                        }
-                                                    },
-                                                );
-                                            });
-                                        });
-                                    hline(ui, p);
-                                    Frame::new().inner_margin(Margin::symmetric(12, 10)).show(
-                                        ui,
-                                        |ui| {
-                                            use std::fmt::Write;
-                                            let avail_w = ui.available_width().max(160.0);
-                                            let digits = line_count
-                                                .checked_ilog10()
-                                                .map_or(1, |d| d as usize + 1)
-                                                .max(2);
-                                            let code_size = body * 0.84;
-                                            let code_lh = code_size * 1.5;
-                                            let gutter_w =
-                                                (digits as f32) * (code_size * 0.62) + 12.0;
-                                            let text_gap = 12.0;
-                                            let code_w = (avail_w - gutter_w - text_gap).max(100.0);
-                                            let ppp_bits = ui.ctx().pixels_per_point().to_bits();
-                                            let c_key = cache_hash((
-                                                code,
-                                                lang,
-                                                code_w.to_bits(),
-                                                code_size.to_bits(),
-                                                dark,
-                                                ppp_bits,
-                                            ));
-                                            let cached = self
-                                                .code_galley_cache
-                                                .get(&c_key)
-                                                .filter(|(g, _)| g.text() == code)
-                                                .map(|(g, ys)| {
-                                                    (std::sync::Arc::clone(g), ys.clone())
-                                                });
-                                            let (galley, line_ys) = match cached {
-                                                Some(hit) => hit,
-                                                None => {
-                                                    let job = build_code_layout_job(
-                                                        ui.ctx(),
-                                                        code,
-                                                        lang,
-                                                        code_size,
-                                                        code_w,
-                                                        code_lh,
-                                                        p,
-                                                        dark,
-                                                    );
-                                                    let g =
-                                                        ui.ctx().fonts_mut(|f| f.layout_job(job));
-                                                    let mut ys = Vec::with_capacity(line_count);
-                                                    let mut at_line_start = true;
-                                                    for row in &g.rows {
-                                                        if at_line_start {
-                                                            ys.push(row.rect().center().y);
-                                                        }
-                                                        at_line_start = row.ends_with_newline;
-                                                    }
-                                                    if self.code_galley_cache.len() >= 128 {
-                                                        self.code_galley_cache.clear();
-                                                    }
-                                                    self.code_galley_cache.insert(
-                                                        c_key,
-                                                        (std::sync::Arc::clone(&g), ys.clone()),
-                                                    );
-                                                    (g, ys)
-                                                }
-                                            };
-                                            let total_h = galley.size().y.max(code_lh);
-                                            let (rect, code_resp) = ui.allocate_exact_size(
-                                                vec2(avail_w, total_h),
-                                                Sense::hover(),
-                                            );
-                                            let div_x = rect.left() + gutter_w;
-                                            ui.painter().vline(
-                                                div_x,
-                                                rect.y_range(),
-                                                Stroke::new(1.0, p.border),
-                                            );
-                                            let num_font = FontId::monospace(code_size * 0.88);
-                                            for (idx, &y_off) in line_ys.iter().enumerate() {
-                                                self.line_num_buf.clear();
-                                                let _ = write!(self.line_num_buf, "{}", idx + 1);
-                                                ui.painter().text(
-                                                    pos2(div_x - 8.0, rect.top() + y_off),
-                                                    Align2::RIGHT_CENTER,
-                                                    &self.line_num_buf,
-                                                    num_font.clone(),
-                                                    p.faint,
-                                                );
-                                            }
-                                            ui.painter().galley(
-                                                pos2(div_x + text_gap, rect.top()),
-                                                galley,
-                                                p.text,
-                                            );
-                                            code_resp.widget_info(|| {
-                                                egui::WidgetInfo::labeled(
-                                                    egui::Role::Label,
-                                                    ui.is_enabled(),
-                                                    code,
-                                                )
-                                            });
-                                        },
-                                    );
-                                });
-                            ui.add_space(6.0);
-                            if copied {
-                                ui.ctx().copy_text(code.to_string());
-                                self.status = "코드를 복사했습니다".into();
-                                consumed = true;
-                            }
-                        }
+                        consumed |= self.render_code_card_view(ui, p, t, body, width, dark);
                     } else if let Some(tbl) = parse_md_table_cached(&mut self.table_cache, t) {
                         self.render_table_view(ui, p, &tbl, block_idx, body, width, scheme);
                     } else {

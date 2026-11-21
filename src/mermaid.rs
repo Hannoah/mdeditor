@@ -35,7 +35,7 @@ pub fn render(ui: &mut egui::Ui, p: &Pal, code: &str, body_size: f32, avail_widt
         .map(str::trim)
         .find(|l| !l.is_empty() && !l.starts_with("%%"))
         .unwrap_or("");
-    let lower = first_line.to_lowercase();
+    let lower = first_line.to_ascii_lowercase();
     if lower.starts_with("sequencediagram") {
         render_sequence(ui, p, trimmed, body_size, avail_width)
     } else if lower.starts_with("pie") {
@@ -452,11 +452,11 @@ fn parse_graph(code: &str) -> Graph {
             lines.next();
             continue;
         }
-        let lower = t.to_lowercase();
+        let lower = t.to_ascii_lowercase();
         if lower.starts_with("graph") || lower.starts_with("flowchart") {
             let parts: Vec<&str> = t.split_whitespace().collect();
             if let Some(d) = parts.get(1) {
-                dir = match d.trim_end_matches(';').to_uppercase().as_str() {
+                dir = match d.trim_end_matches(';').to_ascii_uppercase().as_str() {
                     "LR" => Dir::LR,
                     "RL" => Dir::RL,
                     "BT" => Dir::BT,
@@ -507,7 +507,7 @@ fn parse_graph(code: &str) -> Graph {
             continue;
         }
 
-        let lower = t.to_lowercase();
+        let lower = t.to_ascii_lowercase();
         if lower == "end" {
             active_subgraphs.pop();
             continue;
@@ -515,7 +515,7 @@ fn parse_graph(code: &str) -> Graph {
         if lower.starts_with("direction ") {
             if let Some(d) = t.split_whitespace().nth(1) {
                 if active_subgraphs.is_empty() {
-                    g.dir = match d.to_uppercase().as_str() {
+                    g.dir = match d.to_ascii_uppercase().as_str() {
                         "LR" => Dir::LR,
                         "RL" => Dir::RL,
                         "BT" => Dir::BT,
@@ -1448,7 +1448,7 @@ fn parse_sequence(code: &str) -> ParsedSequence {
         if t.is_empty() || t.starts_with("%%") {
             continue;
         }
-        let lower = t.to_lowercase();
+        let lower = t.to_ascii_lowercase();
         if lower.starts_with("participant ") || lower.starts_with("actor ") {
             let rest = t.split_once(char::is_whitespace).map_or("", |x| x.1).trim();
             if let Some((id, alias)) = rest.split_once(" as ") {
@@ -1466,7 +1466,7 @@ fn parse_sequence(code: &str) -> ParsedSequence {
         }
         if lower.starts_with("note ") {
             if let Some((head, body)) = t[5..].split_once(':') {
-                let head_l = head.to_lowercase();
+                let head_l = head.to_ascii_lowercase();
                 let target_str = head_l
                     .strip_prefix("over ")
                     .or_else(|| head_l.strip_prefix("right of "))
@@ -1738,10 +1738,11 @@ fn parse_pie(code: &str) -> ParsedPie {
         if t.is_empty() || t.starts_with("%%") {
             continue;
         }
-        let lower = t.to_lowercase();
-        if let Some(rest) = lower.strip_prefix("pie") {
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with("pie") {
             let orig_rest = t[3..].trim();
-            if let Some(idx) = rest.find("title ") {
+            let orig_lower = orig_rest.to_ascii_lowercase();
+            if let Some(idx) = orig_lower.find("title ") {
                 let raw_t = orig_rest.get(idx + 6..).unwrap_or("").trim();
                 title = clean_label(raw_t);
             }
@@ -1804,67 +1805,86 @@ fn render_pie(ui: &mut egui::Ui, p: &Pal, code: &str, body_size: f32, _avail_wid
 
     let radius = 76.0_f32;
     let top_title_h = if title.is_empty() { 0.0 } else { 28.0 };
-    let total_h = top_title_h + radius * 2.0 + 28.0;
-    let (rect, _) = ui.allocate_exact_size(
-        vec2(ui.available_width().max(320.0), total_h),
-        Sense::hover(),
-    );
-    let painter = ui.painter_at(rect);
+    let legend_h = (slices.len() as f32) * 22.0;
+    let body_h = (radius * 2.0).max(legend_h);
+    let total_h = top_title_h + body_h + 28.0;
+    let legend_font = FontId::proportional(body_size * 0.8);
+    let max_legend_w = ui.ctx().fonts_mut(|f| {
+        slices
+            .iter()
+            .map(|(lbl, val)| {
+                let pct = (*val / total) * 100.0;
+                f.layout_no_wrap(format!("{lbl} ({pct:.1}%)"), legend_font.clone(), p.text)
+                    .size()
+                    .x
+            })
+            .fold(80.0_f32, f32::max)
+    });
+    let content_w = (radius * 2.0 + 32.0 + 18.0 + max_legend_w + 32.0).max(320.0);
 
-    if !title.is_empty() {
-        painter.text(
-            pos2(rect.center().x, rect.top() + 14.0),
-            Align2::CENTER_CENTER,
-            title,
-            FontId::new(body_size * 0.9, theme::bold()),
-            p.text,
-        );
-    }
+    egui::ScrollArea::horizontal()
+        .id_salt(("mermaid-pie", hash))
+        .show(ui, |ui| {
+            let alloc_w = content_w.max(ui.available_width());
+            let (rect, _) = ui.allocate_exact_size(vec2(alloc_w, total_h), Sense::hover());
+            let painter = ui.painter_at(rect);
 
-    let pie_center = pos2(
-        rect.center().x - 76.0,
-        rect.top() + top_title_h + radius + 12.0,
-    );
-    let mut angle = -std::f32::consts::FRAC_PI_2;
-    for (i, (_, val)) in slices.iter().enumerate() {
-        let frac = *val / total;
-        let sweep = frac * std::f32::consts::TAU;
-        let steps = ((sweep * 20.0).ceil() as usize).max(6);
-        let [cr, cg, cb] = PALETTE[i % PALETTE.len()];
-        let color = Color32::from_rgb(cr, cg, cb);
-        for s in 0..steps {
-            let a0 = angle + sweep * (s as f32 / steps as f32);
-            let a1 = angle + sweep * ((s + 1) as f32 / steps as f32);
-            let p1 = pie_center + vec2(a0.cos(), a0.sin()) * radius;
-            let p2 = pie_center + vec2(a1.cos(), a1.sin()) * radius;
-            painter.add(Shape::convex_polygon(
-                vec![pie_center, p1, p2],
-                color,
-                Stroke::new(0.5, color),
-            ));
-        }
-        angle += sweep;
-    }
-    painter.circle_filled(pie_center, radius * 0.42, p.surface);
+            if !title.is_empty() {
+                painter.text(
+                    pos2(rect.center().x, rect.top() + 14.0),
+                    Align2::CENTER_CENTER,
+                    title,
+                    FontId::new(body_size * 0.9, theme::bold()),
+                    p.text,
+                );
+            }
 
-    // 오른쪽 범례(Legend)
-    let legend_x = pie_center.x + radius + 32.0;
-    let mut legend_y = pie_center.y - (slices.len() as f32 * 22.0) * 0.5 + 10.0;
-    for (i, (lbl, val)) in slices.iter().enumerate() {
-        let [cr, cg, cb] = PALETTE[i % PALETTE.len()];
-        let color = Color32::from_rgb(cr, cg, cb);
-        let pct = (*val / total) * 100.0;
-        let dot_r = Rect::from_center_size(pos2(legend_x, legend_y), vec2(11.0, 11.0));
-        painter.rect_filled(dot_r, 3.0, color);
-        painter.text(
-            pos2(legend_x + 12.0, legend_y),
-            Align2::LEFT_CENTER,
-            format!("{lbl} ({pct:.1}%)"),
-            FontId::proportional(body_size * 0.8),
-            p.text,
-        );
-        legend_y += 22.0;
-    }
+            let start_x = rect.left() + ((alloc_w - content_w) * 0.5).max(16.0);
+            let pie_center = pos2(
+                start_x + radius,
+                rect.top() + top_title_h + body_h * 0.5 + 12.0,
+            );
+            let mut angle = -std::f32::consts::FRAC_PI_2;
+            for (i, (_, val)) in slices.iter().enumerate() {
+                let frac = *val / total;
+                let sweep = frac * std::f32::consts::TAU;
+                let steps = ((sweep * 20.0).ceil() as usize).max(6);
+                let [cr, cg, cb] = PALETTE[i % PALETTE.len()];
+                let color = Color32::from_rgb(cr, cg, cb);
+                for s in 0..steps {
+                    let a0 = angle + sweep * (s as f32 / steps as f32);
+                    let a1 = angle + sweep * ((s + 1) as f32 / steps as f32);
+                    let p1 = pie_center + vec2(a0.cos(), a0.sin()) * radius;
+                    let p2 = pie_center + vec2(a1.cos(), a1.sin()) * radius;
+                    painter.add(Shape::convex_polygon(
+                        vec![pie_center, p1, p2],
+                        color,
+                        Stroke::new(0.5, color),
+                    ));
+                }
+                angle += sweep;
+            }
+            painter.circle_filled(pie_center, radius * 0.42, p.surface);
+
+            // 오른쪽 범례(Legend)
+            let legend_x = pie_center.x + radius + 32.0;
+            let mut legend_y = pie_center.y - legend_h * 0.5 + 10.0;
+            for (i, (lbl, val)) in slices.iter().enumerate() {
+                let [cr, cg, cb] = PALETTE[i % PALETTE.len()];
+                let color = Color32::from_rgb(cr, cg, cb);
+                let pct = (*val / total) * 100.0;
+                let dot_r = Rect::from_center_size(pos2(legend_x, legend_y), vec2(11.0, 11.0));
+                painter.rect_filled(dot_r, 3.0, color);
+                painter.text(
+                    pos2(legend_x + 12.0, legend_y),
+                    Align2::LEFT_CENTER,
+                    format!("{lbl} ({pct:.1}%)"),
+                    legend_font.clone(),
+                    p.text,
+                );
+                legend_y += 22.0;
+            }
+        });
     true
 }
 
@@ -1898,5 +1918,14 @@ graph LR
         assert_eq!(g.edges[2].label, "아니오");
         assert!(matches!(g.edges[2].style, LineStyle::Dotted));
         assert!(g.nodes[2].fill.is_some());
+
+        // 유니코드 대소문자 길이 변환 문자(İ → i\u{307})가 포함되어도 패닉 없이 파싱
+        let seq = parse_sequence(
+            "sequenceDiagram\n  participant A\n  Note over İA, İB: İstanbul\n  A->>B: İ",
+        );
+        assert_eq!(seq.events.len(), 2);
+        let pie = parse_pie("pie   title İstanbul İ\n  \"İ\" : 40\n  \"B\" : 60");
+        assert_eq!(pie.title, "İstanbul İ");
+        assert_eq!(pie.slices.len(), 2);
     }
 }

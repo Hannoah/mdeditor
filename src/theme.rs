@@ -356,7 +356,11 @@ pub fn clipboard_text() -> Option<String> {
     #[cfg(windows)]
     return win_mem::clipboard_text();
     #[cfg(not(windows))]
-    None
+    {
+        let mut cb = arboard::Clipboard::new().ok()?;
+        let s = cb.get_text().ok()?.replace("\r\n", "\n");
+        (!s.is_empty()).then_some(s)
+    }
 }
 
 // index: .ttc 글꼴 모음 안의 글꼴 번호 (단일 .ttf/.otf는 0)
