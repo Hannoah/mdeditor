@@ -2,7 +2,7 @@
 
 **Rust로 만든 순수 로컬 Markdown 편집기 — 브라우저·웹뷰·로컬 서버 없이 네이티브 창 하나로 동작합니다.**
 
-![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-46%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-49%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
@@ -43,6 +43,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 - **표 직접 편집**: 표 블록을 클릭하거나 삽입하면 마크다운(`| |`) 원문 대신 격자 표 에디터로 열려 셀을 바로 수정하고 `+ 행`/`+ 열`/`Tab`/`Enter` 이동이 가능합니다 (필요 시 `마크다운 보기` 전환 가능).
 - **목차 서랍**: 왼쪽에서 열리는 제목 목록. 현재 위치 강조, 클릭하면 해당 제목으로 이동.
 - **찾기·바꾸기 막대** (`Ctrl+F`/`Ctrl+H`): 오른쪽 위에 떠 있는 막대, 대소문자 구분, 일치 개수. 선택한 글자가 검색어로 들어가고 `F3`/`Shift+F3`으로 이동합니다.
+- **오프라인 맞춤법 및 띄어쓰기 검사** (`F7`/`Shift+F7`): 외부 서버 없이 한국어 규칙·영어 오타 사전·Windows 네이티브 맞춤법 검사기를 결합해 코드·수식·URL·표를 제외한 본문을 검사합니다. 편집 중 실시간 물결 밑줄, 우클릭 제안 교정, 전체 검사 모달(모두 자동 교정·사전 무시)을 지원합니다.
 - **시작 화면**: 열린 문서가 없으면 새 문서·폴더 열기·파일 열기 버튼을 보여 줍니다. 시작 메뉴에서 처음 실행하면 `문서\MDEditor`가 기본 작업 폴더입니다.
 - **상태 알약**: 저장됨/저장되지 않음 표시와 글자·줄·읽기 시간.
 - **설정 메뉴 & 글꼴 선택**: 라이트/다크 테마, 가운데/전체 너비, 글꼴 종류 선택(시스템 기본·맑은 고딕·Pretendard·나눔고딕·직접 `.ttf`/`.otf` 파일 선택 등), 글꼴 크기, 마크다운 원본/HTML 복사, 도움말, 종료.
@@ -81,6 +82,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | `Ctrl+Shift+O` | 작업 폴더 바꾸기 |
 | `Ctrl+Z` / `Ctrl+Y` | 실행 취소 / 다시 실행 |
 | `Ctrl+F` / `Ctrl+H` | 찾기 / 바꾸기 (`Enter`·`F3` 다음, `Shift+Enter`·`Shift+F3` 이전) |
+| `F7` / `Shift+F7` | 맞춤법·띄어쓰기 전체 검사 열기 / 실시간 물결 밑줄 토글 |
 | `Ctrl+B` / `Ctrl+I` / `Ctrl+K` | 굵게 / 기울임 / 링크 (다시 누르면 해제) |
 | `Ctrl+Shift+S` / `Ctrl+Shift+H` | 취소선 (`~~`) / 형광펜 강조 (`==`) (다시 누르면 해제) |
 | `Ctrl+E` / `Ctrl+Shift+K` | 인라인 코드 (`` ` ``) / 키보드 키캡 (`[[키]]`) (다시 누르면 해제) |
@@ -152,6 +154,7 @@ src/main.rs        파일 I/O, 앱 상태·단축키, 멀티 탭·실행 취소
 src/textops.rs     순수 텍스트 연산, 인라인/블록 파서, 표, 목록, HTML 내보내기
 src/ui.rs          화면: 상단 바, 노션 캔버스, 목차 서랍, 찾기 막대, 상태바, 모달
 src/mermaid.rs     순수 네이티브 Mermaid 그래프 렌더러 (순서도·시퀀스·상태·클래스·파이 차트)
+src/spell.rs       마크다운 인식 오프라인 맞춤법·띄어쓰기 검사 엔진 (규칙 + Windows COM FFI)
 src/sas.rs         SAS 코드 블록 구문 강조 토크나이저·하이라이터
 src/theme.rs       웹 버전 디자인 토큰(색상), 글꼴, Lucide 아이콘
 src/setup.rs       설치·제거 마법사 화면 (같은 실행 파일이 설치 프로그램을 겸함)
@@ -174,7 +177,7 @@ package.ps1        배포 빌드: 테스트 → 릴리즈 → 설치 파일 → 
 ## 🧪 테스트
 
 ```bash
-cargo test                                    # 46개
+cargo test                                    # 49개
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

@@ -1,5 +1,17 @@
 # MDEditor 작업 기록
 
+## 2026-11-22 — v0.12.0: 오프라인 맞춤법 및 띄어쓰기 검사
+
+- **마크다운 인식 오프라인 맞춤법 검사 엔진 (`src/spell.rs`)**:
+  - 코드 블록·인라인 코드·수식·URL·표/링크/각주 문법 토큰을 제외한 본문 구간만 UTF-8 바이트 오프셋으로 추출(`prose_segments`)하여 검사.
+  - 한국어 자주 틀리는 맞춤법·띄어쓰기 규칙(`KO_RULES`), 연속 공백·중복 단어 검사, 영어 오타 사전(`EN_TYPOS`)을 내장해 전 플랫폼에서 즉시 동작.
+  - Windows(`#[cfg(windows)]`)에서는 추가 크레이트 없이 `ole32.dll`을 통한 `ISpellCheckerFactory` / `ISpellChecker` COM FFI를 연동해 OS에 설치된 언어(`en-US`, `ko-KR`) 맞춤법 검사를 함께 활용.
+- **실시간 물결 밑줄·우클릭 제안·전체 검사 모달 (`src/main.rs`, `src/ui.rs`, `src/theme.rs`)**:
+  - 편집 중인 블록에서 맞춤법 오류(빨강)와 띄어쓰기 오류(주황) 아래에 실시간 물결 밑줄(`paint_spell_wavy`) 표시 및 `Shift+F7`로 즉시 토글(`spellcheck` 설정 영구 저장).
+  - 블록 우클릭 시 커서를 클릭 위치에 맞추고 `canvas_context_menu` 상단에 최대 3개 교정 제안 및 `사전에 무시`(`spell_ignore` 영구 저장) 제공.
+  - `F7`·상단 바(`theme::SPELL`)·설정 메뉴·하단 상태바(`맞춤법`)에서 여는 `spellcheck_modal`로 문서 전체 이슈 탐색, 위치 이동, 개별/일괄 자동 교정(`apply_all_spell_fixes`), 사전 무시 지원.
+- **검증 및 문서**: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`(49개 통과, `spellcheck_modal_fix_ignore_and_toggle` 포함) 및 `README.md` 갱신.
+
 ## 2026-11-21 — v0.11.2: 코드 리뷰 전 항목 수정 및 `ui.rs` 거대 함수 분해
 
 - **Mermaid UTF-8 문자 경계 패닉 방지 (`src/mermaid.rs`)**: `to_lowercase()` 시 바이트 길이가 변하는 유니코드 문자(예: `İ`)가 포함된 라인을 슬라이싱할 때 패닉이 발생할 수 있던 문제를 `to_ascii_lowercase()`로 통일해 해결하고, `render_pie`에도 가로 스크롤(`ScrollArea::horizontal`)과 동적 범례 폭 측정을 적용.

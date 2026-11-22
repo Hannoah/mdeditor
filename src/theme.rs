@@ -828,6 +828,10 @@ icon!(
     X,
     r#"<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>"#
 );
+icon!(
+    SPELL,
+    r#"<path d="m6 16 6-12 6 12"/><path d="M8 12h8"/><path d="m16 20 2 2 4-4"/>"#
+);
 
 pub fn img(icon: Icon, size: f32, color: Color32) -> egui::Image<'static> {
     egui::Image::from_bytes(icon.0, icon.1.as_bytes())

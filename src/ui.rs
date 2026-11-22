@@ -191,6 +191,10 @@ impl eframe::App for App {
         storage.set_string("full_width", self.full_width.to_string());
         storage.set_string("small_text", self.small_text.to_string());
         storage.set_string("font_family", self.font_family.clone());
+        storage.set_string("spellcheck", self.spellcheck.to_string());
+        let mut ignored: Vec<&str> = self.spell_ignore.iter().map(String::as_str).collect();
+        ignored.sort_unstable();
+        storage.set_string("spell_ignore", ignored.join("\u{1}"));
     }
 }
 
@@ -1092,6 +1096,7 @@ fn paint_block_decor(
     width: f32,
     folded: bool,
     scheme: &str,
+    spell_issues: &[crate::spell::SpellIssue],
 ) {
     use egui::text::CCursor;
     if is_math_block(text) {
@@ -1213,6 +1218,90 @@ fn paint_block_decor(
     }
     if let Some(q) = quote_rows {
         bar(q);
+    }
+    for issue in spell_issues {
+        paint_spell_wavy(painter, g, origin, text, issue, vis_y_min, vis_y_max);
+    }
+}
+
+fn paint_spell_wavy(
+    painter: &egui::Painter,
+    g: &egui::Galley,
+    origin: egui::Pos2,
+    text: &str,
+    issue: &crate::spell::SpellIssue,
+    vis_y_min: f32,
+    vis_y_max: f32,
+) {
+    use egui::text::CCursor;
+    if issue.range.start >= issue.range.end
+        || issue.range.end > text.len()
+        || !text.is_char_boundary(issue.range.start)
+        || !text.is_char_boundary(issue.range.end)
+    {
+        return;
+    }
+    let c0 = char_len(&text[..issue.range.start]);
+    let c1 = c0 + char_len(&text[issue.range.clone()]);
+    let r0 = g.pos_from_cursor(CCursor::new(c0));
+    let r1 = g.pos_from_cursor(CCursor::new(c1));
+    let color = match issue.kind {
+        crate::spell::IssueKind::Spelling => RED.gamma_multiply(0.9),
+        crate::spell::IssueKind::Spacing => AMBER.gamma_multiply(0.95),
+    };
+    let stroke = Stroke::new(1.25, color);
+    let draw_seg = |x0: f32, x1: f32, bottom_y: f32| {
+        if bottom_y < vis_y_min || bottom_y > vis_y_max || x1 <= x0 + 1.5 {
+            return;
+        }
+        let step = 3.0_f32;
+        let amp = 1.25_f32;
+        let base_y = bottom_y - 1.2;
+        let mut pts = Vec::new();
+        let mut x = x0;
+        let mut up = true;
+        while x < x1 {
+            let y = if up {
+                base_y - amp
+            } else {
+                base_y + amp * 0.45
+            };
+            pts.push(pos2(x, y));
+            x += step;
+            up = !up;
+        }
+        pts.push(pos2(
+            x1,
+            if up {
+                base_y - amp
+            } else {
+                base_y + amp * 0.45
+            },
+        ));
+        painter.add(egui::Shape::line(pts, stroke));
+    };
+    if (r0.top() - r1.top()).abs() < 2.0 {
+        draw_seg(
+            origin.x + r0.left(),
+            origin.x + r1.left(),
+            origin.y + r0.bottom(),
+        );
+    } else {
+        let mut row_x0 = r0.left();
+        let mut row_top = r0.top();
+        let mut row_bot = r0.bottom();
+        let mut prev_right = r0.right();
+        for ci in (c0 + 1)..=c1 {
+            let r = g.pos_from_cursor(CCursor::new(ci));
+            if (r.top() - row_top).abs() >= 2.0 {
+                draw_seg(origin.x + row_x0, origin.x + prev_right, origin.y + row_bot);
+                row_x0 = r.left();
+                row_top = r.top();
+                row_bot = r.bottom();
+            }
+            prev_right = r.right();
+        }
+        draw_seg(origin.x + row_x0, origin.x + r1.left(), origin.y + row_bot);
     }
 }
 
@@ -1840,6 +1929,17 @@ impl App {
             if toggle_icon_btn(
                 ui,
                 p,
+                theme::SPELL,
+                matches!(self.dialog, Some(Dialog::Spellcheck { .. })),
+                "맞춤법 및 띄어쓰기 검사 (F7 · 실시간 밑줄 Shift+F7)",
+            )
+            .clicked()
+            {
+                self.open_spellcheck();
+            }
+            if toggle_icon_btn(
+                ui,
+                p,
                 theme::SEARCH,
                 self.find.open,
                 "본문 찾기 및 바꾸기 (Ctrl+F / Ctrl+H)",
@@ -2156,6 +2256,17 @@ impl App {
         if menu_row(ui, p, ic(theme::TYPE), &fs, "Ctrl+Alt+F", p.text).clicked() {
             self.small_text = !self.small_text;
         }
+        if menu_row(ui, p, ic(theme::SPELL), "맞춤법 검사...", "F7", p.text).clicked() {
+            self.open_spellcheck();
+            ui.close();
+        }
+        let sp = format!(
+            "실시간 맞춤법 밑줄: {}",
+            if self.spellcheck { "켬" } else { "끔" }
+        );
+        if menu_row(ui, p, ic(theme::CHECK_SQUARE), &sp, "Shift+F7", p.text).clicked() {
+            self.toggle_spellcheck();
+        }
         let font_lbl = format!("글꼴: {}", theme::font_display_name(&self.font_family));
         ui.menu_button(
             RichText::new(format!("  {font_lbl}"))
@@ -2221,6 +2332,7 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui, p: &Pal) {
         let mut do_save = false;
         let mut do_open_files = false;
+        let mut do_spellcheck = false;
         let mut toggle_width = false;
         let mut toggle_font = false;
         let folder_name = self.root_label().to_string();
@@ -2351,6 +2463,19 @@ impl App {
                 if font_btn.clicked() {
                     toggle_font = true;
                 }
+                let spell_btn = pill_btn(
+                    ui,
+                    if self.spellcheck {
+                        "맞춤법"
+                    } else {
+                        "맞춤법 끔"
+                    },
+                    self.spellcheck,
+                    "맞춤법 및 띄어쓰기 검사 열기 (F7 · 실시간 밑줄 Shift+F7)",
+                );
+                if spell_btn.clicked() {
+                    do_spellcheck = true;
+                }
                 let width_btn = pill_btn(
                     ui,
                     if self.full_width {
@@ -2371,6 +2496,8 @@ impl App {
             self.trigger_save();
         } else if do_open_files {
             self.open_files();
+        } else if do_spellcheck {
+            self.open_spellcheck();
         } else if toggle_width {
             self.full_width = !self.full_width;
         } else if toggle_font {
@@ -2669,6 +2796,10 @@ impl App {
                                 );
                                 if secondary_clicked && ui.rect_contains_pointer(full_row) {
                                     if let Some(pos) = click_pos {
+                                        let cur = self.cursor(&ctx);
+                                        if cur.0 == cur.1 && !r.is_empty() {
+                                            self.pending_click_pos = Some((r.start, pos));
+                                        }
                                         open_canvas_menu = Some(pos);
                                         consumed = true;
                                     }
@@ -3646,6 +3777,11 @@ impl App {
             self.status = "코드를 복사했습니다".into();
         }
         self.editor_galley_cache = galley_cache;
+        let spell_issues = if code_frame_rect.is_none() && !math && !is_raw_table {
+            self.active_spell_issues(&buf)
+        } else {
+            Vec::new()
+        };
         if code_frame_rect.is_none() {
             paint_block_decor(
                 ui.painter(),
@@ -3657,6 +3793,7 @@ impl App {
                 out.response.rect.width(),
                 folded,
                 &scheme,
+                &spell_issues,
             );
         }
         header_interacted |= toggle_arrow(ui, ctx, id, toggle_id, folded, &out, &buf);
@@ -5165,6 +5302,7 @@ impl App {
         let mut next: Option<Dialog> = None;
         let (width, fill) = match dialog {
             Dialog::Files { .. } | Dialog::Help => (660.0, p.surface),
+            Dialog::Spellcheck { .. } => (560.0, p.surface),
             Dialog::Image { .. } => (480.0, p.elevated),
             _ => (440.0, p.elevated),
         };
@@ -5179,6 +5317,7 @@ impl App {
             Dialog::Help => 7,
             Dialog::Link { .. } => 8,
             Dialog::Conflict(_) => 9,
+            Dialog::Spellcheck { .. } => 10,
         };
         // 종류마다 다른 id: 같은 id면 이전 창 크기를 기억해 레이아웃이 늘어난다
         let modal = egui::Modal::new(egui::Id::unique(("dialog", kind)))
@@ -5478,6 +5617,22 @@ impl App {
                             }
                         }
                     }
+                    Dialog::Spellcheck {
+                        selected,
+                        cached_rev,
+                        cached_spell_rev,
+                        issues,
+                    } => {
+                        self.spellcheck_modal(
+                            ui,
+                            p,
+                            selected,
+                            cached_rev,
+                            cached_spell_rev,
+                            issues,
+                            &mut close,
+                        );
+                    }
                     Dialog::Help => {
                         cancel |=
                             modal_header(ui, p, theme::HELP, p.text, "단축키 및 마크다운 가이드");
@@ -5505,6 +5660,311 @@ impl App {
             self.dialog = Some(dialog);
         } else if let (false, Dialog::Unsaved(after)) = (cancel, dialog) {
             self.finish(after); // 취소면 닫기/폴더 전환을 하지 않고 대화상자만 닫는다
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spellcheck_modal(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Pal,
+        selected: &mut usize,
+        cached_rev: &mut u64,
+        cached_spell_rev: &mut u64,
+        issues: &mut Vec<crate::spell::SpellIssue>,
+        close: &mut bool,
+    ) {
+        if let Some(doc) = self.doc() {
+            if doc.rev != *cached_rev || self.spell_rev != *cached_spell_rev {
+                *issues = crate::spell::check_document(&doc.text, &self.spell_ignore);
+                *cached_rev = doc.rev;
+                *cached_spell_rev = self.spell_rev;
+            }
+        } else {
+            issues.clear();
+        }
+        if issues.is_empty() {
+            *selected = 0;
+        } else {
+            *selected = (*selected).min(issues.len() - 1);
+        }
+
+        *close |= modal_header(ui, p, theme::SPELL, p.accent, "맞춤법 및 띄어쓰기 검사");
+        let mut toggle_live = false;
+        let mut fix_req: Option<(std::ops::Range<usize>, String)> = None;
+        let mut ignore_req: Option<String> = None;
+        let mut jump_req: Option<std::ops::Range<usize>> = None;
+        let mut fix_all = false;
+        let mut recheck = false;
+
+        Frame::new()
+            .inner_margin(Margin {
+                left: 20,
+                right: 20,
+                top: 12,
+                bottom: 8,
+            })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if issues.is_empty() {
+                        ui.label(
+                            RichText::new("맞춤법 및 띄어쓰기 오류가 없습니다.")
+                                .size(12.5)
+                                .strong()
+                                .color(GREEN),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!("수정 제안 {}건 발견", issues.len()))
+                                .size(12.5)
+                                .strong()
+                                .color(p.text),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let live_lbl = if self.spellcheck {
+                            "실시간 밑줄: 켬"
+                        } else {
+                            "실시간 밑줄: 끔"
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(live_lbl)
+                                        .size(11.5)
+                                        .color(if self.spellcheck { p.accent } else { p.muted }),
+                                )
+                                .fill(if self.spellcheck {
+                                    p.accent.gamma_multiply(0.12)
+                                } else {
+                                    p.elevated
+                                })
+                                .stroke(Stroke::new(
+                                    1.0,
+                                    if self.spellcheck {
+                                        p.accent.gamma_multiply(0.35)
+                                    } else {
+                                        p.border
+                                    },
+                                ))
+                                .corner_radius(6)
+                                .min_size(vec2(0.0, 24.0)),
+                            )
+                            .on_hover_text("편집 중 실시간 물결 밑줄 켜기/끄기 (Shift+F7)")
+                            .clicked()
+                        {
+                            toggle_live = true;
+                        }
+                    });
+                });
+            });
+
+        Frame::new()
+            .inner_margin(Margin {
+                left: 20,
+                right: 20,
+                top: 4,
+                bottom: 14,
+            })
+            .show(ui, |ui| {
+                if issues.is_empty() {
+                    Frame::new()
+                        .fill(p.elevated)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(10)
+                        .inner_margin(Margin::symmetric(18, 22))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new(
+                                        "문서에 교정이 필요한 항목을 찾지 못했습니다.\n코드 블록, 수식, URL, 표는 자동으로 제외됩니다.",
+                                    )
+                                    .size(12.5)
+                                    .color(p.muted),
+                                );
+                            });
+                        });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(340.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            let doc_text = self.doc().map(|d| d.text.as_str()).unwrap_or("");
+                            for (idx, issue) in issues.iter().enumerate() {
+                                let is_sel = idx == *selected;
+                                let (kind_label, kind_color) = match issue.kind {
+                                    crate::spell::IssueKind::Spelling => ("맞춤법", RED),
+                                    crate::spell::IssueKind::Spacing => ("띄어쓰기", AMBER),
+                                };
+                                let s = issue.range.start.min(doc_text.len());
+                                let e = issue.range.end.min(doc_text.len());
+                                let line_no = 1 + doc_text[..s].matches('\n').count();
+                                let ls = doc_text[..s].rfind('\n').map_or(0, |i| i + 1);
+                                let le = doc_text[e..]
+                                    .find('\n')
+                                    .map_or(doc_text.len(), |i| e + i);
+                                let line_str = doc_text[ls..le].trim();
+                                let snippet: String = if line_str.chars().count() > 54 {
+                                    let head: String = line_str.chars().take(54).collect();
+                                    format!("{head}…")
+                                } else {
+                                    line_str.to_string()
+                                };
+
+                                Frame::new()
+                                    .fill(p.elevated)
+                                    .stroke(Stroke::new(
+                                        if is_sel { 1.5 } else { 1.0 },
+                                        if is_sel {
+                                            p.accent.gamma_multiply(0.6)
+                                        } else {
+                                            p.border
+                                        },
+                                    ))
+                                    .corner_radius(8)
+                                    .inner_margin(Margin::symmetric(12, 10))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.spacing_mut().item_spacing.y = 5.0;
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(kind_label)
+                                                    .size(11.0)
+                                                    .strong()
+                                                    .color(kind_color),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!("'{}'", issue.word))
+                                                    .size(13.0)
+                                                    .strong()
+                                                    .color(p.text),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!("{line_no}행"))
+                                                    .family(FontFamily::Monospace)
+                                                    .size(11.0)
+                                                    .color(p.faint),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if ui
+                                                        .add(
+                                                            egui::Button::new(
+                                                                RichText::new("이동")
+                                                                    .size(11.0)
+                                                                    .color(p.muted),
+                                                            )
+                                                            .min_size(vec2(0.0, 22.0))
+                                                            .corner_radius(5),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        *selected = idx;
+                                                        jump_req = Some(issue.range.clone());
+                                                    }
+                                                },
+                                            );
+                                        });
+                                        if !snippet.is_empty() {
+                                            ui.label(
+                                                RichText::new(&snippet)
+                                                    .size(11.5)
+                                                    .color(p.muted),
+                                            );
+                                        }
+                                        ui.label(
+                                            RichText::new(&issue.reason)
+                                                .size(11.0)
+                                                .color(p.faint),
+                                        );
+                                        ui.horizontal_wrapped(|ui| {
+                                            for sug in issue.suggestions.iter().take(3) {
+                                                let lbl = if sug.is_empty() {
+                                                    "중복 삭제"
+                                                } else {
+                                                    sug.as_str()
+                                                };
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new(lbl)
+                                                                .size(11.5)
+                                                                .strong()
+                                                                .color(p.accent),
+                                                        )
+                                                        .fill(p.accent.gamma_multiply(0.12))
+                                                        .stroke(Stroke::new(
+                                                            1.0,
+                                                            p.accent.gamma_multiply(0.35),
+                                                        ))
+                                                        .corner_radius(6)
+                                                        .min_size(vec2(0.0, 24.0)),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    *selected = idx;
+                                                    fix_req =
+                                                        Some((issue.range.clone(), sug.clone()));
+                                                }
+                                            }
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("무시 (사전 추가)")
+                                                            .size(11.5)
+                                                            .color(p.muted),
+                                                    )
+                                                    .fill(Color32::TRANSPARENT)
+                                                    .stroke(Stroke::new(1.0, p.border))
+                                                    .corner_radius(6)
+                                                    .min_size(vec2(0.0, 24.0)),
+                                                )
+                                                .clicked()
+                                            {
+                                                *selected = idx;
+                                                ignore_req = Some(issue.word.clone());
+                                            }
+                                        });
+                                    });
+                            }
+                        });
+                }
+            });
+
+        let has_auto_fix = issues.iter().any(|i| !i.suggestions.is_empty());
+        footer(ui, p, None, |ui| {
+            if has_auto_fix && ghost(ui, p, "모두 자동 교정", Some(p.accent)).clicked() {
+                fix_all = true;
+            }
+            if ghost(ui, p, "다시 검사", None).clicked() {
+                recheck = true;
+            }
+            *close |= primary(ui, p, "닫기").clicked();
+        });
+
+        if toggle_live {
+            self.toggle_spellcheck();
+        }
+        if let Some((rg, rep)) = fix_req {
+            self.apply_spell_fix(rg, &rep);
+        } else if let Some(w) = ignore_req {
+            self.ignore_spell_word(&w);
+        } else if fix_all {
+            let n = self.apply_all_spell_fixes();
+            self.status = if n > 0 {
+                format!("맞춤법 {n}건을 자동 교정했습니다")
+            } else {
+                "자동 교정할 항목이 없습니다".into()
+            };
+        } else if let Some(rg) = jump_req {
+            self.go(rg.start, rg.end);
+            self.focus_editor = true;
+            *close = true;
+        } else if recheck {
+            *cached_rev = u64::MAX;
         }
     }
 
@@ -5862,6 +6322,86 @@ impl App {
         let ic = |i: Icon| Some((i, p.muted));
         let mut done = false;
         let mut sub_anchor_y = None;
+
+        let spell_hit = if self.spellcheck {
+            let ctx_info = self.active_block().and_then(|r| {
+                let doc = self.doc()?;
+                let sel = self.cursor(ctx);
+                let b = self.block_byte_of(&r, doc, sel.0);
+                let block_str = doc.text.get(r.clone())?.to_string();
+                let rel_b = b.saturating_sub(r.start);
+                Some((r, block_str, rel_b))
+            });
+            if let Some((r, block_str, rel_b)) = ctx_info {
+                self.active_spell_issues(&block_str)
+                    .into_iter()
+                    .find(|i| rel_b >= i.range.start && rel_b <= i.range.end)
+                    .map(|mut i| {
+                        i.range = (r.start + i.range.start)..(r.start + i.range.end);
+                        i
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(issue) = spell_hit {
+            let badge_color = match issue.kind {
+                crate::spell::IssueKind::Spelling => RED,
+                crate::spell::IssueKind::Spacing => AMBER,
+            };
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!("맞춤법: {}", issue.word))
+                        .size(11.0)
+                        .strong()
+                        .color(badge_color),
+                );
+            });
+            if issue.suggestions.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(&issue.reason).size(11.0).color(p.muted));
+                });
+            } else {
+                for sug in issue.suggestions.iter().take(3) {
+                    let label = if sug.is_empty() {
+                        "제안: (삭제)".to_string()
+                    } else {
+                        format!("제안: {sug}")
+                    };
+                    let r = menu_row(
+                        ui,
+                        p,
+                        Some((theme::CHECK_SQUARE, GREEN)),
+                        &label,
+                        "",
+                        p.text,
+                    );
+                    if r.hovered() {
+                        self.canvas_sub = None;
+                    }
+                    if r.clicked() {
+                        self.apply_spell_fix(issue.range.clone(), sug);
+                        done = true;
+                    }
+                }
+            }
+            let ig_label = format!("사전에 무시: '{}'", issue.word);
+            let r = menu_row(ui, p, ic(theme::SPELL), &ig_label, "", p.muted);
+            if r.hovered() {
+                self.canvas_sub = None;
+            }
+            if r.clicked() {
+                self.ignore_spell_word(&issue.word);
+                done = true;
+            }
+            ui.add_space(3.0);
+            hline(ui, p);
+            ui.add_space(3.0);
+        }
 
         // 1. 상단 인라인 글자 서식 빠른 버튼 줄
         let fmt_resp = ui.horizontal(|ui| {
@@ -7733,6 +8273,7 @@ fn help_body(ui: &mut egui::Ui, p: &Pal) {
                             ),
                             ("Ctrl + F / H", "본문 찾기 / 찾기 및 바꾸기"),
                             ("F3 / Shift + F3", "다음 / 이전 일치 항목"),
+                            ("F7 / Shift + F7", "맞춤법 검사 열기 / 실시간 밑줄 토글"),
                             (
                                 "Ctrl + B / I / K",
                                 "굵게 / 기울임 / 링크 (다시 누르면 해제)",

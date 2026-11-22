@@ -17,6 +17,7 @@ mod mermaid;
 mod sas;
 #[cfg(windows)] // 설치·제거 마법사는 Windows 전용 (PowerShell 엔진)
 mod setup;
+mod spell;
 mod textops;
 mod theme;
 mod ui;
@@ -852,6 +853,12 @@ enum Dialog {
         url: String,
         existing: bool,
     },
+    Spellcheck {
+        selected: usize,
+        cached_rev: u64,
+        cached_spell_rev: u64,
+        issues: Vec<spell::SpellIssue>,
+    },
     Help,
 }
 
@@ -975,6 +982,10 @@ struct App {
     full_width: bool,
     focus_mode: bool,
     small_text: bool,
+    spellcheck: bool,
+    spell_ignore: std::collections::HashSet<String>,
+    spell_rev: u64,
+    spell_block_cache: Option<(u64, u64, Vec<spell::SpellIssue>)>,
     font_family: String,
     md_cache: CommonMarkCache,
     status: String,
@@ -1092,6 +1103,15 @@ impl App {
         };
         theme::apply(&cc.egui_ctx, dark);
         let flag = |k: &str| get(k).as_deref() == Some("true");
+        let spellcheck = get("spellcheck").as_deref() != Some("false");
+        let spell_ignore: std::collections::HashSet<String> = get("spell_ignore")
+            .map(|s| {
+                s.split('\u{1}')
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut app = Self {
             root: PathBuf::new(),
             files: Vec::new(),
@@ -1102,6 +1122,10 @@ impl App {
             full_width: flag("full_width"),
             focus_mode: false,
             small_text: flag("small_text"),
+            spellcheck,
+            spell_ignore,
+            spell_rev: 0,
+            spell_block_cache: None,
             font_family,
             md_cache: CommonMarkCache::default(),
             status: String::new(),
@@ -1629,6 +1653,127 @@ impl App {
                 self.docs.insert(name, fresh);
             }
         }
+    }
+
+    fn toggle_spellcheck(&mut self) {
+        self.spellcheck = !self.spellcheck;
+        self.spell_rev = self.spell_rev.wrapping_add(1);
+        self.spell_block_cache = None;
+        self.status = if self.spellcheck {
+            "실시간 맞춤법 검사를 켰습니다".into()
+        } else {
+            "실시간 맞춤법 검사를 껐습니다".into()
+        };
+    }
+
+    fn ignore_spell_word(&mut self, word: &str) {
+        let key = word.trim();
+        if key.is_empty() {
+            return;
+        }
+        self.spell_ignore.insert(key.to_string());
+        self.spell_rev = self.spell_rev.wrapping_add(1);
+        self.spell_block_cache = None;
+        self.status = format!("사전에 무시 단어 추가: '{key}'");
+    }
+
+    fn active_spell_issues(&mut self, block: &str) -> Vec<spell::SpellIssue> {
+        if !self.spellcheck || block.is_empty() {
+            return Vec::new();
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        block.hash(&mut h);
+        let bh = h.finish();
+        if let Some((cbh, crev, issues)) = &self.spell_block_cache {
+            if *cbh == bh && *crev == self.spell_rev {
+                return issues.clone();
+            }
+        }
+        let issues = spell::check_block(block, &self.spell_ignore);
+        self.spell_block_cache = Some((bh, self.spell_rev, issues.clone()));
+        issues
+    }
+
+    fn open_spellcheck(&mut self) {
+        let Some(doc) = self.doc() else {
+            self.status = "검사할 문서가 없습니다".into();
+            return;
+        };
+        let issues = spell::check_document(&doc.text, &self.spell_ignore);
+        let doc_rev = doc.rev;
+        self.dialog = Some(Dialog::Spellcheck {
+            selected: 0,
+            cached_rev: doc_rev,
+            cached_spell_rev: self.spell_rev,
+            issues,
+        });
+    }
+
+    fn apply_spell_fix(&mut self, range: Range<usize>, replacement: &str) {
+        let Some(doc) = self.doc_mut() else {
+            return;
+        };
+        if range.start > range.end
+            || range.end > doc.text.len()
+            || !doc.text.is_char_boundary(range.start)
+            || !doc.text.is_char_boundary(range.end)
+        {
+            return;
+        }
+        // 중복 단어 삭제(replacement == "")일 때는 바로 앞 공백 1칸도 함께 정리한다
+        let (rep_start, rep_end) = if replacement.is_empty()
+            && range.start > 0
+            && doc.text.as_bytes()[range.start - 1] == b' '
+        {
+            (range.start - 1, range.end)
+        } else {
+            (range.start, range.end)
+        };
+        let mut next = doc.text.clone();
+        next.replace_range(rep_start..rep_end, replacement);
+        let caret = char_len(&next[..rep_start]) + char_len(replacement);
+        self.set_text(next, (caret, caret));
+        self.spell_block_cache = None;
+    }
+
+    fn apply_all_spell_fixes(&mut self) -> usize {
+        let Some(doc) = self.doc() else {
+            return 0;
+        };
+        let issues = spell::check_document(&doc.text, &self.spell_ignore);
+        let fixes: Vec<(Range<usize>, String)> = issues
+            .into_iter()
+            .filter_map(|i| {
+                let sug = i.suggestions.into_iter().next()?;
+                Some((i.range, sug))
+            })
+            .collect();
+        if fixes.is_empty() {
+            return 0;
+        }
+        let count = fixes.len();
+        let mut next = doc.text.clone();
+        // 뒤에서부터 적용해야 앞쪽 바이트 오프셋이 밀리지 않는다
+        for (range, rep) in fixes.into_iter().rev() {
+            let (rs, re) =
+                if rep.is_empty() && range.start > 0 && next.as_bytes()[range.start - 1] == b' ' {
+                    (range.start - 1, range.end)
+                } else {
+                    (range.start, range.end)
+                };
+            if rs <= re
+                && re <= next.len()
+                && next.is_char_boundary(rs)
+                && next.is_char_boundary(re)
+            {
+                next.replace_range(rs..re, &rep);
+            }
+        }
+        self.set_text(next, (0, 0));
+        self.spell_block_cache = None;
+        self.status = format!("맞춤법 {count}건을 교정했습니다");
+        count
     }
 
     // 문서 단위 실행 취소 / 다시 실행 (블록 나누기·합치기·서식·모두 바꾸기 포함)
@@ -4331,7 +4476,7 @@ impl App {
                             | Key::ArrowRight => nav_or_edit = true,
                             Key::Backspace | Key::Delete | Key::Tab => bs_del_tab = true,
                             Key::Escape => esc = true,
-                            Key::F1 | Key::F2 | Key::F3 | Key::F11 => fn_key = true,
+                            Key::F1 | Key::F2 | Key::F3 | Key::F7 | Key::F11 => fn_key = true,
                             _ => {}
                         }
                     }
@@ -4419,6 +4564,13 @@ impl App {
             if k(Modifiers::NONE, Key::F11) {
                 self.context_menu = None;
                 self.focus_mode = !self.focus_mode;
+            }
+            if k(Modifiers::SHIFT, Key::F7) {
+                self.context_menu = None;
+                self.toggle_spellcheck();
+            } else if k(Modifiers::NONE, Key::F7) {
+                self.context_menu = None;
+                self.open_spellcheck();
             }
         }
 
@@ -7041,6 +7193,57 @@ mod tests {
         assert!(h.state().docs["sub/note.md"]
             .text
             .contains("![image](images/paste-123.png)"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spellcheck_modal_fix_ignore_and_toggle() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_spellcheck");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let d2 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(960.0, 680.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.set_text("Hello teh world.\n\ntest  spacing.\n".to_string(), (0, 0));
+                app
+            });
+        h.run_steps(2);
+
+        // 1. Shift+F7로 실시간 밑줄 켜기/끄기 전환
+        assert!(h.state().spellcheck);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F7);
+        h.run_steps(2);
+        assert!(!h.state().spellcheck);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::F7);
+        h.run_steps(2);
+        assert!(h.state().spellcheck);
+
+        // 2. F7로 맞춤법 검사 모달 열기
+        h.key_press(egui::Key::F7);
+        h.run_steps(2);
+        assert!(matches!(h.state().dialog, Some(Dialog::Spellcheck { .. })));
+
+        // 3. 단어 무시 및 자동 교정 동작 확인
+        h.state_mut().ignore_spell_word("teh");
+        h.run_steps(2);
+        if let Some(Dialog::Spellcheck { issues, .. }) = &h.state().dialog {
+            assert!(issues.iter().all(|i| i.word != "teh"));
+            assert!(issues.iter().any(|i| i.kind == spell::IssueKind::Spacing));
+        } else {
+            panic!("Spellcheck modal should remain open");
+        }
+
+        let fixed = h.state_mut().apply_all_spell_fixes();
+        assert_eq!(fixed, 1);
+        assert_eq!(
+            h.state().doc().unwrap().text,
+            "Hello teh world.\n\ntest spacing.\n"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
