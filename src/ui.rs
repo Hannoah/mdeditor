@@ -26,11 +26,18 @@ impl eframe::App for App {
                         egui::ImeEvent::Preedit { text, .. } => {
                             ime_preedit = Some(!text.is_empty());
                         }
-                        egui::ImeEvent::Commit(_) => {
+                        _ => {
                             ime_preedit = Some(false);
                         }
-                        _ => {}
                     },
+                    egui::Event::PointerButton { pressed: true, .. }
+                        if ime_preedit != Some(true) =>
+                    {
+                        ime_preedit = Some(false);
+                    }
+                    egui::Event::Text(s) if !s.is_empty() && ime_preedit != Some(true) => {
+                        ime_preedit = Some(false);
+                    }
                     _ => {}
                 }
             }
@@ -1968,6 +1975,22 @@ fn clamp_caret_visible(
     sel: &mut Option<SelRange>,
     primary_cursor: &mut Option<CCursor>,
 ) {
+    // 단일 줄 범위 선택(Shift+Home 등)이 줄머리 숨김 기호("- ", "6. ", "# ")를 삼키지 않게 보정한다
+    if let Some(s) = sel.clone().filter(|s| s.start < s.end && !ime_composing) {
+        if line_start(buf, s.start.0) == line_start(buf, s.end.0) {
+            let snapped = snap_out_of_prefix(buf, s.start.0);
+            if snapped > s.start.0 && snapped <= s.end.0 {
+                let p_idx = primary_cursor.map_or(snapped, |p| p.index.0.max(snapped));
+                let s_idx = if p_idx == snapped { s.end.0 } else { snapped };
+                let cr = CCursorRange::two(CCursor::new(p_idx), CCursor::new(s_idx));
+                set_cursor_range(ctx, id, cr);
+                *sel = Some(cr.as_sorted_char_range());
+                *primary_cursor = Some(cr.primary);
+                ctx.request_repaint();
+            }
+        }
+        return;
+    }
     // 커서가 숨긴 목록 기호·코드 펜스 안으로 들어가면 보이는 자리로 옮긴다
     if let Some(s) = sel.clone().filter(|s| s.start == s.end && !ime_composing) {
         let c = s.start.0;
@@ -1980,7 +2003,16 @@ fn clamp_caret_visible(
             };
             c.clamp(a, b)
         });
-        let prev = last_sel.and_then(|(a, b)| (a == b && a >= base).then(|| a - base));
+        // 좌우 방향키로 이동할 때만 이전 위치(prev)를 참고해 줄바꿈 너머로 건너뛰고,
+        // 마우스 클릭·Home·상하 방향키 이동 시에는 해당 줄의 내용 시작(e)으로만 스냅한다.
+        let horiz_key = ctx.input(|i| {
+            !i.modifiers.shift && (i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowRight))
+        });
+        let prev = if horiz_key {
+            last_sel.and_then(|(a, b)| (a == b && a >= base).then(|| a - base))
+        } else {
+            None
+        };
         let to = clamp_hidden(buf, c1, prev);
         if to != c {
             let cr = CCursorRange::one(CCursor::new(to));
@@ -3050,6 +3082,37 @@ impl App {
                 ..Default::default()
             })
             .show(ui, |ui| {
+                let content_origin = ui.cursor().min;
+                let (p_pressed, p_down, p_released, p_origin) = ctx.input(|i| {
+                    (
+                        i.pointer.primary_pressed(),
+                        i.pointer.primary_down(),
+                        i.pointer.primary_released(),
+                        i.pointer.press_origin(),
+                    )
+                });
+                if !p_down && !p_released {
+                    self.drag_origin_rel = None;
+                    self.drag_anchor_block = None;
+                } else if let Some(origin) = p_origin {
+                    let on_fg = ctx
+                        .layer_id_at(origin)
+                        .is_some_and(|l| l.order == Order::Foreground);
+                    if area.contains(origin)
+                        && !on_fg
+                        && (p_pressed || self.drag_origin_rel.is_none())
+                    {
+                        self.drag_origin_rel = Some(origin - content_origin);
+                        if p_pressed {
+                            self.drag_anchor_block = None;
+                        }
+                    }
+                    if let (Some(rel), Some((_, anch_pos))) =
+                        (self.drag_origin_rel, self.drag_anchor.as_mut())
+                    {
+                        *anch_pos = content_origin + rel;
+                    }
+                }
                 let full = ui.available_width();
                 let w = if self.full_width {
                     (full - 72.0).max(200.0)
@@ -3223,6 +3286,7 @@ impl App {
                             ui,
                             &ctx,
                             area,
+                            content_origin,
                             menu_was_open,
                             &block_rects,
                             &mut consumed,
@@ -3283,6 +3347,14 @@ impl App {
             if s.len() < r.len() && s.starts_with('\n') {
                 let lead = s.bytes().take_while(|&b| b == b'\n').count();
                 s.drain(..lead);
+                shift_cursor(&ctx, Self::editor_id(&name, r.start), |c| {
+                    c.saturating_sub(lead)
+                });
+            }
+            if s.len() < r.len() && !s.is_empty() && s.ends_with('\n') {
+                while s.ends_with('\n') {
+                    s.pop();
+                }
             }
             let mut auto_code_caret = None;
             let mut next_cache = None;
@@ -3427,24 +3499,52 @@ impl App {
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         area: Rect,
+        content_origin: egui::Pos2,
         menu_was_open: bool,
         block_rects: &[(Range<usize>, Rect)],
         consumed: &mut bool,
         go_to: &mut Option<(usize, usize)>,
         go_click_pos: &mut Option<egui::Pos2>,
     ) {
-        let (primary_down, drag_active, origin_opt, pos_opt) = ctx.input(|i| {
-            let down = i.pointer.primary_down();
-            let active = !menu_was_open
-                && (down || i.pointer.primary_released())
-                && i.pointer.is_decidedly_dragging();
-            (
-                down,
-                active,
-                i.pointer.press_origin(),
-                i.pointer.interact_pos(),
-            )
-        });
+        let (primary_pressed, primary_down, primary_released, drag_active, origin_opt, pos_opt) =
+            ctx.input(|i| {
+                let pressed = i.pointer.primary_pressed();
+                let down = i.pointer.primary_down();
+                let released = i.pointer.primary_released();
+                let active =
+                    !menu_was_open && (down || released) && i.pointer.is_decidedly_dragging();
+                (
+                    pressed,
+                    down,
+                    released,
+                    active,
+                    i.pointer.press_origin(),
+                    i.pointer.interact_pos(),
+                )
+            });
+        if !primary_down && !primary_released {
+            self.drag_origin_rel = None;
+            self.drag_anchor_block = None;
+            return;
+        }
+        if let Some(origin) = origin_opt {
+            let on_fg = ctx
+                .layer_id_at(origin)
+                .is_some_and(|l| l.order == Order::Foreground);
+            if area.contains(origin)
+                && !on_fg
+                && (primary_pressed || self.drag_origin_rel.is_none())
+            {
+                self.drag_origin_rel = Some(origin - content_origin);
+                self.drag_anchor_block = block_rects
+                    .iter()
+                    .filter(|(r, _)| !r.is_empty())
+                    .find(|(_, rect)| {
+                        rect.bottom() + 2.0 >= origin.y && rect.top() - 2.0 <= origin.y
+                    })
+                    .map(|(r, _)| r.clone());
+            }
+        }
         if !drag_active || *consumed || self.dialog.is_some() {
             return;
         }
@@ -3457,24 +3557,61 @@ impl App {
         if !area.contains(origin) || on_fg {
             return;
         }
+        // 스크롤 시에도 드래그 시작점이 문서와 함께 이동하도록 content_origin 기준 좌표를 복원한다
+        let mut eff_origin = self
+            .drag_origin_rel
+            .map_or(origin, |rel| content_origin + rel);
+        if self.drag_anchor_block.is_none() {
+            self.drag_anchor_block = block_rects
+                .iter()
+                .filter(|(r, _)| !r.is_empty())
+                .find(|(_, rect)| {
+                    rect.bottom() + 2.0 >= eff_origin.y && rect.top() - 2.0 <= eff_origin.y
+                })
+                .or_else(|| {
+                    if pos.y <= eff_origin.y {
+                        block_rects
+                            .iter()
+                            .rev()
+                            .find(|(r, rect)| !r.is_empty() && rect.top() <= eff_origin.y)
+                    } else {
+                        block_rects
+                            .iter()
+                            .find(|(r, rect)| !r.is_empty() && rect.bottom() >= eff_origin.y)
+                    }
+                })
+                .map(|(r, _)| r.clone());
+        }
+        if let Some(anchor_r) = &self.drag_anchor_block {
+            if let Some((_, anchor_rect)) = block_rects
+                .iter()
+                .find(|(r, _)| !r.is_empty() && r.start == anchor_r.start)
+            {
+                eff_origin.y = eff_origin.y.clamp(anchor_rect.top(), anchor_rect.bottom());
+            }
+        }
         // 마우스 버튼을 누른 채 화면 위/아래 가장자리 방향으로 실제로 드래그할 때만 자동 스크롤한다
-        let edge = 24.0;
+        let edge = 36.0;
         if primary_down {
-            if pos.y < area.top() + edge && pos.y < origin.y - 8.0 {
-                ui.scroll_with_delta(vec2(0.0, (area.top() + edge - pos.y).min(18.0)));
+            if pos.y < area.top() + edge && pos.y < eff_origin.y - 8.0 {
+                ui.scroll_with_delta(vec2(0.0, (area.top() + edge - pos.y).min(24.0)));
                 ctx.request_repaint();
-            } else if pos.y > area.bottom() - edge && pos.y > origin.y + 8.0 {
-                ui.scroll_with_delta(vec2(0.0, -(pos.y - (area.bottom() - edge)).min(18.0)));
+            } else if pos.y > area.bottom() - edge && pos.y > eff_origin.y + 8.0 {
+                ui.scroll_with_delta(vec2(0.0, -(pos.y - (area.bottom() - edge)).min(24.0)));
                 ctx.request_repaint();
             }
         }
-        let y_min = origin.y.min(pos.y);
-        let y_max = origin.y.max(pos.y);
+        let y_min = eff_origin.y.min(pos.y);
+        let y_max = eff_origin.y.max(pos.y);
         let mut first_hit: Option<Range<usize>> = None;
         let mut last_hit: Option<Range<usize>> = None;
         let mut hit_count = 0usize;
+        let anchor_start = self.drag_anchor_block.as_ref().map(|r| r.start);
         for (r, rect) in block_rects {
-            if !r.is_empty() && rect.bottom() + 2.0 >= y_min && rect.top() - 2.0 <= y_max {
+            let is_anchor = anchor_start == Some(r.start);
+            if !r.is_empty()
+                && (is_anchor || (rect.bottom() + 2.0 >= y_min && rect.top() - 2.0 <= y_max))
+            {
                 if first_hit.is_none() {
                     first_hit = Some(r.clone());
                 }
@@ -3488,31 +3625,43 @@ impl App {
             self.block_sel_anchor = None;
             self.block_sel_head = None;
             if self.active != Some(b.start) {
-                self.drag_anchor = Some((b.start, origin));
+                self.drag_anchor = Some((b.start, eff_origin));
                 self.drag_last_pos = Some(pos);
-                // 드래그 시작 지점(origin)에 커서를 두어 블록 끝(b.end)으로 스크롤이 튀지 않게 한다
-                *go_click_pos = Some(origin);
+                // 드래그 시작 지점(eff_origin)에 커서를 두어 블록 끝(b.end)으로 스크롤이 튀지 않게 한다
+                *go_click_pos = Some(eff_origin);
                 *go_to = Some((b.start, b.start));
                 *consumed = true;
                 ctx.request_repaint();
-            } else if self.drag_anchor.is_some() {
+            } else {
+                self.drag_anchor = Some((b.start, eff_origin));
                 *go_click_pos = None;
                 self.drag_last_pos = Some(pos);
                 *consumed = true;
-            } else {
-                *go_click_pos = None;
             }
         } else if hit_count >= 2 {
-            let first = first_hit.unwrap();
-            let last = last_hit.unwrap();
+            let mut first = first_hit.unwrap();
+            let mut last = last_hit.unwrap();
+            if let Some((removed_at, n)) = self.leave_blank() {
+                let shift = |p: usize| {
+                    if p > removed_at {
+                        p.saturating_sub(n).max(removed_at)
+                    } else {
+                        p
+                    }
+                };
+                first = shift(first.start)..shift(first.end);
+                last = shift(last.start)..shift(last.end);
+                if let Some(ab) = &mut self.drag_anchor_block {
+                    *ab = shift(ab.start)..shift(ab.end);
+                }
+            }
             let start = first.start;
             let end = last.end;
-            let (anchor_blk, head_blk) = if pos.y >= origin.y {
+            let (anchor_blk, head_blk) = if pos.y >= eff_origin.y {
                 (first, last)
             } else {
                 (last, first)
             };
-            self.leave_blank();
             self.active = None;
             self.drag_anchor = None;
             self.drag_last_pos = None;
@@ -3923,6 +4072,7 @@ impl App {
                     &scheme,
                 );
                 let c = g.cursor_from_pos(click_pos - pre_pos);
+                let c = CCursor::new(snap_out_of_prefix(&buf, c.index.0));
                 let cr = CCursorRange::one(c);
                 set_cursor_range(ctx, id, cr);
                 pre_click = Some((pre_pos, click_pos));
@@ -4149,6 +4299,7 @@ impl App {
             ctx,
             id,
             r.start,
+            &buf,
             pre_click,
             &out,
             &mut sel,
@@ -4162,6 +4313,9 @@ impl App {
             &mut sel,
             &mut primary_cursor,
         );
+        if sel.as_ref().is_some_and(|s| s.start == s.end) {
+            self.ime_composing = false;
+        }
         let is_changed = buf != text[r.clone()];
         let (base, blen) =
             if self.active_char_cache.0 == r.start && self.active_char_cache.1 == doc_rev {
@@ -4394,6 +4548,7 @@ impl App {
         ctx: &egui::Context,
         id: egui::Id,
         r_start: usize,
+        buf: &str,
         pre_click: Option<(egui::Pos2, egui::Pos2)>,
         out: &egui::text_edit::TextEditOutput,
         sel: &mut Option<SelRange>,
@@ -4402,6 +4557,7 @@ impl App {
         if let Some((pre_pos, click_pos)) = pre_click {
             if (out.galley_pos - pre_pos).length_sq() > 0.25 {
                 let c = out.galley.cursor_from_pos(click_pos - out.galley_pos);
+                let c = CCursor::new(snap_out_of_prefix(buf, c.index.0));
                 let cr = CCursorRange::one(c);
                 set_cursor_range(ctx, id, cr);
                 *sel = Some(cr.as_sorted_char_range());
@@ -4414,6 +4570,7 @@ impl App {
                 self.pending_click_pos = None;
                 if self.drag_anchor.is_none() {
                     let c = out.galley.cursor_from_pos(click_pos - out.galley_pos);
+                    let c = CCursor::new(snap_out_of_prefix(buf, c.index.0));
                     let cr = CCursorRange::one(c);
                     set_cursor_range(ctx, id, cr);
                     *sel = Some(cr.as_sorted_char_range());
@@ -4430,8 +4587,12 @@ impl App {
                     self.drag_last_pos = Some(p_cur);
                 }
                 let cur_pos = self.drag_last_pos.unwrap_or(origin);
-                let c1 = out.galley.cursor_from_pos(origin - out.galley_pos);
-                let c2 = out.galley.cursor_from_pos(cur_pos - out.galley_pos);
+                let mut c1 = out.galley.cursor_from_pos(origin - out.galley_pos);
+                let mut c2 = out.galley.cursor_from_pos(cur_pos - out.galley_pos);
+                if line_start(buf, c1.index.0) == line_start(buf, c2.index.0) {
+                    c1 = CCursor::new(snap_out_of_prefix(buf, c1.index.0));
+                    c2 = CCursor::new(snap_out_of_prefix(buf, c2.index.0));
+                }
                 let cr = CCursorRange::two(c1, c2);
                 set_cursor_range(ctx, id, cr);
                 *sel = Some(cr.as_sorted_char_range());

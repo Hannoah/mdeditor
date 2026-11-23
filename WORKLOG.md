@@ -1,5 +1,17 @@
 # MDEditor 작업 기록
 
+## 2026-11-23 — v0.12.3: 블록 지정 스크롤 선택 유지 및 목록·빈 줄·IME 편집 버그 일괄 수정
+
+- **블록 지정 중 위로 스크롤 시 뒤쪽(시작점) 선택 끊김 수정 (`src/ui.rs`, `src/main.rs`)**:
+  - 드래그 시작 좌표를 화면 고정 좌표가 아닌 `ScrollArea` 콘텐츠 상대 좌표(`drag_origin_rel`)와 시작 블록(`drag_anchor_block`) 기준으로 추적해, 자동 스크롤이나 마우스 휠로 위·아래 스크롤하며 블록을 지정해도 시작점 선택이 끊기지 않고 유지되도록 수정.
+- **한글 IME 조합 플래그(`ime_composing`) 고착 해소 (`src/ui.rs`, `src/main.rs`)**:
+  - 한글 입력 후 같은 블록 내 다른 줄 클릭, 한/영 전환 후 일반 문자 입력(`Event::Text`), 단일 커서(`sel.0 == sel.1`) 상태에서 `ime_composing`이 즉시 해제되도록 수정해 `Backspace`/`Delete` 및 커서 보정이 가로막히지 않도록 개선.
+- **빈 목록·빈 줄 삭제 및 줄 경계 편집 정밀화 (`src/textops.rs`, `src/main.rs`, `src/ui.rs`)**:
+  - 빈 목록·인용 줄 바로 아래 줄(`6. ...` 등) 맨 앞에서 `Backspace`를 누르면 현재 줄 기호를 보존한 채 위의 빈 줄만 삭제하고, 윗줄 끝에서 `Delete`를 누르면 아래 빈 목록 줄을 삭제하거나 다음 줄의 숨김 기호를 벗겨 자연스럽게 병합하도록 개선.
+  - 블록 첫 줄·중간·끝의 빈 목록/인용 줄에서 `Enter`·`Backspace`·`Delete` 시 3중 줄바꿈(`\n\n\n`) 고아 빈 줄 생성을 방지하고, 블록 사이 빈 줄 슬롯 삭제 시 이웃 블록이 강제로 합쳐지지 않게(`\n\n` 유지) 수정 및 `backspace_blank_above` 추가.
+  - 줄 왼쪽 여백(불릿/번호 위) 재클릭 및 `Home` 입력 시 윗줄로 커서가 튀지 않게 `snap_out_of_prefix` 적용, 단일 줄 전체 선택 후 서식(`Ctrl+B`) 적용 시 줄머리 기호 보존.
+- **검증**: `drag_block_selection_while_scrolling_up_preserves_bottom_anchor` 등 회귀 테스트 추가, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`(57개 통과).
+
 ## 2026-11-23 — v0.12.2: 빈 목록 줄 커서 진입·삭제 버그 수정
 
 - **빈 목록 줄 커서 진입 불가 수정 (`src/textops.rs`)**:

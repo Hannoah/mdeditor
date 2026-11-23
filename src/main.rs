@@ -1003,6 +1003,8 @@ struct App {
     block_sel_head: Option<usize>,
     drag_anchor: Option<(usize, egui::Pos2)>, // 비활성 블록에서 시작한 드래그 기준점
     drag_last_pos: Option<egui::Pos2>,
+    drag_origin_rel: Option<egui::Vec2>, // 스크롤해도 드래그 시작 문서 위치를 유지하기 위한 ScrollArea 상대 좌표
+    drag_anchor_block: Option<Range<usize>>, // 다중 블록 드래그 시작 블록 범위 (스크롤 시 뒤쪽 선택 끊김 방지)
     last_sel: Option<Sel>,
     pending_sel: Option<Sel>,
     pending_byte_caret: Option<(usize, usize)>,
@@ -1146,6 +1148,8 @@ impl App {
             block_sel_head: None,
             drag_anchor: None,
             drag_last_pos: None,
+            drag_origin_rel: None,
+            drag_anchor_block: None,
             last_sel: None,
             pending_sel: None,
             pending_byte_caret: None,
@@ -2235,6 +2239,8 @@ impl App {
         self.block_sel_head = None;
         self.drag_anchor = None;
         self.drag_last_pos = None;
+        self.drag_origin_rel = None;
+        self.drag_anchor_block = None;
         self.last_sel = None;
         self.pending_sel = None;
         self.pending_byte_caret = None;
@@ -3188,8 +3194,9 @@ impl App {
         if line.trim_start().starts_with('>') && !(le == r_end && b == le) {
             let pfx = line[..hidden_prefix(line)].to_string();
             if line.trim() == ">" && ls > r.start {
-                // 빈 인용 줄에서 Enter → 그 줄을 지우고 인용 밖으로
-                text.replace_range(ls - 1..le, "");
+                // 빈 인용 줄에서 Enter → 그 줄을 지우고 인용 밖으로 ('\n\n\n' 3중 줄바꿈이 생기지 않게 정리)
+                let rm_end = if le < r_end { le + 1 } else { le };
+                text.replace_range(ls - 1..rm_end, "");
                 let c = char_len(&text[..ls - 1]);
                 self.set_text(text, (c, c));
                 self.split(ls - 1);
@@ -3220,14 +3227,26 @@ impl App {
             }
             let mut t2 = text;
             if ls == r.start {
-                // 첫 줄이 빈 항목이면 기호만 지우고 일반 문단으로
+                if le < r_end {
+                    // 다중 줄 블록의 첫 줄이 빈 항목이면 빈 첫 줄 전체를 지워 '\n\n\n' 고아 빈 줄을 막는다
+                    t2.replace_range(ls..le + 1, "");
+                    let (t3, c0) = renumber_block_at(&t2, char_len(&t2[..ls]));
+                    let next_le = line_end(&t3, c0);
+                    let next_line = &t3[byte_idx(&t3, c0)..byte_idx(&t3, next_le)];
+                    let caret = c0 + char_len(&next_line[..hidden_prefix(next_line)]);
+                    self.set_text(t3, (caret, caret));
+                    return true;
+                }
+                // 한 줄짜리 빈 항목이면 기호만 지우고 일반 문단으로
                 t2.replace_range(ls..le, "");
                 let c = char_len(&t2[..ls]);
                 self.set_text(t2, (c, c));
                 return true;
             }
-            t2.replace_range(ls - 1..le, "");
-            self.set_text(t2, sel);
+            let rm_end = if le < r_end { le + 1 } else { le };
+            t2.replace_range(ls - 1..rm_end, "");
+            let c = char_len(&t2[..ls - 1]);
+            self.set_text(t2, (c, c));
             self.split(ls - 1);
             return true;
         }
@@ -3320,6 +3339,49 @@ impl App {
         }
     }
 
+    // 바로 앞이 빈 줄 슬롯(prev.is_empty())이고 커서가 블록 내용 시작에 있으면,
+    // 블록의 목록·제목·코드 기호를 깨지 않고 위의 빈 줄만 먼저 지워 블록을 위로 당긴다.
+    fn backspace_blank_above(&mut self, ctx: &egui::Context) -> bool {
+        let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
+            return false;
+        };
+        if r.is_empty() {
+            return false;
+        }
+        let local = self.local_cursor(ctx, doc, &r);
+        if local.0 != local.1 {
+            return false;
+        }
+        let blk = &doc.text[r.clone()];
+        let vis0 = visible_bounds(blk).0;
+        if local.0 != 0 && local.0 != vis0 {
+            return false;
+        }
+        let vis_b = byte_idx(blk, vis0);
+        if blk[vis_b..].trim().is_empty() && !is_atomic_block(blk) {
+            return false;
+        }
+        let slots = self.doc_slots();
+        let Some(idx) = slot_index(&slots, &r) else {
+            return false;
+        };
+        let Some(prev) = idx.checked_sub(1).and_then(|i| slots.get(i)).cloned() else {
+            return false;
+        };
+        if !prev.is_empty() {
+            return false;
+        }
+        let rm_start = r.start.saturating_sub(2).max(prev.start);
+        let mut t2 = doc.text.clone();
+        t2.replace_range(rm_start..r.start, "");
+        let c = char_len(&t2[..rm_start]) + local.0;
+        self.blank = 0;
+        self.active = Some(rm_start);
+        self.set_text(t2, (c, c));
+        self.scroll_cursor = Some(None);
+        true
+    }
+
     // 블록 맨 앞 Backspace: 앞 빈 줄을 지우거나, 내용이 있으면 앞 블록과 합친다
     fn backspace_at_start(&mut self, ctx: &egui::Context) -> bool {
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
@@ -3361,8 +3423,31 @@ impl App {
             self.scroll_cursor = Some(None);
             return true;
         }
+        if r.is_empty() {
+            // 두 블록 사이 빈 줄 슬롯에서 Backspace: 뒤에 블록이 있으면 블록 구분자('\n\n') 2개는 반드시 남겨 두 블록이 합쳐지지 않게 한다
+            let total_nl = doc.text[prev.end..]
+                .bytes()
+                .take_while(|&b| b == b'\n')
+                .count();
+            let has_after = prev.end + total_nl < doc.text.len();
+            let rm = if has_after {
+                total_nl.saturating_sub(2).clamp(1, 2)
+            } else {
+                (r.start - prev.end).min(2)
+            };
+            let rm_start = r.start.saturating_sub(rm).max(prev.end);
+            let mut t2 = doc.text.clone();
+            t2.replace_range(rm_start..r.start, "");
+            let c = char_len(&t2[..prev.end]);
+            self.blank = 0;
+            self.active = Some(prev.start);
+            self.set_text(t2, (c, c));
+            self.scroll_cursor = Some(None);
+            return true;
+        }
         let pb = &doc.text[prev.clone()];
-        if !r.is_empty() && is_atomic_block(pb) {
+        let cur = &doc.text[r.clone()];
+        if is_atomic_block(pb) {
             // 바로 앞이 구분선·이미지면 노션처럼 그 블록을 지운다 (글자를 붙이면 원문이 드러난다)
             let mut t2 = doc.text.clone();
             t2.replace_range(prev.start..r.start, "");
@@ -3373,7 +3458,10 @@ impl App {
             self.scroll_cursor = Some(None);
             return true;
         }
-        if !r.is_empty() && is_unmergeable_block(pb) {
+        if is_unmergeable_block(pb)
+            || is_unmergeable_block(cur)
+            || (heading_level(pb.trim_start()).is_some() && cur.contains('\n'))
+        {
             return false;
         }
         let mut t2 = doc.text.clone();
@@ -3442,6 +3530,27 @@ impl App {
         }
         if !r.is_empty() && (is_unmergeable_block(cur) || is_unmergeable_block(nb)) {
             return false;
+        }
+        if !r.is_empty() {
+            let cur_last = cur.rsplit('\n').next().unwrap_or(cur);
+            let nb_first = nb.split('\n').next().unwrap_or(nb);
+            let both_lists =
+                list_marker_bytes(cur_last).is_some() && list_marker_bytes(nb_first).is_some();
+            let both_quotes = cur_last.trim_start().starts_with('>')
+                && nb_first.trim_start().starts_with('>')
+                && callout_kind(nb).is_none();
+            if both_lists || both_quotes {
+                // 두 목록(또는 두 인용) 블록 사이에서 Delete → 기호를 깨지 않고 두 블록을 한 블록('\n')으로 잇는다
+                let mut t2 = doc.text.clone();
+                t2.replace_range(r.end..next.start, "\n");
+                let c0 = char_len(&t2[..r.end]);
+                let (t3, c) = renumber_block_at(&t2, c0);
+                self.blank = 0;
+                self.active = Some(r.start);
+                self.set_text(t3, (c, c));
+                self.scroll_cursor = Some(None);
+                return true;
+            }
         }
         // 뒤 블록의 숨긴 기호(## · - · > 등)는 떼고 내용만 붙인다. 여러 줄 구조(목록·인용)는 깨지니 그대로 둔다
         let vis0 = if r.is_empty() {
@@ -4583,6 +4692,7 @@ impl App {
             let mut bs_del_tab = false;
             let mut block_ev = false;
             let mut has_ime_or_text = false;
+            let mut has_ime_preedit = false;
             let mut ime_still_composing = self.ime_composing;
             for e in &i.events {
                 match e {
@@ -4613,12 +4723,17 @@ impl App {
                         has_ime_or_text = true;
                         match ime {
                             egui::ImeEvent::Preedit { text, .. } => {
+                                has_ime_preedit = !text.is_empty();
                                 ime_still_composing = !text.is_empty();
                             }
-                            egui::ImeEvent::Commit(_) => {
+                            _ => {
                                 ime_still_composing = false;
                             }
-                            _ => {}
+                        }
+                    }
+                    egui::Event::PointerButton { pressed: true, .. } => {
+                        if !has_ime_preedit {
+                            ime_still_composing = false;
                         }
                     }
                     egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
@@ -4628,6 +4743,9 @@ impl App {
                     }
                     egui::Event::Text(s) if !s.is_empty() && s != "\n" && s != "\r" => {
                         has_ime_or_text = true;
+                        if !has_ime_preedit {
+                            ime_still_composing = false;
+                        }
                         if has_block_sel {
                             block_ev = true;
                         }
@@ -4826,6 +4944,16 @@ impl App {
                 return;
             }
         }
+        // egui TextEdit은 조합 중인 음절(Preedit)을 항상 비어 있지 않은 선택 범위(sel.0 < sel.1)로 유지한다.
+        // 선택 범위가 없다면(sel.0 == sel.1) 이미 조합이 끝난 상태이므로 잔여 플래그가 키 입력을 막지 않게 해제한다.
+        let mut ime_still_composing = ime_still_composing;
+        if ime_still_composing && !has_ime_or_text {
+            let sel = self.cursor(ctx);
+            if sel.0 == sel.1 {
+                self.ime_composing = false;
+                ime_still_composing = false;
+            }
+        }
         if ime_still_composing {
             if nav_or_edit && (has_ime_or_text || self.ime_composing) {
                 let enter = ctx.input(|i| i.modifiers.is_none() && i.key_pressed(Key::Enter));
@@ -4845,6 +4973,7 @@ impl App {
             });
             if bs
                 && (self.delete_hidden(ctx, true)
+                    || self.backspace_blank_above(ctx)
                     || self.backspace_list(ctx)
                     || self.backspace_at_start(ctx))
             {
@@ -7610,5 +7739,97 @@ mod tests {
         let (after_del, c_del) = delete_empty_list_line(s, empty_bullet_caret).unwrap();
         assert_eq!(after_del, "- 표준 제품 기능\n6. AI Governance");
         assert_eq!(c_del, char_len("- 표준 제품 기능\n6. "));
+
+        // 다음 줄("6. AI Governance")의 내용 시작에서 Backspace를 눌러도 현재 줄 기호("6. ")는 유지한 채 바로 위 빈 불릿("- ")만 삭제된다
+        let next_line_start_caret = char_len("- 표준 제품 기능\n- \n6. ");
+        let (after_next_bs, c_next_bs) = backspace_list_marker(s, next_line_start_caret).unwrap();
+        assert_eq!(after_next_bs, "- 표준 제품 기능\n6. AI Governance");
+        assert_eq!(c_next_bs, char_len("- 표준 제품 기능\n6. "));
+
+        // 바로 윗줄("- 표준 제품 기능") 끝에서 Delete를 눌러도 아래 빈 불릿("- ")만 깔끔하게 삭제된다
+        let prev_line_end_caret = char_len("- 표준 제품 기능");
+        let (after_prev_del, c_prev_del) = delete_empty_list_line(s, prev_line_end_caret).unwrap();
+        assert_eq!(after_prev_del, "- 표준 제품 기능\n6. AI Governance");
+        assert_eq!(c_prev_del, prev_line_end_caret);
+
+        // 다중 줄 블록의 첫 줄이 빈 불릿("- \n6. AI Governance")일 때 Backspace로 빈 첫 줄 전체가 삭제된다
+        let top_empty = "- \n6. AI Governance";
+        let (after_top_bs, c_top_bs) = backspace_list_marker(top_empty, 2).unwrap();
+        assert_eq!(after_top_bs, "6. AI Governance");
+        assert_eq!(c_top_bs, 3);
+
+        // 줄머리 기호가 포함된(0..len) 단일 줄 선택에 서식을 씌워도 기호 뒤 텍스트만 감싼다
+        let (wrapped, _) = wrap_selection("- 항목", (0, 4), "**", "**", "굵게");
+        assert_eq!(wrapped, "- **항목**");
+    }
+
+    #[test]
+    fn drag_block_selection_while_scrolling_up_preserves_bottom_anchor() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_drag_scroll_up");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut doc_text = String::new();
+        for i in 1..=25 {
+            doc_text.push_str(&format!("블록 {i}: 스크롤 테스트용 문단 내용입니다.\n\n"));
+        }
+        let d2 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 360.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.set_text(doc_text.clone(), (0, 0));
+                app
+            });
+        h.run_steps(3);
+        // 먼저 문서 맨 끝(블록 25)이 화면 아래쪽에 보이도록 커서 이동 후 비활성화
+        let last_block = h.state().doc().unwrap().blocks.last().unwrap().clone();
+        h.state_mut().go(last_block.start, last_block.end);
+        h.run_steps(4);
+        h.state_mut().deactivate();
+        h.run_steps(2);
+
+        let (anchor_block, bottom_pos) = h
+            .state()
+            .canvas_rects
+            .iter()
+            .rev()
+            .find(|(r, rect)| !r.is_empty() && rect.bottom() <= 340.0 && rect.top() >= 180.0)
+            .map(|(r, rect)| (r.clone(), rect.center()))
+            .expect("visible bottom block in viewport");
+        let top_edge_pos = egui::pos2(bottom_pos.x, 86.0);
+        // 아래쪽 블록에서 마우스 버튼을 누르고 위쪽 가장자리로 드래그하며 여러 프레임 위로 자동 스크롤
+        h.input_mut()
+            .events
+            .push(egui::Event::PointerMoved(bottom_pos));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: bottom_pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        for _ in 0..18 {
+            h.input_mut()
+                .events
+                .push(egui::Event::PointerMoved(top_edge_pos));
+            h.step();
+        }
+        let sel = h
+            .state()
+            .block_sel
+            .clone()
+            .expect("multi-block selection active while dragging up");
+        // 위로 스크롤하며 드래그해도 처음 드래그를 시작한 뒤쪽(아래쪽) 블록 끝(anchor_block.end)이 끊기지 않고 유지되어야 한다
+        assert_eq!(
+            sel.end, anchor_block.end,
+            "bottom anchor was cut off during upward scroll: sel={sel:?}, anchor={anchor_block:?}"
+        );
+        assert!(
+            sel.start < anchor_block.start,
+            "selection should extend upward: sel={sel:?}, anchor={anchor_block:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

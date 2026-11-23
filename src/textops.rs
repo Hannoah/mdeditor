@@ -35,11 +35,23 @@ pub(crate) fn replace_range(s: &str, (a, b): Sel, with: &str) -> String {
 // 이미 같은 기호로 감싸져 있으면 벗긴다(토글). 링크는 바로 주소를 칠 수 있게 URL 자리를 선택한다.
 pub(crate) fn wrap_selection(
     s: &str,
-    (a, b): Sel,
+    (mut a, b): Sel,
     pre: &str,
     suf: &str,
     placeholder: &str,
 ) -> (String, Sel) {
+    if a < b {
+        let ls = line_start(s, a);
+        let le = line_end(s, a);
+        let line = &s[byte_idx(s, ls)..byte_idx(s, le)];
+        let m = hidden_prefix(line);
+        if m > 0 && !is_collapsed_line(line) {
+            let content_start = ls + char_len(&line[..m]);
+            if a < content_start && b > content_start {
+                a = content_start;
+            }
+        }
+    }
     let (ba, bb) = (byte_idx(s, a), byte_idx(s, b));
     let (before, sel, after) = (&s[..ba], &s[ba..bb], &s[bb..]);
     let (pl, sl) = (char_len(pre), char_len(suf));
@@ -571,6 +583,29 @@ pub(crate) fn visible_bounds(block: &str) -> (usize, usize) {
     })
 }
 
+// 클릭·드래그·Home 등으로 놓인 커서가 숨긴 줄머리 기호("- ", "6. ", "# ", "> " 등) 안에 있으면 내용 시작으로 옮긴다
+pub(crate) fn snap_out_of_prefix(s: &str, c: usize) -> usize {
+    for (a, e, pre) in hidden_runs(s) {
+        if pre && c >= a && c < e {
+            return e;
+        }
+    }
+    c
+}
+
+// 다중 줄 블록 안에서 뒤 공백이 빠진 채 남은 빈 목록/인용 기호 줄("-", "*", "+", ">", "1.", "- [ ]")인지 판별
+fn is_bare_empty_marker_line(line: &str) -> bool {
+    let t = line.trim();
+    if matches!(
+        t,
+        "-" | "*" | "+" | ">" | "- [ ]" | "- [x]" | "- [X]" | "* [ ]" | "* [x]" | "* [X]"
+    ) {
+        return true;
+    }
+    let d = t.bytes().take_while(u8::is_ascii_digit).count();
+    (1..10).contains(&d) && matches!(&t[d..], "." | ")")
+}
+
 // 커서가 숨긴 기호 안에 들어가면 보이는 자리로 옮긴다.
 // 줄머리 기호: 내용 시작으로 (내용 시작에서 왼쪽으로 온 거라면 윗줄 끝으로).
 // 인라인 기호: 움직이던 방향의 끝으로, 화면상 제자리걸음이면 한 글자 더 간다.
@@ -639,18 +674,51 @@ pub(crate) fn delete_near_hidden(
 }
 
 // 목록·제목 내용 맨 앞에서 Backspace (노션식): 제목은 일반 문단으로, 들여쓴 항목은 한 단계 내어쓰기,
-// 블록 첫 항목은 기호만 지워 일반 문단으로, 그 밖의 항목은 윗줄과 합친다.
+// 블록 첫 항목은 기호만 지워 일반 문단으로(다중 줄 블록의 첫 줄이 빈 항목이면 그 빈 줄 자체를 삭제),
+// 바로 윗줄이 빈 목록·인용 줄이면 현재 줄 기호는 유지한 채 윗 빈 줄만 지우고, 그 밖의 항목은 윗줄과 합친다.
 pub(crate) fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)> {
     let ls = line_start(s, c);
-    let line = &s[byte_idx(s, ls)..byte_idx(s, line_end(s, c))];
+    let le = line_end(s, c);
+    let lb = byte_idx(s, ls);
+    let leb = byte_idx(s, le);
+    let line = &s[lb..leb];
+    let bstart = s[..lb].rfind("\n\n").map_or(0, |i| i + 2);
+    let bend = s[leb..].find("\n\n").map_or(s.len(), |i| leb + i);
     let m = hidden_prefix(line);
-    if m == 0 || c != ls + char_len(&line[..m]) {
+    if m == 0 {
+        if bstart < bend
+            && s[bstart..bend].contains('\n')
+            && is_bare_empty_marker_line(line)
+            && c == le
+        {
+            if lb == bstart && leb < bend {
+                let out = replace_range(s, (ls, le + 1), "");
+                let next_le = line_end(&out, ls);
+                let next_line = &out[byte_idx(&out, ls)..byte_idx(&out, next_le)];
+                let next_m = hidden_prefix(next_line);
+                let caret = ls + char_len(&next_line[..next_m]);
+                return Some(renumber_block_at(&out, caret));
+            } else if lb > bstart {
+                let out = replace_range(s, (ls - 1, le), "");
+                return Some(renumber_block_at(&out, ls - 1));
+            }
+        }
+        return None;
+    }
+    let m_chars = char_len(&line[..m]);
+    if c != ls + m_chars {
         return None;
     }
     let t = line.trim_start();
-    let lb = byte_idx(s, ls);
-    let bstart = s[..lb].rfind("\n\n").map_or(0, |i| i + 2);
-    let bend = s[lb..].find("\n\n").map_or(s.len(), |i| lb + i);
+    let is_empty_item = line[m..].trim().is_empty();
+    let prev_is_empty_item = lb > bstart && {
+        let prev_le = ls - 1;
+        let prev_ls = line_start(s, prev_le);
+        let prev_line = &s[byte_idx(s, prev_ls)..byte_idx(s, prev_le)];
+        let pm = hidden_prefix(prev_line);
+        (pm > 0 && !is_collapsed_line(prev_line) && prev_line[pm..].trim().is_empty())
+            || is_bare_empty_marker_line(prev_line)
+    };
     if t.starts_with('>') {
         // 인용·알림 상자의 첫 줄 맨 앞 → 블록 전체를 일반 문단으로 / 그 밖의 줄 → 윗줄과 합치기
         let block = &s[bstart..bend];
@@ -671,6 +739,14 @@ pub(crate) fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)
                 .collect();
             let out = format!("{}{}{}", &s[..bstart], plain.join("\n"), &s[bend..]);
             return Some((out, char_len(&s[..bstart])));
+        }
+        if is_empty_item {
+            return Some((replace_range(s, (ls - 1, le), ""), ls - 1));
+        }
+        if prev_is_empty_item {
+            let prev_ls = line_start(s, ls - 1);
+            let out = replace_range(s, (prev_ls, ls), "");
+            return Some((out, prev_ls + m_chars));
         }
         return Some((replace_range(s, (ls - 1, c), ""), ls - 1));
     }
@@ -693,31 +769,95 @@ pub(crate) fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)
     if line.starts_with(' ') {
         return indent_list(s, (c, c), true).map(|(t, sel)| (t, sel.0));
     }
-    let first = ls == 0 || s[..byte_idx(s, ls)].ends_with("\n\n");
-    if first {
-        Some((replace_range(s, (ls, ls + m), ""), ls))
-    } else {
-        Some((replace_range(s, (ls - 1, ls + m), ""), ls - 1))
+    if lb == bstart {
+        if is_empty_item && leb < bend {
+            // 다중 줄 블록의 첫 줄이 빈 목록 줄("- \n6. ...")이면 빈 첫 줄 전체를 삭제해 '\n\n\n' 고아 빈 줄이 생기지 않게 한다
+            let out = replace_range(s, (ls, le + 1), "");
+            let next_le = line_end(&out, ls);
+            let next_line = &out[byte_idx(&out, ls)..byte_idx(&out, next_le)];
+            let next_m = hidden_prefix(next_line);
+            let caret = ls + char_len(&next_line[..next_m]);
+            return Some(renumber_block_at(&out, caret));
+        }
+        let out = replace_range(s, (ls, le.min(c)), "");
+        return Some(renumber_block_at(&out, ls));
     }
+    if is_empty_item {
+        let out = replace_range(s, (ls - 1, le), "");
+        return Some(renumber_block_at(&out, ls - 1));
+    }
+    if prev_is_empty_item {
+        // 바로 윗줄이 빈 목록/인용 줄("- ")이면 현재 줄의 기호("6. " 등)는 보존하고 위의 빈 줄만 지운다
+        let prev_ls = line_start(s, ls - 1);
+        let out = replace_range(s, (prev_ls, ls), "");
+        return Some(renumber_block_at(&out, prev_ls + m_chars));
+    }
+    let out = replace_range(s, (ls - 1, c), "");
+    Some(renumber_block_at(&out, ls - 1))
 }
 
-// 빈 목록 줄("- ", "1. ", "- [ ] ")에서 Delete: 다음 줄과 기호를 섞지 않고 빈 목록 줄 자체를 깔끔히 지운다.
+// 빈 목록·인용 줄("- ", "1. ", "- [ ] ", "> ")에서 Delete, 또는 줄 끝에서 다음 목록·인용 줄과 합치는 Delete:
+// 다음 줄의 숨긴 기호가 본문에 노출되지 않게 정리하고 번호를 다시 매긴다.
 pub(crate) fn delete_empty_list_line(s: &str, c: usize) -> Option<(String, usize)> {
     let ls = line_start(s, c);
     let le = line_end(s, c);
-    let line = &s[byte_idx(s, ls)..byte_idx(s, le)];
-    let m = list_marker_bytes(line)?;
-    if line[m..].trim().is_empty() && c >= ls + char_len(&line[..m]) {
-        if le < char_len(s) {
-            // 뒤에 줄이 있으면 "빈 목록 줄 + \n"을 지우고 다음 줄 내용 시작으로 커서를 둔다
+    let lb = byte_idx(s, ls);
+    let leb = byte_idx(s, le);
+    let line = &s[lb..leb];
+    let bstart = s[..lb].rfind("\n\n").map_or(0, |i| i + 2);
+    let bend = s[leb..].find("\n\n").map_or(s.len(), |i| leb + i);
+    let t = line.trim_start();
+    let m = list_marker_bytes(line)
+        .or_else(|| (t.starts_with('>') && callout_kind(t).is_none()).then(|| hidden_prefix(line)));
+    let is_empty_marked =
+        m.is_some_and(|m| line[m..].trim().is_empty() && c >= ls + char_len(&line[..m]));
+    let is_bare_empty = m.is_none()
+        && bstart < bend
+        && s[bstart..bend].contains('\n')
+        && is_bare_empty_marker_line(line);
+    if is_empty_marked || is_bare_empty {
+        if leb < bend {
+            // 같은 블록 안 뒤에 줄이 있으면 "빈 목록 줄 + \n"을 지우고 다음 줄 내용 시작으로 커서를 둔다
             let out = replace_range(s, (ls, le + 1), "");
             let next_line_end = line_end(&out, ls);
             let next_line = &out[byte_idx(&out, ls)..byte_idx(&out, next_line_end)];
             let next_m = hidden_prefix(next_line);
             let caret = ls + char_len(&next_line[..next_m]);
-            return Some((out, caret));
+            return Some(renumber_block_at(&out, caret));
         }
-        return backspace_list_marker(s, ls + char_len(&line[..m]));
+        if lb > bstart {
+            let block = &s[bstart..bend];
+            let after_title =
+                callout_kind(block).is_some() && !s[bstart..lb.saturating_sub(1)].contains('\n');
+            if !after_title {
+                let out = replace_range(s, (ls - 1, le), "");
+                return Some(renumber_block_at(&out, ls - 1));
+            }
+        }
+        if let Some(m) = m {
+            return backspace_list_marker(s, ls + char_len(&line[..m]));
+        }
+    }
+    // 줄 맨 끝에서 Delete: 같은 블록의 바로 다음 줄이 빈 목록/인용 줄이면 그 줄을 지우고,
+    // 내용이 있는 목록/인용 줄이면 숨긴 줄머리 기호를 벗겨 자연스럽게 이어 붙인다.
+    if c == le && leb < bend {
+        let next_ls = le + 1;
+        let next_le = line_end(s, next_ls);
+        let next_line = &s[byte_idx(s, next_ls)..byte_idx(s, next_le)];
+        if is_bare_empty_marker_line(next_line) {
+            let out = replace_range(s, (le, next_le), "");
+            return Some(renumber_block_at(&out, le));
+        }
+        let next_m = hidden_prefix(next_line);
+        if next_m > 0 && !is_collapsed_line(next_line) {
+            if next_line[next_m..].trim().is_empty() {
+                let out = replace_range(s, (le, next_le), "");
+                return Some(renumber_block_at(&out, le));
+            }
+            let next_m_chars = char_len(&next_line[..next_m]);
+            let out = replace_range(s, (le, next_ls + next_m_chars), "");
+            return Some(renumber_block_at(&out, le));
+        }
     }
     None
 }
