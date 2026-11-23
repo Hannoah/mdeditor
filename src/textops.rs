@@ -144,19 +144,26 @@ pub(crate) fn clear_inline_formatting(s: &str) -> String {
     lines_out.join("\n")
 }
 
-// Tab / Shift+Tab: 선택된 줄 전체를 2칸 들여쓰기·내어쓰기
+// Tab / Shift+Tab: 선택된 줄 전체를 2칸 들여쓰기·내어쓰기 (탭 문자 '\t' 내어쓰기 및 다중 블록 빈 줄 보존 지원)
 pub(crate) fn indent_lines(s: &str, (a, b): Sel, outdent: bool) -> (String, Sel) {
     let (ls, le) = (line_start(s, a), line_end(s, b));
     let block = &s[byte_idx(s, ls)..byte_idx(s, le)];
+    let raw_lines: Vec<&str> = block.split('\n').collect();
+    let multi = raw_lines.len() > 1;
     let mut first_delta: isize = 0;
-    let lines: Vec<String> = block
-        .split('\n')
+    let lines: Vec<String> = raw_lines
+        .iter()
         .enumerate()
         .map(|(i, l)| {
-            let (new, delta) = if outdent {
-                let n = l.len() - l.trim_start_matches(' ').len();
-                let n = n.min(2);
-                (l[n..].to_string(), -(n as isize))
+            let (new, delta) = if multi && l.is_empty() {
+                (String::new(), 0)
+            } else if outdent {
+                if let Some(rest) = l.strip_prefix('\t') {
+                    (rest.to_string(), -1)
+                } else {
+                    let n = (l.len() - l.trim_start_matches(' ').len()).min(2);
+                    (l[n..].to_string(), -(n as isize))
+                }
             } else {
                 (format!("  {l}"), 2)
             };
@@ -173,9 +180,9 @@ pub(crate) fn indent_lines(s: &str, (a, b): Sel, outdent: bool) -> (String, Sel)
     let nb = if a == b {
         na
     } else {
-        (b as isize + (new_le as isize - le as isize)) as usize
+        (b as isize + (new_le as isize - le as isize)).max(na as isize) as usize
     };
-    (out, (na, nb))
+    (out, (na.min(new_le), nb.min(new_le)))
 }
 
 // 목록 줄의 (들여쓰기, 내용 시작 열). CommonMark에서 하위 항목은 부모의 "내용 시작 열"까지
@@ -791,16 +798,38 @@ pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String
             .take_while(|l| !l.trim().is_empty())
             .filter_map(|l| list_cols(l))
     };
+    let mut merge_blank_at: Option<usize> = None;
     let target = if outdent {
         above().find(|&(i, _)| i < ind).map_or(0, |(i, _)| i)
     } else {
         match above().find(|&(i, _)| i <= ind) {
             Some((i, col)) if i == ind => col,
-            _ => ind, // 형제 없음: 그대로
+            Some(_) => ind,
+            None if la >= 2 && orig[la - 1].trim().is_empty() => {
+                // 바로 위 블록이 목록(예: "1. 항목\n\n- 하위")이면 빈 줄을 합쳐 하위 계층으로 들여쓴다
+                match orig[..la - 1]
+                    .iter()
+                    .rev()
+                    .take_while(|l| !l.trim().is_empty())
+                    .filter_map(|l| list_cols(l))
+                    .find(|&(i, _)| i <= ind)
+                {
+                    Some((i, col)) if i == ind => {
+                        merge_blank_at = Some(la - 1);
+                        col
+                    }
+                    _ => ind,
+                }
+            }
+            None => ind, // 형제 없음: 그대로
         }
     };
     let delta = target as isize - ind as isize;
     if delta == 0 {
+        if outdent && la < lb {
+            // 첫 줄은 최상위(0칸)지만 선택에 포함된 아래 하위 항목들은 내어쓰기할 수 있다
+            return None;
+        }
         return Some((s.to_string(), (a, b)));
     }
     let lead = |l: &str| l.len() - l.trim_start_matches(' ').len();
@@ -811,6 +840,9 @@ pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String
     }
     let mut lines: Vec<String> = orig.iter().map(|l| l.to_string()).collect();
     for l in &mut lines[la..=end] {
+        if l.is_empty() {
+            continue;
+        }
         if delta > 0 {
             l.insert_str(0, &" ".repeat(delta as usize));
         } else {
@@ -818,21 +850,31 @@ pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String
             l.drain(..n);
         }
     }
-    let run_start = (0..=la)
+    let (new_la, new_lb, new_end) = if let Some(blank_idx) = merge_blank_at {
+        lines.remove(blank_idx);
+        (la - 1, lb - 1, end - 1)
+    } else {
+        (la, lb, end)
+    };
+    let run_start = (0..=new_la)
         .rev()
         .find(|&i| i == 0 || lines[i - 1].trim().is_empty())
         .unwrap_or(0);
-    let run_end = (end..lines.len())
+    let run_end = (new_end..lines.len())
         .find(|&i| i + 1 == lines.len() || lines[i + 1].trim().is_empty())
-        .unwrap_or(end);
+        .unwrap_or(new_end);
     renumber_lists(&mut lines[run_start..=run_end]);
     // 커서: 같은 줄에서 줄 길이 변화만큼 이동 (변화는 모두 내용 앞에서 일어난다)
-    let at = |line: usize, col: usize| {
-        let diff = char_len(&lines[line]) as isize - char_len(orig[line]) as isize;
-        let col = (col as isize + diff).clamp(0, char_len(&lines[line]) as isize) as usize;
-        lines[..line].iter().map(|l| char_len(l) + 1).sum::<usize>() + col
+    let at = |orig_line: usize, new_line: usize, col: usize| {
+        let diff = char_len(&lines[new_line]) as isize - char_len(orig[orig_line]) as isize;
+        let col = (col as isize + diff).clamp(0, char_len(&lines[new_line]) as isize) as usize;
+        lines[..new_line]
+            .iter()
+            .map(|l| char_len(l) + 1)
+            .sum::<usize>()
+            + col
     };
-    let sel = (at(la, ca), at(lb, cb));
+    let sel = (at(la, new_la, ca), at(lb, new_lb, cb));
     Some((lines.join("\n"), sel))
 }
 
@@ -1002,10 +1044,19 @@ pub(crate) fn convert_lines_kind(s: &str, (a, b): Sel, kind: BlockKind) -> (Stri
             .any(|l| !l.trim().is_empty() || lines_vec.len() == 1);
     let target = if all_same { BlockKind::Paragraph } else { kind };
     let mut first_delta: isize = 0;
+    let mut num = 0usize;
+    let multi = lines_vec.len() > 1;
     let out_lines: Vec<String> = lines_vec
         .iter()
         .enumerate()
         .map(|(i, l)| {
+            if multi && l.trim().is_empty() {
+                if i == 0 {
+                    first_delta = 0;
+                }
+                return (*l).to_string();
+            }
+            num += 1;
             let (indent, _, marker) = detect_line_kind(l);
             let body = &l[indent + marker..];
             let keep_indent = if matches!(target, BlockKind::Heading(_)) {
@@ -1018,7 +1069,7 @@ pub(crate) fn convert_lines_kind(s: &str, (a, b): Sel, kind: BlockKind) -> (Stri
                 BlockKind::Heading(n) => format!("{} ", "#".repeat(n.clamp(1, 6))),
                 BlockKind::Todo => "- [ ] ".to_string(),
                 BlockKind::Bullet => "- ".to_string(),
-                BlockKind::Numbered => format!("{}. ", i + 1),
+                BlockKind::Numbered => format!("{num}. "),
                 BlockKind::Quote => "> ".to_string(),
                 _ => String::new(),
             };
@@ -1032,7 +1083,11 @@ pub(crate) fn convert_lines_kind(s: &str, (a, b): Sel, kind: BlockKind) -> (Stri
     let new_block = out_lines.join("\n");
     let out = replace_range(s, (ls, le), &new_block);
     let new_le = ls + char_len(&new_block);
-    let na = (a as isize + first_delta).max(ls as isize) as usize;
+    let na = if a != b && a == ls {
+        ls
+    } else {
+        (a as isize + first_delta).max(ls as isize) as usize
+    };
     let nb = if a == b {
         na
     } else {
@@ -1315,7 +1370,17 @@ pub(crate) fn md_to_html(md: &str) -> String {
         | Options::ENABLE_MATH
         | Options::ENABLE_GFM;
     let src = preprocess(md);
-    // 문서 속 원시 HTML(<script>, onerror= 등)은 실행되지 않게 글자 그대로 보여 주고, javascript: 링크는 막는다
+    let is_dangerous_url = |url: &str| {
+        let cleaned: String = url
+            .chars()
+            .filter(|c| !c.is_ascii_control() && !c.is_whitespace())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        cleaned.starts_with("javascript:")
+            || cleaned.starts_with("vbscript:")
+            || cleaned.starts_with("data:text/html")
+    };
+    // 문서 속 원시 HTML(<script>, onerror= 등)은 실행되지 않게 글자 그대로 보여 주고, 위험한 링크 스킴은 막는다
     let events = Parser::new_ext(&src, opts).map(|ev| match ev {
         Event::Html(t) | Event::InlineHtml(t) => Event::Text(t),
         Event::Start(Tag::Link {
@@ -1323,18 +1388,12 @@ pub(crate) fn md_to_html(md: &str) -> String {
             dest_url,
             title,
             id,
-        }) if dest_url
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("javascript:") =>
-        {
-            Event::Start(Tag::Link {
-                link_type,
-                dest_url: "#".into(),
-                title,
-                id,
-            })
-        }
+        }) if is_dangerous_url(&dest_url) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: "#".into(),
+            title,
+            id,
+        }),
         ev => ev,
     });
     let mut body = String::new();
@@ -1455,7 +1514,10 @@ pub(crate) fn parse_table_sep(cell: &str) -> Option<TableAlign> {
     let t = cell.trim();
     let left = t.starts_with(':');
     let right = t.ends_with(':');
-    let mid = &t[usize::from(left)..t.len().saturating_sub(usize::from(right))];
+    if t.len() <= usize::from(left) + usize::from(right) {
+        return None;
+    }
+    let mid = &t[usize::from(left)..t.len() - usize::from(right)];
     if mid.is_empty() || !mid.bytes().all(|b| b == b'-') {
         return None;
     }

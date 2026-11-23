@@ -183,6 +183,9 @@ impl Graph {
 
 fn parse_hex_color(s: &str) -> Option<Color32> {
     let hex = s.trim().strip_prefix('#')?;
+    if !hex.is_ascii() {
+        return None;
+    }
     match hex.len() {
         3 => {
             let r = u8::from_str_radix(&hex[0..1], 16).ok()? * 17;
@@ -275,7 +278,7 @@ fn parse_node_token(raw: &str, is_target: bool) -> Option<ParsedNodeToken> {
     }
     let rest = &s[pos..];
     let patterns: &[(&str, &str, NodeShape)] = &[
-        ("(((", "))", NodeShape::DoubleCircle),
+        ("(((", ")))", NodeShape::DoubleCircle),
         ("([", "])", NodeShape::Stadium),
         ("[[", "]]", NodeShape::Subroutine),
         ("[(", ")]", NodeShape::Cylinder),
@@ -330,7 +333,7 @@ fn find_first_connector(s: &str) -> Option<ParsedConn> {
             if b == quote_ch {
                 in_quote = false;
             }
-            i += 1;
+            i += s[i..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
         if b == b'"' || b == b'\'' {
@@ -350,7 +353,7 @@ fn find_first_connector(s: &str) -> Option<ParsedConn> {
             continue;
         }
         if bracket_depth > 0 {
-            i += 1;
+            i += s[i..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
 
@@ -438,7 +441,7 @@ fn find_first_connector(s: &str) -> Option<ParsedConn> {
                 });
             }
         }
-        i += 1;
+        i += s[i..].chars().next().map_or(1, char::len_utf8);
     }
     None
 }
@@ -1466,14 +1469,18 @@ fn parse_sequence(code: &str) -> ParsedSequence {
         }
         if lower.starts_with("note ") {
             if let Some((head, body)) = t[5..].split_once(':') {
-                let head_l = head.to_ascii_lowercase();
-                let target_str = head_l
-                    .strip_prefix("over ")
-                    .or_else(|| head_l.strip_prefix("right of "))
-                    .or_else(|| head_l.strip_prefix("left of "))
-                    .unwrap_or(head.trim());
-                let offset_idx = head.len() - target_str.len();
-                let raw_targets = &head[offset_idx..];
+                let head_trim = head.trim();
+                let head_l = head_trim.to_ascii_lowercase();
+                let strip_len = if head_l.starts_with("over ") {
+                    5
+                } else if head_l.starts_with("right of ") {
+                    9
+                } else if head_l.starts_with("left of ") {
+                    8
+                } else {
+                    0
+                };
+                let raw_targets = &head_trim[strip_len..];
                 let mut ids = raw_targets.split(',').map(str::trim);
                 if let Some(first_id) = ids.next().filter(|s| !s.is_empty()) {
                     let p1 = ensure_p(first_id, None, &mut parts, &mut part_map);
@@ -1754,7 +1761,7 @@ fn parse_pie(code: &str) -> ParsedPie {
         }
         if let Some((lbl, val_str)) = t.rsplit_once(':') {
             if let Ok(v) = val_str.trim().parse::<f32>() {
-                if v > 0.0 {
+                if v.is_finite() && v > 0.0 {
                     slices.push((clean_label(lbl), v));
                 }
             }
@@ -1927,5 +1934,23 @@ graph LR
         let pie = parse_pie("pie   title İstanbul İ\n  \"İ\" : 40\n  \"B\" : 60");
         assert_eq!(pie.title, "İstanbul İ");
         assert_eq!(pie.slices.len(), 2);
+    }
+
+    #[test]
+    fn mermaid_handles_korean_ids_invalid_hex_double_circle_and_non_finite_pie() {
+        let g =
+            parse_graph("graph TD\n  시작 --> 끝(((완료)))\n  style 시작 fill:#가,stroke:#가나");
+        assert_eq!(g.nodes.len(), 2);
+        assert_eq!(g.edges.len(), 1);
+        assert_eq!(g.nodes[1].label, "완료");
+        assert!(matches!(g.nodes[1].shape, NodeShape::DoubleCircle));
+        assert!(g.nodes[0].fill.is_none());
+
+        let seq = parse_sequence("sequenceDiagram\n  Note 가 : 메모");
+        assert_eq!(seq.events.len(), 1);
+
+        let pie = parse_pie("pie\n  \"정상\" : 10\n  \"무한\" : inf\n  \"NaN\" : NaN");
+        assert_eq!(pie.slices.len(), 1);
+        assert_eq!(pie.total, 10.0);
     }
 }

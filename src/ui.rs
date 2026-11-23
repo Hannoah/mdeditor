@@ -36,11 +36,16 @@ impl eframe::App for App {
             }
             (close_req, win_focused, pasted, ime_preedit)
         });
+        if let Some(comp) = ime_preedit {
+            self.ime_composing = comp;
+        }
         if close_req && !self.allow_close {
             self.save_all();
             if self.any_dirty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.dialog = Some(Dialog::Unsaved(After::Close));
+                if !matches!(self.dialog, Some(Dialog::Conflict(_))) {
+                    self.dialog = Some(Dialog::Unsaved(After::Close));
+                }
             }
         }
         if win_focused {
@@ -106,9 +111,6 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(Frame::new().fill(p.bg))
             .show(ui, |ui| self.canvas(ui, &p));
-        if let Some(comp) = ime_preedit {
-            self.ime_composing = comp;
-        }
 
         if self.focus_mode {
             let sr = ctx.content_rect();
@@ -1312,6 +1314,276 @@ struct BlockOut {
 }
 
 #[allow(clippy::too_many_arguments)]
+// 목록·인용·접기·각주처럼 줄머리 들여쓰기(내어쓰기)가 필요한 블록인지 판별한다.
+// 일반 문단·제목·코드·수식 블록은 단일 LayoutJob 경로를 그대로 쓴다.
+fn needs_hanging_layout(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if is_math_block(text)
+        || ((trimmed.starts_with("```") || trimmed.starts_with("~~~")) && text.contains('\n'))
+    {
+        return false;
+    }
+    if is_toggle_block(text) {
+        return true;
+    }
+    let callout = callout_kind(text).is_some();
+    let mut fence = false;
+    for line in text.split('\n') {
+        let bare = line.trim_end_matches('\r');
+        let t = bare.trim_start();
+        let is_fence = t.starts_with("```") || t.starts_with("~~~");
+        if is_fence || fence {
+            fence ^= is_fence;
+            continue;
+        }
+        if list_marker_bytes(bare).is_some()
+            || (!callout && t.starts_with('>'))
+            || footnote_def(bare).is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+// 목록·인용·접기·각주 블록의 편집 Galley를 줄 단위로 조합해
+// 자동 줄바꿈된 2번째 줄 이하도 보기 화면(render_md_stream)과 동일한
+// 내어쓰기(hanging indent)·줄바꿈 폭·줄간격(body*1.6)·항목 간격(LIST_ROW_GAP)을 유지한다.
+#[allow(clippy::too_many_arguments)]
+fn layout_hanging_galley(
+    ctx: &egui::Context,
+    text: &str,
+    body: f32,
+    p: &Pal,
+    wrap: f32,
+    folded: bool,
+    scheme: &str,
+) -> std::sync::Arc<egui::Galley> {
+    use egui::text::{LayoutJob, TextFormat};
+    let fmt = |size: f32, family: FontFamily, color: Color32| TextFormat {
+        font_id: FontId::new(size, family),
+        color,
+        line_height: Some(size * 1.6),
+        ..Default::default()
+    };
+    let collapsed = TextFormat {
+        font_id: FontId::new(0.1, FontFamily::Proportional),
+        color: Color32::TRANSPARENT,
+        line_height: Some(0.0),
+        ..Default::default()
+    };
+    let hide_prefix = |job: &mut LayoutJob, s: &str, lh: f32| {
+        let mut f = fmt(0.1, FontFamily::Proportional, Color32::TRANSPARENT);
+        f.line_height = Some(lh);
+        job.append(s, 0.0, f);
+    };
+
+    let lines: Vec<&str> = text.split('\n').collect();
+    let n_lines = lines.len();
+    let toggle = is_toggle_block(text);
+    let callout = callout_kind(text).is_some();
+    let ppp = ctx.pixels_per_point().max(1.0);
+    let round_px = |v: f32| (v * ppp).round() / ppp;
+
+    let mut full_job = LayoutJob::default();
+    full_job.wrap.max_width = wrap;
+    let mut rows = Vec::new();
+    let mut cur_y = 0.0_f32;
+    let mut fence = false;
+    let mut list_stack = Vec::new();
+    let mut last_list_indent: Option<f32> = None;
+
+    for (li, &line) in lines.iter().enumerate() {
+        let bare = line.trim_end_matches('\r');
+        let t = bare.trim_start();
+        let has_nl = li + 1 < n_lines;
+        let base_indent = if toggle && li > 0 { TOGGLE_INDENT } else { 0.0 };
+
+        let mut line_job = LayoutJob::default();
+        let mut indent_x = base_indent;
+        let mut is_collapsed = false;
+        let mut is_list_item = false;
+
+        let is_fence = t.starts_with("```") || t.starts_with("~~~");
+        if toggle && li > 0 && (folded || (li + 1 == n_lines && bare.trim() == ":::")) {
+            line_job.append(line, 0.0, collapsed.clone());
+            indent_x = 0.0;
+            is_collapsed = true;
+            last_list_indent = None;
+        } else if is_fence || fence {
+            let c = if is_fence { p.faint } else { p.text };
+            line_job.append(line, 0.0, fmt(body * 0.86, FontFamily::Monospace, c));
+            fence ^= is_fence;
+            last_list_indent = None;
+        } else if toggle && li == 0 {
+            let m = hidden_prefix(bare).min(line.len());
+            hide_prefix(&mut line_job, &line[..m], body * 1.6);
+            line_job.append(&line[m..], 0.0, fmt(body, theme::bold(), p.text));
+            indent_x = TOGGLE_TITLE_X;
+            last_list_indent = None;
+        } else if callout && li == 0 {
+            line_job.append(line, 0.0, collapsed.clone());
+            indent_x = 0.0;
+            is_collapsed = true;
+            last_list_indent = None;
+        } else if let Some(level) = heading_level(t) {
+            let size = body * HEADING_SCALE[level - 1];
+            let m = (line.len() - t.len() + level + 1).min(line.len());
+            hide_prefix(&mut line_job, &line[..m], size * 1.6);
+            line_job.append(&line[m..], 0.0, fmt(size, theme::bold(), p.text));
+            last_list_indent = None;
+        } else if is_hr_line(bare) {
+            hide_prefix(&mut line_job, line, HR_ROW_H);
+            last_list_indent = None;
+        } else if let Some(url) = image_line(bare) {
+            let h = image_fit(ctx, scheme, url, (wrap - base_indent).max(80.0))
+                .0
+                .y;
+            hide_prefix(&mut line_job, line, h);
+            last_list_indent = None;
+        } else if let (Some(len), Some((depth, _))) = (
+            list_marker_bytes(bare),
+            list_item_step(&mut list_stack, bare),
+        ) {
+            let len = len.min(line.len());
+            let lh = body * 1.6;
+            hide_prefix(&mut line_job, &line[..len], lh);
+            append_inline_md_source(&mut line_job, &line[len..], body, p, p.text);
+            indent_x = base_indent + LIST_STEP * (depth + 1) as f32;
+            is_list_item = true;
+            last_list_indent = Some(indent_x);
+        } else if let Some((name, m)) = footnote_def(bare) {
+            let m = m.min(line.len());
+            hide_prefix(&mut line_job, &line[..m], body * 1.6);
+            append_inline_md_source(&mut line_job, &line[m..], body, p, p.muted);
+            indent_x = base_indent + footnote_label_w(ctx, name, body) + 6.0;
+            last_list_indent = None;
+        } else if t.starts_with('>') {
+            let m = hidden_prefix(bare).min(line.len());
+            let (x, color) = if callout {
+                (0.0, p.text)
+            } else {
+                (QUOTE_X, p.muted)
+            };
+            hide_prefix(&mut line_job, &line[..m], body * 1.6);
+            append_inline_md_source(&mut line_job, &line[m..], body, p, color);
+            indent_x = base_indent + x;
+            last_list_indent = None;
+        } else {
+            if bare.trim().is_empty() {
+                last_list_indent = None;
+            } else if let Some(li_indent) = last_list_indent {
+                // 목록 항목 안에서 Shift+Enter로 이어 쓴 줄도 같은 내용 열에 정렬한다
+                indent_x = li_indent;
+            }
+            append_inline_md_source(&mut line_job, line, body, p, p.text);
+        }
+
+        if line.is_empty() && !is_collapsed {
+            line_job.first_row_min_height = body * 1.6;
+        }
+        line_job.wrap.max_width = (wrap - indent_x).max(80.0);
+
+        let offset = full_job.text.len();
+        full_job.text.push_str(&line_job.text);
+        for sec in &line_job.sections {
+            let mut s = sec.clone();
+            s.byte_range.start += offset;
+            s.byte_range.end += offset;
+            full_job.sections.push(s);
+        }
+        if has_nl {
+            full_job.append(
+                "\n",
+                0.0,
+                if is_collapsed {
+                    collapsed.clone()
+                } else {
+                    fmt(body, FontFamily::Proportional, p.text)
+                },
+            );
+        }
+
+        let line_galley = ctx.fonts_mut(|f| f.layout_job(line_job));
+        let row_count = line_galley.rows.len();
+        for (ri, pr) in line_galley.rows.iter().enumerate() {
+            let mut pr = pr.clone();
+            pr.pos.x = round_px(pr.pos.x + indent_x);
+            pr.pos.y = round_px(pr.pos.y + cur_y);
+            if ri + 1 == row_count {
+                pr.ends_with_newline = has_nl;
+            }
+            rows.push(pr);
+        }
+        let line_h = if is_collapsed {
+            0.0
+        } else {
+            line_galley.rect.height()
+        };
+        cur_y = round_px(cur_y + line_h);
+        if is_list_item && has_nl {
+            let next_bare = lines[li + 1].trim_end_matches('\r');
+            let next_collapsed =
+                toggle && (folded || (li + 2 == n_lines && next_bare.trim() == ":::"));
+            let next_is_continuation = !next_bare.trim().is_empty()
+                && list_marker_bytes(next_bare).is_none()
+                && heading_level(next_bare.trim_start()).is_none()
+                && !is_hr_line(next_bare)
+                && image_line(next_bare).is_none()
+                && !next_bare.trim_start().starts_with('>');
+            if !next_collapsed && !next_is_continuation {
+                cur_y = round_px(cur_y + LIST_ROW_GAP);
+            }
+        }
+    }
+
+    let base = ctx.fonts_mut(|f| f.layout_job(LayoutJob::default()));
+    let mut galley = (*base).clone();
+    let mut rect = Rect::ZERO;
+    let mut mesh_bounds = Rect::NOTHING;
+    let mut num_vertices = 0usize;
+    let mut num_indices = 0usize;
+    for pr in &rows {
+        rect |= pr.rect();
+        mesh_bounds |= pr.row.visuals.mesh_bounds.translate(pr.pos.to_vec2());
+        num_vertices += pr.row.visuals.mesh.vertices.len();
+        num_indices += pr.row.visuals.mesh.indices.len();
+    }
+    galley.job = std::sync::Arc::new(full_job);
+    galley.rows = rows;
+    galley.elided = false;
+    galley.rect = rect;
+    galley.mesh_bounds = mesh_bounds;
+    galley.num_vertices = num_vertices;
+    galley.num_indices = num_indices;
+    debug_assert_eq!(galley.text(), text);
+    std::sync::Arc::new(galley)
+}
+
+#[cfg(test)]
+pub(crate) fn edit_galley_for_test(
+    ctx: &egui::Context,
+    text: &str,
+    body: f32,
+    wrap: f32,
+    p: &Pal,
+) -> std::sync::Arc<egui::Galley> {
+    let mut cache = None;
+    editor_galley_cached(
+        ctx,
+        &mut cache,
+        text,
+        body,
+        wrap,
+        p,
+        false,
+        ctx.pixels_per_point().to_bits(),
+        false,
+        "",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn editor_galley_cached(
     ctx: &egui::Context,
     cache: &mut Option<(u64, u32, u32, bool, std::sync::Arc<egui::Galley>)>,
@@ -1336,9 +1608,13 @@ fn editor_galley_cached(
             return std::sync::Arc::clone(g);
         }
     }
-    let mut job = md_job_ex(ctx, s, body, pal, dark, wrap, folded, scheme);
-    job.wrap.max_width = wrap;
-    let g = ctx.fonts_mut(|f| f.layout_job(job));
+    let g = if wrap.is_finite() && needs_hanging_layout(s) {
+        layout_hanging_galley(ctx, s, body, pal, wrap, folded, scheme)
+    } else {
+        let mut job = md_job_ex(ctx, s, body, pal, dark, wrap, folded, scheme);
+        job.wrap.max_width = wrap;
+        ctx.fonts_mut(|f| f.layout_job(job))
+    };
     *cache = Some((key.0, key.1, key.2, key.3, std::sync::Arc::clone(&g)));
     g
 }
@@ -1827,6 +2103,7 @@ impl App {
                 .corner_radius(8)
                 .inner_margin(Margin::symmetric(10, 4))
                 .show(ui, |ui| {
+                    ui.style_mut().interaction.selectable_labels = false;
                     ui.spacing_mut().item_spacing.x = 7.0;
                     ui.set_max_width(270.0);
                     ui.add(img(theme::FILE, 14.0, p.muted));
@@ -1836,7 +2113,8 @@ impl App {
                                 .size(12.5)
                                 .color(p.text),
                         )
-                        .truncate(),
+                        .truncate()
+                        .selectable(false),
                     );
                     if is_scratch {
                         Frame::new()
@@ -1905,6 +2183,12 @@ impl App {
             ui.add_space(6.0);
             divider(ui, p);
             ui.add_space(6.0);
+            if icon_btn(ui, p, theme::BULLET_LIST, "글머리 목록 (Ctrl+Alt+5)").clicked() {
+                self.convert_block(&ctx, BlockKind::Bullet);
+            }
+            if icon_btn(ui, p, theme::NUMBERED_LIST, "번호 목록 (Ctrl+Alt+6)").clicked() {
+                self.convert_block(&ctx, BlockKind::Numbered);
+            }
             if icon_btn(ui, p, theme::TABLE, "표 (Table) 삽입 (Ctrl+Alt+T)").clicked() {
                 self.insert_block_template("| 제목 | 내용 |\n| --- | --- |\n|  |  |", 2);
             }
@@ -1918,7 +2202,7 @@ impl App {
             if toggle_icon_btn(
                 ui,
                 p,
-                theme::LIST,
+                theme::TOC,
                 self.toc_open,
                 "문서 목차 (TOC) 열기/닫기 (Ctrl+Shift+L)",
             )
@@ -2066,9 +2350,10 @@ impl App {
                                     bottom: 5,
                                 })
                                 .show(ui, |ui| {
+                                    ui.style_mut().interaction.selectable_labels = false;
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 5.0;
-                                        let body_resp = ui
+                                        let body_inner = ui
                                             .horizontal(|ui| {
                                                 ui.set_max_width(160.0);
                                                 ui.add(img(
@@ -2086,35 +2371,14 @@ impl App {
                                                                 p.muted
                                                             }),
                                                     )
-                                                    .truncate(),
+                                                    .truncate()
+                                                    .selectable(false),
                                                 );
                                                 if dirty {
                                                     dot(ui, AMBER, 3.0, false);
                                                 }
                                             })
-                                            .response
-                                            .interact(Sense::click())
-                                            .on_hover_cursor(CursorIcon::PointingHand);
-                                        let body_resp = if body_resp.hovered() {
-                                            let tip = if is_scratch_key(key) {
-                                                let preview = self
-                                                    .docs
-                                                    .get(key)
-                                                    .and_then(|d| {
-                                                        d.text
-                                                            .lines()
-                                                            .map(str::trim)
-                                                            .find(|l| !l.is_empty())
-                                                    })
-                                                    .unwrap_or("빈 임시 메모");
-                                                format!("{title} — {preview}\n(우클릭: 탭 메뉴, Ctrl+S: 저장, Ctrl+W: 닫기)")
-                                            } else {
-                                                format!("{key}\n(우클릭: 탭 메뉴, 가운데 클릭 / Ctrl+W: 닫기)")
-                                            };
-                                            body_resp.on_hover_text(tip)
-                                        } else {
-                                            body_resp
-                                        };
+                                            .response;
                                         let close_resp = small_icon_btn(
                                             ui,
                                             p,
@@ -2122,11 +2386,46 @@ impl App {
                                             p.muted,
                                             "탭 닫기 (Ctrl+W)",
                                         );
-                                        (body_resp, close_resp)
+                                        (body_inner.rect, close_resp)
                                     })
                                     .inner
                                 });
-                            let (body_resp, close_resp) = frame_out.inner;
+                            let (body_inner_rect, close_resp) = frame_out.inner;
+                            let tab_rect = frame_out.response.rect;
+                            let body_hit_rect = Rect::from_min_max(
+                                tab_rect.left_top(),
+                                pos2(
+                                    (close_resp.rect.left() - 2.0).max(body_inner_rect.right()),
+                                    tab_rect.bottom(),
+                                ),
+                            );
+                            let body_resp = ui
+                                .interact(
+                                    body_hit_rect,
+                                    ui.scope_id().with(("tab-body", key)),
+                                    Sense::click(),
+                                )
+                                .on_hover_cursor(CursorIcon::PointingHand);
+                            let body_resp = if body_resp.hovered() {
+                                let tip = if is_scratch_key(key) {
+                                    let preview = self
+                                        .docs
+                                        .get(key)
+                                        .and_then(|d| {
+                                            d.text
+                                                .lines()
+                                                .map(str::trim)
+                                                .find(|l| !l.is_empty())
+                                        })
+                                        .unwrap_or("빈 임시 메모");
+                                    format!("{title} — {preview}\n(우클릭: 탭 메뉴, Ctrl+S: 저장, Ctrl+W: 닫기)")
+                                } else {
+                                    format!("{key}\n(우클릭: 탭 메뉴, 가운데 클릭 / Ctrl+W: 닫기)")
+                                };
+                                body_resp.on_hover_text(tip)
+                            } else {
+                                body_resp
+                            };
                             if is_active {
                                 let r = frame_out.response.rect;
                                 active_tab_x = Some(r.x_range());
@@ -2361,6 +2660,7 @@ impl App {
                 .corner_radius(255)
                 .inner_margin(Margin::symmetric(9, 2))
                 .show(ui, |ui| {
+                    ui.style_mut().interaction.selectable_labels = false;
                     ui.spacing_mut().item_spacing.x = 4.0;
                     dot(ui, color, 3.0, ring);
                     ui.label(RichText::new(label).size(12.0).color(p.muted));
@@ -2379,6 +2679,7 @@ impl App {
                 .corner_radius(6)
                 .inner_margin(Margin::symmetric(6, 2))
                 .show(ui, |ui| {
+                    ui.style_mut().interaction.selectable_labels = false;
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.add(img(theme::FOLDER, 12.0, p.faint));
                     ui.label(RichText::new(&folder_name).size(11.5).color(p.faint));
@@ -2585,7 +2886,7 @@ impl App {
             .inner_margin(Margin::symmetric(16, 12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(img(theme::LIST, 14.0, p.text));
+                    ui.add(img(theme::TOC, 14.0, p.text));
                     ui.label(
                         RichText::new("문서 목차 (TOC)")
                             .font(FontId::new(13.0, theme::bold()))
@@ -2744,6 +3045,10 @@ impl App {
         egui::ScrollArea::vertical()
             .id_salt(("canvas", &name))
             .auto_shrink([false, false])
+            .scroll_source(egui::scroll_area::ScrollSource {
+                drag: egui::scroll_area::DragScroll::Never,
+                ..Default::default()
+            })
             .show(ui, |ui| {
                 let full = ui.available_width();
                 let w = if self.full_width {
@@ -2796,8 +3101,17 @@ impl App {
                                 );
                                 if secondary_clicked && ui.rect_contains_pointer(full_row) {
                                     if let Some(pos) = click_pos {
-                                        let cur = self.cursor(&ctx);
-                                        if cur.0 == cur.1 && !r.is_empty() {
+                                        // doc.text가 잠시 비어 있으므로 self.cursor(&ctx) 대신 TextEdit 상태에서 직접 선택 여부를 확인한다
+                                        let has_text_sel = egui::TextEdit::load_state(
+                                            &ctx,
+                                            Self::editor_id(&name, r.start),
+                                        )
+                                        .and_then(|s| s.cursor.char_range())
+                                        .is_some_and(|c| {
+                                            let c = c.as_sorted_char_range();
+                                            c.start.0 < c.end.0
+                                        });
+                                        if !has_text_sel && !r.is_empty() {
                                             self.pending_click_pos = Some((r.start, pos));
                                         }
                                         open_canvas_menu = Some(pos);
@@ -3119,11 +3433,17 @@ impl App {
         go_to: &mut Option<(usize, usize)>,
         go_click_pos: &mut Option<egui::Pos2>,
     ) {
-        let (drag_active, origin_opt, pos_opt) = ctx.input(|i| {
+        let (primary_down, drag_active, origin_opt, pos_opt) = ctx.input(|i| {
+            let down = i.pointer.primary_down();
             let active = !menu_was_open
-                && (i.pointer.primary_down() || i.pointer.primary_released())
+                && (down || i.pointer.primary_released())
                 && i.pointer.is_decidedly_dragging();
-            (active, i.pointer.press_origin(), i.pointer.interact_pos())
+            (
+                down,
+                active,
+                i.pointer.press_origin(),
+                i.pointer.interact_pos(),
+            )
         });
         if !drag_active || *consumed || self.dialog.is_some() {
             return;
@@ -3137,13 +3457,16 @@ impl App {
         if !area.contains(origin) || on_fg {
             return;
         }
-        let edge = 32.0;
-        if pos.y < area.top() + edge {
-            ui.scroll_with_delta(vec2(0.0, (area.top() + edge - pos.y).min(18.0)));
-            ctx.request_repaint();
-        } else if pos.y > area.bottom() - edge {
-            ui.scroll_with_delta(vec2(0.0, -(pos.y - (area.bottom() - edge)).min(18.0)));
-            ctx.request_repaint();
+        // 마우스 버튼을 누른 채 화면 위/아래 가장자리 방향으로 실제로 드래그할 때만 자동 스크롤한다
+        let edge = 24.0;
+        if primary_down {
+            if pos.y < area.top() + edge && pos.y < origin.y - 8.0 {
+                ui.scroll_with_delta(vec2(0.0, (area.top() + edge - pos.y).min(18.0)));
+                ctx.request_repaint();
+            } else if pos.y > area.bottom() - edge && pos.y > origin.y + 8.0 {
+                ui.scroll_with_delta(vec2(0.0, -(pos.y - (area.bottom() - edge)).min(18.0)));
+                ctx.request_repaint();
+            }
         }
         let y_min = origin.y.min(pos.y);
         let y_max = origin.y.max(pos.y);
@@ -3164,16 +3487,20 @@ impl App {
             self.block_sel = None;
             self.block_sel_anchor = None;
             self.block_sel_head = None;
-            *go_click_pos = None;
             if self.active != Some(b.start) {
                 self.drag_anchor = Some((b.start, origin));
                 self.drag_last_pos = Some(pos);
-                *go_to = Some((b.start, b.end));
+                // 드래그 시작 지점(origin)에 커서를 두어 블록 끝(b.end)으로 스크롤이 튀지 않게 한다
+                *go_click_pos = Some(origin);
+                *go_to = Some((b.start, b.start));
                 *consumed = true;
                 ctx.request_repaint();
             } else if self.drag_anchor.is_some() {
+                *go_click_pos = None;
                 self.drag_last_pos = Some(pos);
                 *consumed = true;
+            } else {
+                *go_click_pos = None;
             }
         } else if hit_count >= 2 {
             let first = first_hit.unwrap();
@@ -3398,7 +3725,7 @@ impl App {
         sel_rect: Rect,
         bounds: Rect,
     ) -> (Option<Fmt>, bool) {
-        let bar_w = 276.0;
+        let bar_w = 336.0;
         let bar_h = 34.0;
         let x = sel_rect.left().clamp(
             bounds.left() + 8.0,
@@ -3482,6 +3809,20 @@ impl App {
                                 kbd = true;
                             }
                             divider(ui, p);
+                            b(
+                                ui,
+                                theme::BULLET_LIST,
+                                m,
+                                "글머리 목록 (Ctrl+Alt+5)",
+                                Fmt::Block(BlockKind::Bullet),
+                            );
+                            b(
+                                ui,
+                                theme::NUMBERED_LIST,
+                                m,
+                                "번호 목록 (Ctrl+Alt+6)",
+                                Fmt::Block(BlockKind::Numbered),
+                            );
                             b(
                                 ui,
                                 theme::LINK,
@@ -3849,7 +4190,16 @@ impl App {
             &mut primary_cursor,
         );
         self.show_link_hint(&buf, sel.as_ref());
-        self.track_last_sel(ctx, id, &out, base, blen, &mut sel, &mut primary_cursor);
+        self.track_last_sel(
+            ctx,
+            id,
+            &out,
+            base,
+            blen,
+            pre_click.is_some(),
+            &mut sel,
+            &mut primary_cursor,
+        );
         self.cursor_info =
             primary_cursor.map(|pc| cursor_info_for(&out.galley, pc, r.start, doc_rev));
         let cursor_of = |c: usize| {
@@ -3858,8 +4208,10 @@ impl App {
                 .translate(out.galley_pos.to_vec2())
         };
         if let Some(align) = self.scroll_cursor.take() {
-            let c = sel.as_ref().map_or(0, |s| s.end.0);
-            ui.scroll_to_rect(cursor_of(c), align);
+            if self.drag_anchor.is_none() {
+                let c = sel.as_ref().map_or(0, |s| s.end.0);
+                ui.scroll_to_rect(cursor_of(c), align);
+            }
         } else if is_changed {
             if let Some(s) = sel.as_ref() {
                 let cr = cursor_of(s.end.0).expand2(vec2(0.0, 28.0));
@@ -4099,7 +4451,6 @@ impl App {
 
     // 링크 주소는 화면에 숨겨져 있으니 커서가 링크 위에 있으면 상태 표시줄에 보여준다
     fn show_link_hint(&mut self, buf: &str, sel: Option<&SelRange>) {
-        // 링크 주소는 화면에 숨겨져 있으니 커서가 링크 위에 있으면 상태 표시줄에 보여준다
         if let Some(c) = sel.filter(|s| s.start == s.end).map(|s| s.start.0) {
             let link = block_inline_spans(buf)
                 .into_iter()
@@ -4110,9 +4461,14 @@ impl App {
             } else {
                 image_line(buf).map(|u| format!("이미지: {u}  ·  Backspace로 지우기"))
             };
-            if let Some(msg) = msg.filter(|m| *m != self.status) {
-                self.status = msg;
+            if msg != self.last_link_hint {
+                self.last_link_hint = msg.clone();
+                if let Some(m) = msg {
+                    self.status = m;
+                }
             }
+        } else {
+            self.last_link_hint = None;
         }
     }
 
@@ -4125,6 +4481,7 @@ impl App {
         out: &egui::text_edit::TextEditOutput,
         base: usize,
         blen: usize,
+        from_click: bool,
         sel: &mut Option<SelRange>,
         primary_cursor: &mut Option<CCursor>,
     ) {
@@ -4147,6 +4504,7 @@ impl App {
         } else if let Some(s) = sel.as_ref() {
             if !self.ime_composing
                 && ((out.response.has_focus() && self.context_menu.is_none())
+                    || from_click
                     || s.start.0 < s.end.0)
             {
                 self.last_sel = Some((base + s.start.0.min(blen), base + s.end.0.min(blen)));
@@ -4180,6 +4538,19 @@ impl App {
                 }
             }
         }
+        if let Some(cell) = cur_cell {
+            self.last_table_cell = Some(cell);
+        }
+        // 다른 셀로 포커스가 옮겨졌으면 이전 셀의 미저장 공백 드래프트를 비운다
+        if let Some((draft_id, _)) = &self.table_cell_draft {
+            if focused_id != Some(*draft_id) {
+                self.table_cell_draft = None;
+            }
+        }
+        let active_cell = cur_cell.or_else(|| {
+            self.last_table_cell
+                .filter(|&(r_i, c_i)| r_i < row_count && c_i < cols)
+        });
         let ime_busy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Ime(_))))
             || self.ime_composing;
         let tab_next =
@@ -4237,7 +4608,7 @@ impl App {
                     p,
                     cols,
                     row_count,
-                    cur_cell,
+                    active_cell,
                     &mut tbl,
                     &mut table_changed,
                     &mut next_focus,
@@ -4246,6 +4617,9 @@ impl App {
                     &mut delete_table,
                 );
             });
+            if table_changed {
+                self.table_cell_draft = None;
+            }
 
             let avail_w = ui.available_width().max(240.0);
             let cur_cols = tbl.headers.len().max(1);
@@ -4271,6 +4645,11 @@ impl App {
                             let mut row_bot = f32::NEG_INFINITY;
                             for (c_i, hdr) in tbl.headers.iter_mut().enumerate() {
                                 let cid = cell_id(0, c_i);
+                                if let Some((did, draft)) = &self.table_cell_draft {
+                                    if *did == cid {
+                                        *hdr = draft.clone();
+                                    }
+                                }
                                 let align2 = table_align2(
                                     tbl.aligns.get(c_i).copied().unwrap_or(TableAlign::None),
                                 );
@@ -4297,6 +4676,7 @@ impl App {
                                             r.request_focus();
                                         }
                                         if r.changed() {
+                                            self.table_cell_draft = Some((cid, hdr.clone()));
                                             table_changed = true;
                                         }
                                         if r.clicked() || r.has_focus() {
@@ -4320,6 +4700,11 @@ impl App {
                                 let mut row_bot = f32::NEG_INFINITY;
                                 for (c_i, cell) in row.iter_mut().enumerate() {
                                     let cid = cell_id(r_i, c_i);
+                                    if let Some((did, draft)) = &self.table_cell_draft {
+                                        if *did == cid {
+                                            *cell = draft.clone();
+                                        }
+                                    }
                                     let align2 = table_align2(
                                         tbl.aligns.get(c_i).copied().unwrap_or(TableAlign::None),
                                     );
@@ -4346,6 +4731,7 @@ impl App {
                                                 r.request_focus();
                                             }
                                             if r.changed() {
+                                                self.table_cell_draft = Some((cid, cell.clone()));
                                                 table_changed = true;
                                             }
                                             if r.clicked() || r.has_focus() {
@@ -5619,6 +6005,7 @@ impl App {
                     }
                     Dialog::Spellcheck {
                         selected,
+                        cached_key,
                         cached_rev,
                         cached_spell_rev,
                         issues,
@@ -5627,6 +6014,7 @@ impl App {
                             ui,
                             p,
                             selected,
+                            cached_key,
                             cached_rev,
                             cached_spell_rev,
                             issues,
@@ -5669,18 +6057,24 @@ impl App {
         ui: &mut egui::Ui,
         p: &Pal,
         selected: &mut usize,
+        cached_key: &mut Option<String>,
         cached_rev: &mut u64,
         cached_spell_rev: &mut u64,
         issues: &mut Vec<crate::spell::SpellIssue>,
         close: &mut bool,
     ) {
         if let Some(doc) = self.doc() {
-            if doc.rev != *cached_rev || self.spell_rev != *cached_spell_rev {
+            if self.current != *cached_key
+                || doc.rev != *cached_rev
+                || self.spell_rev != *cached_spell_rev
+            {
                 *issues = crate::spell::check_document(&doc.text, &self.spell_ignore);
+                *cached_key = self.current.clone();
                 *cached_rev = doc.rev;
                 *cached_spell_rev = self.spell_rev;
             }
         } else {
+            *cached_key = None;
             issues.clear();
         }
         if issues.is_empty() {
@@ -5800,6 +6194,12 @@ impl App {
                                 };
                                 let s = issue.range.start.min(doc_text.len());
                                 let e = issue.range.end.min(doc_text.len());
+                                if s > e
+                                    || !doc_text.is_char_boundary(s)
+                                    || !doc_text.is_char_boundary(e)
+                                {
+                                    continue;
+                                }
                                 let line_no = 1 + doc_text[..s].matches('\n').count();
                                 let ls = doc_text[..s].rfind('\n').map_or(0, |i| i + 1);
                                 let le = doc_text[e..]
@@ -6219,7 +6619,7 @@ impl App {
         };
         let screen = ctx.content_rect();
         let (raw_pos, menu_w, est_h) = match &menu {
-            ContextMenu::Canvas(pos) => (*pos, 238.0, 290.0),
+            ContextMenu::Canvas(pos) => (*pos, 296.0, 290.0),
             ContextMenu::Tab(_, pos) => (*pos, 224.0, 250.0),
             ContextMenu::FileItem(_, pos) => (*pos, 210.0, 150.0),
         };
@@ -6455,6 +6855,14 @@ impl App {
                 .clicked()
             {
                 pick = Some(Fmt::Wrap("[[", "]]", "Ctrl"));
+            }
+            if small_icon_btn(ui, p, theme::BULLET_LIST, m, "글머리 목록 (Ctrl+Alt+5)").clicked()
+            {
+                pick = Some(Fmt::Block(BlockKind::Bullet));
+            }
+            if small_icon_btn(ui, p, theme::NUMBERED_LIST, m, "번호 목록 (Ctrl+Alt+6)").clicked()
+            {
+                pick = Some(Fmt::Block(BlockKind::Numbered));
             }
             if small_icon_btn(ui, p, theme::LINK, m, "링크 삽입 (Ctrl+K)").clicked() {
                 pick = Some(Fmt::Wrap("[", "](https://)", "링크"));
@@ -6979,6 +7387,7 @@ impl App {
                     .corner_radius(10)
                     .inner_margin(Margin::symmetric(20, 28))
                     .show(ui, |ui| {
+                        ui.style_mut().interaction.selectable_labels = false;
                         ui.set_width(ui.available_width());
                         ui.vertical_centered(|ui| {
                             ui.spacing_mut().item_spacing.y = 8.0;
@@ -7301,7 +7710,9 @@ impl<'a> MdInlineBuf<'a> {
                 true
             }
             Event::SoftBreak => {
-                self.push_text(" ", false);
+                // 노션식 편집기와 일치: 블록 안의 단순 줄바꿈(Shift+Enter)을 보기 화면에서도 그대로 줄바꿈한다
+                self.flush_pending();
+                self.push_styled("\n", false);
                 true
             }
             Event::HardBreak => {
@@ -7393,16 +7804,26 @@ impl<'a> MdInlineBuf<'a> {
                 sec.format.color.to_array().hash(&mut h);
                 sec.format.italics.hash(&mut h);
                 sec.format.background.to_array().hash(&mut h);
+                sec.format.strikethrough.width.to_bits().hash(&mut h);
+                sec.format.strikethrough.color.to_array().hash(&mut h);
+                sec.format.underline.width.to_bits().hash(&mut h);
+                sec.format.underline.color.to_array().hash(&mut h);
+                (sec.format.valign as u8).hash(&mut h);
                 sec.format.font_id.size.to_bits().hash(&mut h);
                 (sec.format.font_id.family == theme::bold()).hash(&mut h);
                 (sec.format.font_id.family == FontFamily::Monospace).hash(&mut h);
             }
             self.links.len().hash(&mut h);
+            for (lr, lu) in &self.links {
+                lr.start.hash(&mut h);
+                lr.end.hash(&mut h);
+                lu.hash(&mut h);
+            }
             h.finish()
         };
         let (galley, links) = if let Some((g, l)) = cache
             .get(&key)
-            .filter(|(g, l)| g.text() == self.job.text && l.len() == self.links.len())
+            .filter(|(g, l)| g.text() == self.job.text && *l == self.links)
         {
             (std::sync::Arc::clone(g), l.as_slice())
         } else {

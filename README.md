@@ -2,7 +2,7 @@
 
 **Rust로 만든 순수 로컬 Markdown 편집기 — 브라우저·웹뷰·로컬 서버 없이 네이티브 창 하나로 동작합니다.**
 
-![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-49%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-55%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
@@ -30,8 +30,8 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
   - **캔버스(본문·블록) 우클릭**: 상단 글자 서식 아이콘 바(굵게·기울임·취소선·형광펜·코드·키캡·링크·서식 지우기), 잘라내기/복사/붙여넣기/전체 선택, **`블록 전환 ▸`** 하위 메뉴(일반 텍스트·제목 1~3·할 일·글머리·번호·인용구·할 일 완료 토글·코드·콜아웃·토글·블록 위/아래 이동), **`삽입 ▸`** 하위 메뉴(빈 블록·표·Mermaid 그래프·구분선·이미지), 블록 복제/삭제만 깔끔하게 정리한 컴팩트 메뉴 제공.
   - **상단 탭 우클릭**: 새 탭, 탭 내용 복제, 파일 저장/이름 변경, 파일 전체 경로 복사, 탭 닫기, 다른 탭 모두 닫기, 오른쪽 탭 모두 닫기, 파일 삭제를 지원합니다.
   - **파일 탐색기 항목 우클릭**: 파일 열기, 이름 변경(`F2`), 경로 복사, 파일 삭제(`Delete`)를 지원합니다.
-- **떠 있는 서식 막대**: 글자를 선택하면 굵게·기울임·취소선·형광펜·코드·키캡·링크·서식 지우기 막대가 나타납니다.
-- **스마트 목록**: 목록에서 `Enter`를 누르면 다음 기호·번호를 이어 쓰고, 빈 항목에서 `Enter`를 누르면 목록이 끝납니다. `Tab`/`Shift+Tab` 들여쓰기.
+- **떠 있는 서식 막대**: 글자나 여러 블록을 선택하면 굵게·기울임·취소선·형광펜·코드·키캡·**글머리 목록·번호 목록**·링크·서식 지우기 막대가 나타납니다.
+- **스마트 목록 & 계층 들여쓰기**: 목록에서 `Enter`를 누르면 다음 기호·번호를 이어 쓰고, 빈 항목에서 `Enter`를 누르면 목록이 끝납니다. `Tab`/`Shift+Tab`으로 숫자 목록 아래 불릿 포인트 계층화 및 역들여쓰기를 지원하며, 자동 줄바꿈된 목록 항목도 편집·보기 모드에서 동일한 내어쓰기로 표시됩니다.
 - 렌더링된 **할 일 체크박스를 클릭하면 원문이 바로 바뀝니다.**
 - 마지막 블록 아래 빈 곳을 클릭하면 새 블록이 생깁니다.
 - **문서 단위 실행 취소** (`Ctrl+Z` / `Ctrl+Y`): 글자 입력뿐 아니라 블록 나누기·합치기, 서식, 슬래시 메뉴, 모두 바꾸기, 체크박스까지 되돌립니다. 이어 친 입력은 한 단계로 묶입니다.
@@ -177,7 +177,7 @@ package.ps1        배포 빌드: 테스트 → 릴리즈 → 설치 파일 → 
 ## 🧪 테스트
 
 ```bash
-cargo test                                    # 49개
+cargo test                                    # 55개
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

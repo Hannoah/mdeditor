@@ -1,5 +1,25 @@
 # MDEditor 작업 기록
 
+## 2026-11-23 — v0.12.1: 불릿·연번 블록 메뉴, 목록 계층·줄바꿈 일치화 및 전반 안정성·보안 수정
+
+- **글머리(불릿)·번호(연번) 목록 원클릭 메뉴 및 다중 블록 변환 (`src/theme.rs`, `src/ui.rs`, `src/main.rs`, `src/textops.rs`)**:
+  - 전용 `BULLET_LIST`·`NUMBERED_LIST` 아이콘 및 왼쪽 서랍 모양의 `TOC` 아이콘을 추가해 목차와 불릿 아이콘을 명확히 구분.
+  - 상단 툴바, 선택 영역 플로팅 서식 막대, 우클릭 컨텍스트 메뉴 상단 빠른 버튼 줄 3곳에 글머리·번호 목록 버튼 추가.
+  - 여러 블록을 지정해 불릿/번호 목록으로 변환할 때 블록 사이 빈 줄을 건너뛰도록 수정하고 재클릭 토글 지원.
+- **목록 줄바꿈 편집↔보기 일치화 & 숫자 아래 불릿 계층·`Shift+Tab` 개선 (`src/ui.rs`, `src/textops.rs`, `src/main.rs`)**:
+  - `layout_hanging_galley`로 목록·인용·접기·각주 블록의 자동 줄바꿈 2번째 줄 이하도 보기 모드와 동일한 내어쓰기(`LIST_STEP`), 줄바꿈 폭, 줄간격(`body * 1.6`), 항목 간격(`LIST_ROW_GAP`)으로 통일하고 `Event::SoftBreak`도 줄바꿈으로 일치시킴.
+  - `1. 항목` 아래 `- 하위 불릿`(빈 줄로 나뉜 블록 포함)에서 `Tab`으로 정확히 3칸 하위 계층화되고, 한글 IME 조합 중·포커스 이탈·`\t` 들여쓰기에서도 `Shift+Tab` 역들여쓰기가 안정적으로 동작하도록 개선.
+- **UI 인터랙션 버그 일괄 수정 (`src/ui.rs`, `src/main.rs`)**:
+  - **탭 텍스트 클릭 불가 수정**: 탭 라벨·파일명 배지·상태바 알약·이미지 드롭존의 `Label` 클릭 가로채기(`selectable_labels`)를 해제하고 탭 전체 영역 클릭 지원.
+  - **블록 지정 시 스크롤 하강 버그 수정**: 비활성 블록 드래그 시작 커서를 `origin`에 배치하고 드래그 중 `scroll_to_rect` 억제, 가장자리 자동 스크롤 조건 정밀화, 캔버스 `ScrollArea`에 `DragScroll::Never` 적용.
+  - **표 에디터 공백 삭제·툴바 포커스 버그 수정**: 편집 중 셀의 미저장 공백 드래프트 유지 및 직전 포커스 셀(`last_table_cell`) 기억으로 `- 행`/`- 열`/`정렬`이 선택 셀에 적용되도록 개선.
+  - **인라인 캐시 충돌·우클릭 맞춤법 제안·링크 토스트 루프·충돌 다이얼로그 덮어쓰기 수정**: `MdInlineBuf::finish_cached`에 링크 URL·취소선·밑줄·정렬 해시 추가, 오타 우클릭 시 `last_sel` 즉시 갱신, `last_link_hint`로 2.5초 반복 토스트 차단, `Dialog::Conflict` 보호.
+- **크래시 패닉 방어·보안 강화·크로스플랫폼 빌드 복구 (`src/spell.rs`, `src/textops.rs`, `src/mermaid.rs`, `src/main.rs`, `Cargo.toml`)**:
+  - 표 구분선 `:` 패닉, 맞춤법 전각 공백(`\u{3000}`) UTF-8 패닉, Mermaid 한글 노드 ID·잘못된 hex 색상·`Note` UTF-8 패닉·`DoubleCircle` 오타·`inf`/`NaN` 파이 방어, `shift_arrow`+`leave_blank` 오프셋 보정, `canvas()` 우클릭 패닉, `spellcheck_modal` stale 범위 패닉 수정.
+  - `handle_links` 외부 URL 스킴 화이트리스트(`http`/`https`/`mailto`), HTML 내보내기 `data:text/html`·`vbscript:`·제어문자 난독화 `javascript:` 차단.
+  - 비-Windows 빌드용 `arboard = "3"` 의존성 추가.
+- **검증**: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`(55개 통과).
+
 ## 2026-11-22 — v0.12.0: 오프라인 맞춤법 및 띄어쓰기 검사
 
 - **마크다운 인식 오프라인 맞춤법 검사 엔진 (`src/spell.rs`)**:

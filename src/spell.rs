@@ -1160,7 +1160,7 @@ fn check_korean_rules(seg: &str, base: usize, ignore: &HashSet<String>, out: &mu
             // 앞뒤 어절 전체를 확인해 사용자가 무시한 단어면 건너뛴다
             let ws = seg[..at]
                 .rfind(|c: char| c.is_whitespace())
-                .map_or(0, |i| i + 1);
+                .map_or(0, |i| i + seg[i..].chars().next().map_or(1, char::len_utf8));
             let we = seg[end..]
                 .find(|c: char| c.is_whitespace())
                 .map_or(seg.len(), |i| end + i);
@@ -1301,7 +1301,7 @@ const EN_TYPOS: &[(&str, &str)] = &[
     ("goverment", "government"),
     ("grammer", "grammar"),
     ("happend", "happened"),
-    ("harass", "harass"),
+    ("harrass", "harass"),
     ("heigth", "height"),
     ("immediatly", "immediately"),
     ("improt", "import"),
@@ -1408,9 +1408,6 @@ fn check_english_words(
             continue;
         }
         let lower = w.to_ascii_lowercase();
-        if lower == "harass" {
-            continue;
-        }
         if let Some(&(_, fix)) = EN_TYPOS.iter().find(|&&(bad, _)| bad == lower) {
             out.push(SpellIssue {
                 range: (base + ws)..(base + we),

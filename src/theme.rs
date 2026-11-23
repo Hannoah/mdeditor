@@ -832,6 +832,18 @@ icon!(
     SPELL,
     r#"<path d="m6 16 6-12 6 12"/><path d="M8 12h8"/><path d="m16 20 2 2 4-4"/>"#
 );
+icon!(
+    TOC,
+    r#"<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="13" y1="8" x2="18" y2="8"/><line x1="13" y1="12" x2="18" y2="12"/><line x1="13" y1="16" x2="16" y2="16"/>"#
+);
+icon!(
+    BULLET_LIST,
+    r#"<circle cx="4.5" cy="6" r="1.9" fill="white" stroke="none"/><circle cx="4.5" cy="12" r="1.9" fill="white" stroke="none"/><circle cx="4.5" cy="18" r="1.9" fill="white" stroke="none"/><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/>"#
+);
+icon!(
+    NUMBERED_LIST,
+    r#"<line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/>"#
+);
 
 pub fn img(icon: Icon, size: f32, color: Color32) -> egui::Image<'static> {
     egui::Image::from_bytes(icon.0, icon.1.as_bytes())
