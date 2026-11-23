@@ -3303,6 +3303,23 @@ impl App {
         }
     }
 
+    fn delete_empty_list(&mut self, ctx: &egui::Context) -> bool {
+        let Some(doc) = self.doc() else {
+            return false;
+        };
+        let sel = self.cursor(ctx);
+        if sel.0 != sel.1 {
+            return false;
+        }
+        match delete_empty_list_line(&doc.text, sel.0) {
+            Some((t, c)) => {
+                self.set_text(t, (c, c));
+                true
+            }
+            None => false,
+        }
+    }
+
     // 블록 맨 앞 Backspace: 앞 빈 줄을 지우거나, 내용이 있으면 앞 블록과 합친다
     fn backspace_at_start(&mut self, ctx: &egui::Context) -> bool {
         let (Some(r), Some(doc)) = (self.active_block(), self.doc()) else {
@@ -4833,7 +4850,11 @@ impl App {
             {
                 k(Modifiers::NONE, Key::Backspace);
             }
-            if del && (self.delete_hidden(ctx, false) || self.delete_at_end(ctx)) {
+            if del
+                && (self.delete_hidden(ctx, false)
+                    || self.delete_empty_list(ctx)
+                    || self.delete_at_end(ctx))
+            {
                 k(Modifiers::NONE, Key::Delete);
             }
         }
@@ -7568,5 +7589,26 @@ mod tests {
         assert!(!html.contains("data:text/html"), "{html}");
         assert!(!html.contains("vbscript:"), "{html}");
         assert!(!html.contains("javascript:"), "{html}");
+    }
+
+    #[test]
+    fn empty_bullet_before_numbered_line_can_be_focused_and_deleted() {
+        let s = "- 표준 제품 기능\n- \n6. AI Governance";
+        let empty_bullet_caret = char_len("- 표준 제품 기능\n- ");
+        // 빈 불릿("- ") 뒤 커서가 다음 줄("6. ")로 튕기지 않고 제자리에 머문다
+        assert_eq!(
+            clamp_hidden(s, empty_bullet_caret, None),
+            empty_bullet_caret
+        );
+
+        // Backspace로 빈 불릿 줄이 깔끔하게 삭제된다
+        let (after_bs, c_bs) = backspace_list_marker(s, empty_bullet_caret).unwrap();
+        assert_eq!(after_bs, "- 표준 제품 기능\n6. AI Governance");
+        assert_eq!(c_bs, char_len("- 표준 제품 기능"));
+
+        // Delete로도 다음 줄("6. ")을 깨지 않고 빈 불릿 줄만 삭제된다
+        let (after_del, c_del) = delete_empty_list_line(s, empty_bullet_caret).unwrap();
+        assert_eq!(after_del, "- 표준 제품 기능\n6. AI Governance");
+        assert_eq!(c_del, char_len("- 표준 제품 기능\n6. "));
     }
 }

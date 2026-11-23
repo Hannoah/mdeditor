@@ -1,5 +1,14 @@
 # MDEditor 작업 기록
 
+## 2026-11-23 — v0.12.2: 빈 목록 줄 커서 진입·삭제 버그 수정
+
+- **빈 목록 줄 커서 진입 불가 수정 (`src/textops.rs`)**:
+  - `hidden_runs()`가 빈 편집 가능 항목(`- `, `1. `, `- [ ] `, `# `, `> `, `:::toggle `, `[^1]: `)에서도 뒤따르는 줄바꿈(`\n`)을 숨김 구간에 삼키면서 다음 줄 접두사(예: `6. ...`)와 하나의 숨김 구간으로 합쳐지던 문제를 수정.
+  - `is_collapsed_line()`을 분리해 실제로 접히는 비편집 줄(`> [!...]`, `---`, `:::`, 이미지 줄)만 줄바꿈을 포함해 숨기도록 변경하여, 번호 목록 앞의 빈 불릿 줄(`- `)에도 커서가 정확히 진입하도록 해결.
+- **빈 목록 줄 `Delete` 삭제 지원 (`src/textops.rs`, `src/main.rs`)**:
+  - `delete_empty_list_line()` 및 `App::delete_empty_list()`를 추가해 빈 목록 기호 줄에서 `Delete` 키를 누를 때 다음 줄의 번호·불릿 접두사를 훼손하지 않고 빈 줄만 깔끔하게 제거.
+- **검증**: `empty_bullet_before_numbered_line_can_be_focused_and_deleted` 회귀 테스트 추가, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`(56개 통과).
+
 ## 2026-11-23 — v0.12.1: 불릿·연번 블록 메뉴, 목록 계층·줄바꿈 일치화 및 전반 안정성·보안 수정
 
 - **글머리(불릿)·번호(연번) 목록 원클릭 메뉴 및 다중 블록 변환 (`src/theme.rs`, `src/ui.rs`, `src/main.rs`, `src/textops.rs`)**:

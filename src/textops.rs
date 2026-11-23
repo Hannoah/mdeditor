@@ -513,6 +513,16 @@ pub(crate) fn block_inline_spans(block: &str) -> Vec<([usize; 4], Inline)> {
     out
 }
 
+// 줄 전체가 접혀 있어 커서가 서면 안 되는 비편집 줄 (알림 상자 제목·구분선·접기 닫힘·이미지)
+// 빈 목록("- "), 빈 제목("# "), 빈 인용("> ") 등은 사용자가 커서를 두고 입력·삭제할 수 있어야 하므로 제외한다.
+fn is_collapsed_line(line: &str) -> bool {
+    let t = line.trim_start();
+    (t.starts_with('>') && callout_kind(t).is_some())
+        || is_hr_line(line)
+        || t.trim_end() == ":::"
+        || image_line(line).is_some()
+}
+
 // 편집 화면에서 숨긴 기호 구간(문자 위치): (시작, 끝, 줄머리 기호인지). 붙어 있는 줄머리 구간은 하나로 합친다.
 pub(crate) fn hidden_runs(block: &str) -> Vec<(usize, usize, bool)> {
     let mut pre_runs: Vec<(usize, usize, bool)> = Vec::new();
@@ -528,8 +538,8 @@ pub(crate) fn hidden_runs(block: &str) -> Vec<(usize, usize, bool)> {
                 let pre = hidden_prefix(line);
                 if pre > 0 {
                     let mut e = ci + char_len(&line[..pre]);
-                    if pre == line.len() && i + 1 < lines.len() {
-                        e += 1; // 줄 전체를 숨기면 줄바꿈도 함께 (접힌 줄에 커서가 서지 않게)
+                    if is_collapsed_line(line) && pre == line.len() && i + 1 < lines.len() {
+                        e += 1; // 접힌 줄만 줄바꿈까지 함께 숨겨 커서가 서지 않게 한다
                     }
                     match pre_runs.last_mut() {
                         Some(last) if last.1 == ci => last.1 = e,
@@ -689,6 +699,27 @@ pub(crate) fn backspace_list_marker(s: &str, c: usize) -> Option<(String, usize)
     } else {
         Some((replace_range(s, (ls - 1, ls + m), ""), ls - 1))
     }
+}
+
+// 빈 목록 줄("- ", "1. ", "- [ ] ")에서 Delete: 다음 줄과 기호를 섞지 않고 빈 목록 줄 자체를 깔끔히 지운다.
+pub(crate) fn delete_empty_list_line(s: &str, c: usize) -> Option<(String, usize)> {
+    let ls = line_start(s, c);
+    let le = line_end(s, c);
+    let line = &s[byte_idx(s, ls)..byte_idx(s, le)];
+    let m = list_marker_bytes(line)?;
+    if line[m..].trim().is_empty() && c >= ls + char_len(&line[..m]) {
+        if le < char_len(s) {
+            // 뒤에 줄이 있으면 "빈 목록 줄 + \n"을 지우고 다음 줄 내용 시작으로 커서를 둔다
+            let out = replace_range(s, (ls, le + 1), "");
+            let next_line_end = line_end(&out, ls);
+            let next_line = &out[byte_idx(&out, ls)..byte_idx(&out, next_line_end)];
+            let next_m = hidden_prefix(next_line);
+            let caret = ls + char_len(&next_line[..next_m]);
+            return Some((out, caret));
+        }
+        return backspace_list_marker(s, ls + char_len(&line[..m]));
+    }
+    None
 }
 
 // 코드 블록 편집이 숨긴 ``` 줄을 건드렸으면 그 부분만 되돌린다 (코드 부분의 변경은 유지).
