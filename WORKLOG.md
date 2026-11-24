@@ -1,5 +1,12 @@
 # MDEditor 작업 기록
 
+## 2026-11-24 — v0.13.3: 창을 닫아도 mdeditor.exe가 끝나지 않던(좀비 프로세스) 문제 수정
+
+- **원인 (`src/spell.rs`)**: Windows 맞춤법 검사기 COM 객체(`ISpellChecker`)를 UI 스레드의 `thread_local`이 소유했다. Windows에서 Rust는 메인 스레드 `thread_local` 소멸자를 프로세스 종료 중(`DLL_PROCESS_DETACH`, 로더 잠금을 잡은 채, COM 작업 스레드는 이미 종료됨)에 실행하므로 `ComPtr::drop`의 `Release()`가 영원히 기다렸다. 그래서 편집하며 실시간 맞춤법 검사가 한 번이라도 돈 창을 닫으면, 창은 사라지고 종료 코드 0도 기록되지만 스레드 하나가 남아 프로세스가 끝나지 않았다(`HasExited=True`, 스레드 1개, 강제 종료 불가, 재부팅해야 사라짐).
+- **재현**: 같은 COM 초기화 코드만 떼어 낸 실행 파일이 메인 스레드에서 검사 후 `main`을 반환하면 5번 중 5번 같은 좀비가 됨.
+- **수정**: 엔진을 `Box::leak`으로 해제하지 않는다(`thread_local`에는 소멸자 없는 `Cell<Option<&'static _>>`만 둔다). 프로세스가 끝나면 OS가 회수한다. 수정한 재현 파일은 5번 중 5번 정상 종료.
+- **검증**: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+
 ## 2026-11-24 — v0.13.2: 종료된(좀비) MDEditor 프로세스 때문에 설치가 멈추던 문제 수정
 
 - **설치·제거 프로그램 (`src/install.ps1`, `src/uninstall.ps1`)**: 창이 닫히고 이미 끝났지만 커널에 스레드 하나가 걸려 프로세스 목록에 남은 `mdeditor.exe`(`HasExited=True`)는 `WaitForExit`가 영영 false라, v0.13.1에서 "실행 중인 MDEditor가 닫히지 않았습니다"로 설치가 멈췄다. 이미 끝난 프로세스는 닫을 대상에서 뺀다. 실행 파일 잠금은 없음을 확인.

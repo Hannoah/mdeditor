@@ -1450,7 +1450,6 @@ fn check_english_words(
 mod win_spell {
     use super::*;
     use core::ffi::c_void;
-    use std::cell::RefCell;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -1632,8 +1631,21 @@ mod win_spell {
         }
     }
 
+    // 엔진은 일부러 해제하지 않는다(Box::leak). thread_local에 소유시키면 Rust가 프로세스 종료 중
+    // (DLL_PROCESS_DETACH, 로더 잠금 + COM 작업 스레드가 이미 사라진 상태) 소멸자에서 Release()를 불러
+    // 영원히 기다린다 → 창은 닫혔는데 mdeditor.exe가 끝나지 않는 좀비가 된다. 메모리는 OS가 회수한다.
     thread_local! {
-        static ENGINE: RefCell<Option<WinSpellEngine>> = const { RefCell::new(None) };
+        static ENGINE: std::cell::Cell<Option<&'static WinSpellEngine>> = const { std::cell::Cell::new(None) };
+    }
+
+    fn engine() -> &'static WinSpellEngine {
+        ENGINE.with(|c| {
+            c.get().unwrap_or_else(|| {
+                let e: &'static WinSpellEngine = Box::leak(Box::new(WinSpellEngine::init()));
+                c.set(Some(e));
+                e
+            })
+        })
     }
 
     fn utf16_to_string_and_free(ptr: *mut u16) -> String {
@@ -1773,19 +1785,16 @@ mod win_spell {
     }
 
     pub fn suggest(word: &str) -> Vec<String> {
-        ENGINE.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            let eng = slot.get_or_insert_with(WinSpellEngine::init);
-            let checker = if word.chars().any(is_hangul) {
-                &eng.ko
-            } else {
-                &eng.en
-            };
-            checker
-                .as_ref()
-                .map(|c| suggest_with(c, word))
-                .unwrap_or_default()
-        })
+        let eng = engine();
+        let checker = if word.chars().any(is_hangul) {
+            &eng.ko
+        } else {
+            &eng.en
+        };
+        checker
+            .as_ref()
+            .map(|c| suggest_with(c, word))
+            .unwrap_or_default()
     }
 
     pub fn check_segment(
@@ -1799,20 +1808,17 @@ mod win_spell {
         if !has_ascii_word && !has_ko {
             return;
         }
-        ENGINE.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            let eng = slot.get_or_insert_with(WinSpellEngine::init);
-            if has_ascii_word {
-                if let Some(en) = &eng.en {
-                    check_with(en, seg, base, true, ignore, out);
-                }
+        let eng = engine();
+        if has_ascii_word {
+            if let Some(en) = &eng.en {
+                check_with(en, seg, base, true, ignore, out);
             }
-            if has_ko {
-                if let Some(ko) = &eng.ko {
-                    check_with(ko, seg, base, false, ignore, out);
-                }
+        }
+        if has_ko {
+            if let Some(ko) = &eng.ko {
+                check_with(ko, seg, base, false, ignore, out);
             }
-        });
+        }
     }
 }
 
