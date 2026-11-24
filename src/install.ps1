@@ -22,14 +22,15 @@ $classes = "HKCU:\Software\Classes"
 $exts = @(".md", ".markdown")
 
 # 1. 설치된 MDEditor가 실행 중이면 먼저 정상 종료를 요청한다 (앱이 닫히면서 문서를 저장한다)
+#    덮어쓸 설치 폴더의 실행 파일만 닫는다 (개발 빌드·포터블 사본은 건드리지 않는다).
+#    "저장되지 않은 변경사항" 창이 떠서 안 닫히면 강제 종료하지 않고 멈춘다 (편집 내용 보호).
 Step 1
 $procs = @(Get-Process -Name mdeditor -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -ne $KeepPid })
+    Where-Object { $_.Id -ne $KeepPid -and $_.Path -eq $targetExe })
 foreach ($p in $procs) { [void]$p.CloseMainWindow() }
 foreach ($p in $procs) {
-    if (-not $p.WaitForExit(1000)) {
-        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-        [void]$p.WaitForExit(2000)
+    if (-not $p.WaitForExit(8000)) {
+        Fail "실행 중인 MDEditor가 닫히지 않았습니다. 저장하지 않은 문서를 확인하고 MDEditor를 닫은 뒤 다시 설치하세요."
     }
 }
 

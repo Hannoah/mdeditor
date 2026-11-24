@@ -13,6 +13,8 @@ const PLACEHOLDER: &str = "글을 작성하거나 '/'를 눌러 명령어를 사
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let md_paste =
+            self.paste_normalizes() && (self.block_sel.is_some() || self.editor_focused(&ctx));
         let (close_req, win_focused, pasted, ime_preedit) = ctx.input_mut(|i| {
             let close_req = i.viewport().close_requested();
             let mut win_focused = false;
@@ -23,7 +25,11 @@ impl eframe::App for App {
                     egui::Event::WindowFocused(true) => win_focused = true,
                     egui::Event::PasteImage(img) => pasted.push(img.clone()),
                     egui::Event::Paste(s) => {
-                        *s = normalize_pasted_markdown(s);
+                        *s = if md_paste {
+                            normalize_pasted_markdown(s)
+                        } else {
+                            s.replace("\r\n", "\n").replace('\r', "\n") // 문서는 LF만 쓴다
+                        };
                     }
                     egui::Event::Ime(ime) => match ime {
                         egui::ImeEvent::Preedit { text, .. } => {
@@ -6389,15 +6395,31 @@ impl App {
                             After::CloseTab(_) => "탭을 닫기",
                             After::Switch(..) => "폴더를 바꾸기",
                         };
-                        message(
-                            ui,
-                            p,
-                            &format!("{} 전에 저장할까요?\n{}", what, names.join(", ")),
-                        );
+                        // 임시 메모 탭: 저장할 파일이 없으니 "파일로 저장" 창으로 넘긴다
+                        let scratch_tab = match &after {
+                            After::CloseTab(t) if is_scratch_key(t) => Some(t.clone()),
+                            _ => None,
+                        };
+                        let text = match &scratch_tab {
+                            Some(t) => format!(
+                                "'{}' 메모를 닫으면 내용이 사라집니다.\n파일로 저장할까요?",
+                                self.tab_title(t)
+                            ),
+                            None => format!("{} 전에 저장할까요?\n{}", what, names.join(", ")),
+                        };
+                        message(ui, p, &text);
                         footer(ui, p, Some(p.surface), |ui| {
-                            if primary(ui, p, "저장 후 계속").clicked()
-                                || ui.input(|i| i.key_pressed(Key::Enter))
-                            {
+                            let label = if scratch_tab.is_some() {
+                                "파일로 저장..."
+                            } else {
+                                "저장 후 계속"
+                            };
+                            let go = primary(ui, p, label).clicked()
+                                || ui.input(|i| i.key_pressed(Key::Enter));
+                            if let (true, Some(t)) = (go, &scratch_tab) {
+                                self.switch_to_tab(t);
+                                next = Some(Dialog::SaveScratch(String::new()));
+                            } else if go {
                                 let ok = match &after {
                                     After::CloseTab(target) => self.save_quiet(target),
                                     _ => self.save_all(),
@@ -6609,6 +6631,16 @@ impl App {
             *selected = 0;
         } else {
             *selected = (*selected).min(issues.len() - 1);
+            // 제안 목록은 OS 검사기에 하나씩 물어야 해서 느리다: 선택 항목부터, 프레임마다 8ms씩 채운다
+            crate::spell::fill_suggestions(&mut issues[*selected]);
+            let t = Instant::now();
+            for issue in issues.iter_mut() {
+                if t.elapsed() > std::time::Duration::from_millis(8) {
+                    ui.ctx().request_repaint();
+                    break;
+                }
+                crate::spell::fill_suggestions(issue);
+            }
         }
 
         *close |= modal_header(ui, p, theme::SPELL, p.accent, "맞춤법 및 띄어쓰기 검사");
@@ -6714,6 +6746,8 @@ impl App {
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 8.0;
                             let doc_text = self.doc().map(|d| d.text.as_str()).unwrap_or("");
+                            // 항목은 위치 순이므로 줄 번호를 이어서 센다 (항목마다 문서 처음부터 세면 O(항목×문서))
+                            let (mut line_no, mut counted) = (1usize, 0usize);
                             for (idx, issue) in issues.iter().enumerate() {
                                 let is_sel = idx == *selected;
                                 let (kind_label, kind_color) = match issue.kind {
@@ -6728,7 +6762,13 @@ impl App {
                                 {
                                     continue;
                                 }
-                                let line_no = 1 + doc_text[..s].matches('\n').count();
+                                if s >= counted {
+                                    line_no += doc_text[counted..s].matches('\n').count();
+                                    counted = s;
+                                } else {
+                                    line_no = 1 + doc_text[..s].matches('\n').count();
+                                    counted = s;
+                                }
                                 let ls = doc_text[..s].rfind('\n').map_or(0, |i| i + 1);
                                 let le = doc_text[e..]
                                     .find('\n')
@@ -7265,6 +7305,7 @@ impl App {
                     .into_iter()
                     .find(|i| rel_b >= i.range.start && rel_b <= i.range.end)
                     .map(|mut i| {
+                        crate::spell::fill_suggestions(&mut i);
                         i.range = (r.start + i.range.start)..(r.start + i.range.end);
                         i
                     })

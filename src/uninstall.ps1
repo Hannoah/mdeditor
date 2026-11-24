@@ -16,7 +16,11 @@ Step 1
 $procs = @(Get-Process -Name mdeditor -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $targetExe })
 foreach ($p in $procs) { [void]$p.CloseMainWindow() }
 foreach ($p in $procs) {
-    if (-not $p.WaitForExit(4000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    # 저장 확인 창이 떠서 안 닫히면 강제 종료하지 않는다 (편집 내용 보호)
+    if (-not $p.WaitForExit(8000)) {
+        Write-Output "@@ERR 실행 중인 MDEditor가 닫히지 않았습니다. 저장하지 않은 문서를 확인하고 MDEditor를 닫은 뒤 다시 제거하세요."
+        exit 1
+    }
 }
 
 # 2. 파일 연결·탐색기 메뉴·설치 정보

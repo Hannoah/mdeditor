@@ -45,6 +45,27 @@ fn tab_base_name(key: &str) -> std::borrow::Cow<'_, str> {
 // 패닉(release는 abort)으로 죽기 직전에 저장 안 된 문서를 *.recovered.md 로 남기기 위한 스냅샷 (경로, 내용)
 static RECOVERY: std::sync::Mutex<Vec<(PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
 
+// 인쇄용 임시 HTML. 링크 허용 목록(handle_links)이 이 주소 하나만 file://로 통과시킨다.
+fn print_path() -> PathBuf {
+    std::env::temp_dir().join(format!("mdeditor-print-{}.html", std::process::id()))
+}
+
+fn print_url() -> String {
+    format!(
+        "file:///{}",
+        pct_encode(to_slash(&print_path()).trim_start_matches('/'))
+    )
+}
+
+// OS로 넘기는 외부 URL은 안전한 웹·메일 스킴과 인쇄용 임시 HTML만 허용 (file://, smb://, ms-msdt:// 등 차단)
+fn external_url_allowed(url: &str) -> bool {
+    let lower = url.trim_start().to_ascii_lowercase();
+    url == print_url()
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+}
+
 // 인쇄용 임시 HTML(mdeditor-print-<pid>.html)은 브라우저가 읽고 나면 필요 없다: 시작할 때 10분 지난 것을 지운다
 fn clean_old_print_files() {
     let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) else {
@@ -69,6 +90,9 @@ fn install_panic_recovery() {
     std::panic::set_hook(Box::new(move |info| {
         if let Ok(snap) = RECOVERY.try_lock() {
             for (path, text) in snap.iter() {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir); // 인자로 실행하면 문서\MDEditor가 없을 수 있다
+                }
                 let _ = std::fs::write(path, text);
             }
         }
@@ -1400,7 +1424,17 @@ impl App {
         let Some(idx) = self.tabs.iter().position(|t| t == name) else {
             return;
         };
-        if !is_scratch_key(name) && self.docs.get(name).is_some_and(Doc::dirty) {
+        if is_scratch_key(name) {
+            // 임시 메모는 닫으면 사라진다 → 내용이 있으면 묻는다
+            if self
+                .docs
+                .get(name)
+                .is_some_and(|d| !d.text.trim().is_empty())
+            {
+                self.dialog = Some(Dialog::Unsaved(After::CloseTab(name.to_string())));
+                return;
+            }
+        } else if self.docs.get(name).is_some_and(Doc::dirty) {
             self.save_quiet(name);
             if self.docs.get(name).is_some_and(Doc::dirty) {
                 if !matches!(self.dialog, Some(Dialog::Conflict(_))) {
@@ -1684,12 +1718,17 @@ impl App {
                 self.status =
                     format!("{name}: 다른 프로그램이 파일을 바꿨습니다. 저장할 때 선택합니다");
             } else if let Ok(fresh) = Doc::load(&path) {
-                if fresh.text != doc.text {
-                    if self.current.as_deref() == Some(name.as_str()) {
-                        self.deactivate();
-                    }
-                    self.status = format!("{name}: 바뀐 내용을 다시 불러왔습니다");
+                if fresh.text == doc.text {
+                    // 내용은 그대로이고 수정 시각만 바뀜(클라우드 동기화 등): 실행 취소 기록·커서를 유지한다
+                    doc.mtime = fresh.mtime;
+                    doc.crlf = fresh.crlf;
+                    doc.bom = fresh.bom;
+                    continue;
                 }
+                if self.current.as_deref() == Some(name.as_str()) {
+                    self.deactivate();
+                }
+                self.status = format!("{name}: 바뀐 내용을 다시 불러왔습니다");
                 self.docs.insert(name, fresh);
             }
         }
@@ -1785,7 +1824,8 @@ impl App {
         let issues = spell::check_document(&doc.text, &self.spell_ignore);
         let fixes: Vec<(Range<usize>, String)> = issues
             .into_iter()
-            .filter_map(|i| {
+            .filter_map(|mut i| {
+                spell::fill_suggestions(&mut i);
                 let sug = i.suggestions.into_iter().next()?;
                 Some((i.range, sug))
             })
@@ -1946,6 +1986,22 @@ impl App {
             .file_name()
             .ok_or_else(|| "파일 이름이 올바르지 않습니다".to_string())?;
         let dest_canon = parent_dir.join(file_name);
+        // 작업 폴더 밖으로 저장하면 폴더가 바뀌며 다른 파일 탭이 모두 닫힌다 → 그 탭들을 먼저 저장하고, 못 하면 멈춘다
+        if dest_canon.strip_prefix(&self.root).is_err() {
+            let others: Vec<String> = self
+                .docs
+                .iter()
+                .filter(|(k, d)| **k != cur_key && !d.scratch && d.dirty())
+                .map(|(k, _)| k.clone())
+                .collect();
+            let failed: Vec<String> = others.into_iter().filter(|n| !self.save_quiet(n)).collect();
+            if !failed.is_empty() {
+                return Err(format!(
+                    "다른 탭을 저장하지 못해 다른 폴더로 옮기지 않았습니다: {}",
+                    failed.join(", ")
+                ));
+            }
+        }
         let body = self
             .docs
             .get(&cur_key)
@@ -1977,7 +2033,6 @@ impl App {
             self.docs.insert(r.clone(), doc);
             r
         } else {
-            self.save_all();
             self.deactivate();
             self.root = parent_dir;
             self.docs.retain(|k, _| is_scratch_key(k));
@@ -2074,7 +2129,8 @@ impl App {
             return Ok(());
         }
         let dst = self.root.join(&to);
-        if dst.exists() {
+        // 대소문자만 바꾸는 경우(a.md → A.md): 대소문자 무시 파일 시스템에서는 dst가 원본 자신이다
+        if dst.exists() && canon(&dst) != canon(&self.root.join(from)) {
             return Err(format!("이미 있는 파일입니다: {to}"));
         }
         if let Some(parent) = dst.parent() {
@@ -2264,6 +2320,21 @@ impl App {
             return false;
         };
         !r.is_empty() && parse_md_table(&doc.text[r]).is_some()
+    }
+
+    // 붙여넣은 글을 마크다운으로 정리(normalize_pasted_markdown)할지: 캔버스의 일반 블록에 넣을 때만.
+    // 코드·수식 블록과 표 셀, 대화상자에는 원문 그대로 넣는다 (탭 → 공백 변환이 Makefile·Go 코드를 망가뜨린다)
+    fn paste_normalizes(&self) -> bool {
+        if self.dialog.is_some() || self.is_visual_table_active() {
+            return false;
+        }
+        match (self.active_block(), self.doc()) {
+            (Some(r), Some(doc)) => {
+                let b = &doc.text[r];
+                code_body_range(b).is_none() && !is_math_block(b)
+            }
+            _ => self.block_sel.is_some(),
+        }
     }
 
     fn editor_focused(&self, ctx: &egui::Context) -> bool {
@@ -3136,7 +3207,11 @@ impl App {
 
     fn paste_from_clipboard(&mut self, ctx: &egui::Context) {
         if let Some(s) = theme::clipboard_text() {
-            let norm = normalize_pasted_markdown(&s);
+            let norm = if self.paste_normalizes() {
+                normalize_pasted_markdown(&s)
+            } else {
+                s.replace("\r\n", "\n").replace('\r', "\n")
+            };
             self.insert(ctx, &norm);
         } else {
             self.status = "클립보드에 붙여넣을 텍스트가 없습니다".into();
@@ -4295,7 +4370,14 @@ impl App {
         let local: Vec<String> = ctx.output_mut(|o| {
             let mut taken = Vec::new();
             o.commands.retain(|c| match c {
-                egui::OutputCommand::OpenUrl(u) if !u.url.contains("://") => {
+                egui::OutputCommand::OpenUrl(u)
+                    if !u.url.contains("://")
+                        && !u
+                            .url
+                            .trim_start()
+                            .to_ascii_lowercase()
+                            .starts_with("mailto:") =>
+                {
                     taken.push(u.url.clone());
                     false
                 }
@@ -4306,13 +4388,7 @@ impl App {
                     taken.push(u.url[scheme_prefix.len()..].to_string());
                     false
                 }
-                // OS로 넘기는 외부 URL은 안전한 웹·메일 스킴만 허용 (file://, smb://, ms-msdt:// 등 차단)
-                egui::OutputCommand::OpenUrl(u) => {
-                    let lower = u.url.trim_start().to_ascii_lowercase();
-                    lower.starts_with("http://")
-                        || lower.starts_with("https://")
-                        || lower.starts_with("mailto:")
-                }
+                egui::OutputCommand::OpenUrl(u) => external_url_allowed(&u.url),
                 _ => true,
             });
             taken
@@ -5378,12 +5454,8 @@ impl App {
                 "<script>window.onload = () => window.print();</script>\n</body>",
                 1,
             );
-        let path = std::env::temp_dir().join(format!("mdeditor-print-{}.html", std::process::id()));
-        match save_atomic(&path, html.as_bytes()) {
-            Ok(()) => ctx.open_url(egui::OpenUrl::new_tab(format!(
-                "file:///{}",
-                pct_encode(to_slash(&path).trim_start_matches('/'))
-            ))),
+        match save_atomic(&print_path(), html.as_bytes()) {
+            Ok(()) => ctx.open_url(egui::OpenUrl::new_tab(print_url())),
             Err(e) => self.status = format!("인쇄 준비 실패: {e}"),
         }
     }
@@ -7576,6 +7648,124 @@ mod tests {
         bump(&file);
         assert!(h.state_mut().save_quiet("a.md"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "내 편집\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // v0.13.1 검토에서 찾은 버그들의 회귀 테스트
+    #[test]
+    fn review_fixes_print_saveas_scratch_close_rename_sync() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_review_fixes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "에이\n").unwrap();
+        std::fs::write(dir.join("b.md"), "비\n").unwrap();
+        let bump = |f: &Path| {
+            let h = std::fs::OpenOptions::new().write(true).open(f).unwrap();
+            h.set_modified(std::time::SystemTime::now() + Duration::from_secs(30))
+                .unwrap();
+        };
+        let mut h = conflict_app(&dir);
+        h.run_steps(2);
+
+        // 1. 인쇄용 임시 HTML(file://)은 링크 허용 목록을 통과하고, 다른 file://·위험 스킴은 막힌다
+        assert!(external_url_allowed(&print_url()));
+        assert!(external_url_allowed("mailto:a@b.c"));
+        assert!(external_url_allowed("https://example.com"));
+        assert!(!external_url_allowed(
+            "file:///C:/Windows/System32/calc.exe"
+        ));
+        assert!(!external_url_allowed("ms-msdt://x"));
+
+        // 2. 다른 폴더로 "다른 이름 저장": 다른 탭을 저장하지 못하면 탭을 버리지 않고 멈춘다
+        h.state_mut().open_file("b.md");
+        {
+            let d = h.state_mut().docs.get_mut("b.md").unwrap();
+            d.text = "비 편집\n".into();
+            d.refresh_meta();
+        }
+        std::fs::write(dir.join("b.md"), "외부 편집\n").unwrap();
+        bump(&dir.join("b.md"));
+        h.state_mut().switch_to_tab("a.md");
+        h.state_mut().dialog = None;
+        let outside = dir.with_extension("out").join("x.md");
+        assert!(h.state_mut().save_as_path(&outside).is_err());
+        assert!(!outside.exists());
+        assert_eq!(h.state().docs["b.md"].text, "비 편집\n");
+        assert_eq!(h.state().current.as_deref(), Some("a.md"));
+        h.state_mut().dialog = None;
+
+        // 3. 내용 있는 임시 메모 탭은 닫기 전에 묻고, 빈 메모 탭은 바로 닫는다
+        h.state_mut().new_tab();
+        let memo = h.state().current.clone().unwrap();
+        {
+            let d = h.state_mut().doc_mut().unwrap();
+            d.text = "중요한 메모".into();
+            d.refresh_meta();
+        }
+        h.state_mut().close_tab(&memo);
+        assert!(matches!(
+            h.state().dialog,
+            Some(Dialog::Unsaved(After::CloseTab(_)))
+        ));
+        assert!(h.state().tabs.contains(&memo));
+        h.state_mut().dialog = None;
+        h.state_mut().new_tab();
+        let empty = h.state().current.clone().unwrap();
+        h.state_mut().close_tab(&empty);
+        assert!(h.state().dialog.is_none() && !h.state().tabs.contains(&empty));
+
+        // 4. 대소문자만 바꾸는 이름 변경
+        h.state_mut().rename("a.md", "A.md").unwrap();
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"A.md".to_string()), "{names:?}");
+
+        // 5. 수정 시각만 바뀌면 다시 읽지 않는다 (실행 취소 기록 유지)
+        {
+            let d = h.state_mut().docs.get_mut("A.md").unwrap();
+            d.text = "에이 편집\n".into();
+            d.refresh_meta();
+        }
+        assert!(h.state_mut().save_quiet("A.md"));
+        bump(&dir.join("A.md"));
+        h.state_mut().sync_from_disk();
+        let d = &h.state().docs["A.md"];
+        assert!(!d.undo.is_empty());
+        assert_eq!(d.mtime, modified(&dir.join("A.md")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 붙여넣기 정리(탭 → 공백, • → -)는 일반 블록에만. 코드 블록에는 원문 그대로.
+    #[test]
+    fn paste_keeps_code_verbatim_and_normalizes_prose() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_paste_scope");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d1 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, None, &d1));
+        h.run_steps(3);
+        for ch in ["`", "`", "`", " "] {
+            h.event(egui::Event::Text(ch.into()));
+            h.step();
+        }
+        h.run_steps(2);
+        h.event(egui::Event::Paste("all:\r\n\tgo build\n• x".into()));
+        h.run_steps(2);
+        assert_eq!(
+            h.state().doc().unwrap().text,
+            "```\nall:\n\tgo build\n• x\n```"
+        );
+
+        h.state_mut().new_tab();
+        h.run_steps(2);
+        h.event(egui::Event::Paste("• 항목".into()));
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().text, "- 항목");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

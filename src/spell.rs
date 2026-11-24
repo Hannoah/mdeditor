@@ -27,6 +27,28 @@ pub fn check_block(block: &str, ignore: &HashSet<String>) -> Vec<SpellIssue> {
     check_text(block, ignore, false)
 }
 
+// 검사 결과에는 OS 맞춤법 검사기의 제안이 비어 있다 (느려서). 화면에 보여 줄 때만 채운다.
+// ponytail: 단어별 캐시는 세션 동안 계속 커진다 — 오타 단어 수만큼이라 작다
+pub fn fill_suggestions(issue: &mut SpellIssue) {
+    if issue.kind != IssueKind::Spelling || !issue.suggestions.is_empty() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        thread_local! {
+            static CACHE: RefCell<HashMap<String, Vec<String>>> = RefCell::default();
+        }
+        issue.suggestions = CACHE.with(|c| {
+            c.borrow_mut()
+                .entry(issue.word.clone())
+                .or_insert_with(|| win_spell::suggest(&issue.word))
+                .clone()
+        });
+    }
+}
+
 fn check_text(text: &str, ignore: &HashSet<String>, skip_frontmatter: bool) -> Vec<SpellIssue> {
     let mut issues = Vec::new();
     for seg in prose_segments(text, skip_frontmatter) {
@@ -1709,28 +1731,7 @@ mod win_spell {
                     suggestions.push(String::new());
                 }
 
-                if suggestions.is_empty() {
-                    let word_w: Vec<u16> = word.encode_utf16().chain([0]).collect();
-                    let mut sug_raw: *mut c_void = core::ptr::null_mut();
-                    if (vtbl.suggest)(checker.0, word_w.as_ptr(), &mut sug_raw) >= 0
-                        && !sug_raw.is_null()
-                    {
-                        let sug_enum = ComPtr(sug_raw);
-                        let sv = sug_enum.vtbl::<IEnumStringVtbl>();
-                        let mut ptrs = [core::ptr::null_mut::<u16>(); 5];
-                        let mut fetched = 0u32;
-                        let shr = (sv.next)(sug_enum.0, 5, ptrs.as_mut_ptr(), &mut fetched);
-                        if shr >= 0 {
-                            for p in ptrs.iter().take(fetched as usize) {
-                                let s = utf16_to_string_and_free(*p);
-                                if !s.is_empty() && s != word && !suggestions.contains(&s) {
-                                    suggestions.push(s);
-                                }
-                            }
-                        }
-                    }
-                }
-
+                // 제안 목록(Suggest)은 오류 하나에 ~11ms라 여기서 받지 않는다: 보여 줄 때 fill_suggestions가 받는다
                 out.push(SpellIssue {
                     range: (base + sb)..(base + eb),
                     word: word.to_string(),
@@ -1744,6 +1745,47 @@ mod win_spell {
                 });
             }
         }
+    }
+
+    fn suggest_with(checker: &ComPtr, word: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let word_w: Vec<u16> = word.encode_utf16().chain([0]).collect();
+        unsafe {
+            let vtbl = checker.vtbl::<ISpellCheckerVtbl>();
+            let mut sug_raw: *mut c_void = core::ptr::null_mut();
+            if (vtbl.suggest)(checker.0, word_w.as_ptr(), &mut sug_raw) < 0 || sug_raw.is_null() {
+                return out;
+            }
+            let sug_enum = ComPtr(sug_raw);
+            let sv = sug_enum.vtbl::<IEnumStringVtbl>();
+            let mut ptrs = [core::ptr::null_mut::<u16>(); 5];
+            let mut fetched = 0u32;
+            if (sv.next)(sug_enum.0, 5, ptrs.as_mut_ptr(), &mut fetched) >= 0 {
+                for p in ptrs.iter().take(fetched as usize) {
+                    let s = utf16_to_string_and_free(*p);
+                    if !s.is_empty() && s != word && !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn suggest(word: &str) -> Vec<String> {
+        ENGINE.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let eng = slot.get_or_insert_with(WinSpellEngine::init);
+            let checker = if word.chars().any(is_hangul) {
+                &eng.ko
+            } else {
+                &eng.en
+            };
+            checker
+                .as_ref()
+                .map(|c| suggest_with(c, word))
+                .unwrap_or_default()
+        })
     }
 
     pub fn check_segment(

@@ -572,7 +572,13 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     let preset = FONT_PRESETS.iter().find(|p| p.id == choice);
 
     let reg_found = if let Some(path) = custom_path {
-        add("regular", load_font_data(path, 0).map(|fd| (0, fd)))
+        // 사용자가 고른 글꼴 파일은 실행 중 바뀔 수 있다. Unix에서 매핑한 파일이 잘리면 SIGBUS로 죽으므로 메모리로 읽는다.
+        // (Windows는 매핑된 파일을 자를 수 없어 안전)
+        #[cfg(unix)]
+        let fd = std::fs::read(path).ok().map(egui::FontData::from_owned);
+        #[cfg(not(unix))]
+        let fd = load_font_data(path, 0);
+        add("regular", fd.map(|fd| (0, fd)))
     } else if let Some(p) = preset {
         add("regular", find(p.regular))
     } else {
