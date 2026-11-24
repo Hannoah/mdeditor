@@ -3167,13 +3167,25 @@ impl App {
         }
         let mut slots = std::mem::take(&mut self.canvas_slots);
         {
-            let doc = &self.docs[&name];
-            collect_doc_slots_into(
-                &doc.text,
-                &doc.blocks,
-                active.as_ref().filter(|r| r.is_empty()).map(|r| r.start),
-                &mut slots,
-            );
+            let scroll_to = self.scroll_to;
+            let doc = self.docs.get_mut(&name).unwrap();
+            loop {
+                collect_doc_slots_into(
+                    &doc.text,
+                    &doc.blocks,
+                    active.as_ref().filter(|r| r.is_empty()).map(|r| r.start),
+                    &mut slots,
+                );
+                // 편집·찾기·목차로 접힌 구간 안에 들어가면 그 제목을 펼친다
+                match hide_folded(&doc.text, &mut slots, &doc.folds, |s| {
+                    active.as_ref() == Some(s) || scroll_to == Some(s.start)
+                }) {
+                    Some(k) => {
+                        doc.folds.remove(&k);
+                    }
+                    None => break,
+                }
+            }
         }
         let mut items = std::mem::take(&mut self.canvas_items);
         items.clear();
@@ -3220,6 +3232,7 @@ impl App {
         let mut fmt = None;
         let mut slash = None;
         let mut toc_active = None;
+        let mut fold_toggle: Option<String> = None;
         let mut block_rects = std::mem::take(&mut self.canvas_rects);
         block_rects.clear();
 
@@ -3480,6 +3493,49 @@ impl App {
                                     }
                                 }
                             }
+                            // 제목 왼쪽 접기 화살표: 마우스를 올리거나 접혀 있을 때 보인다
+                            if let Some(lv) = (!r.is_empty())
+                                .then(|| heading_level(text[r.clone()].trim_start()))
+                                .flatten()
+                            {
+                                let row = block_rects.last().map_or(Rect::NOTHING, |b| b.1);
+                                let key = text[r.clone()].trim();
+                                let folded = self.docs[&name].folds.contains(key);
+                                let top = row.top() + HEADING_TOP[lv - 1];
+                                let cy = top + (row.bottom() - top).clamp(0.0, body * 2.4) * 0.5;
+                                let cx = row.left() - if self.line_numbers { 5.0 } else { 14.0 };
+                                let hit =
+                                    Rect::from_center_size(egui::pos2(cx, cy), vec2(16.0, 22.0));
+                                let resp = ui
+                                    .interact(
+                                        hit,
+                                        egui::Id::unique(("fold", r.start)),
+                                        Sense::click(),
+                                    )
+                                    .on_hover_text(if folded { "펼치기" } else { "접기" });
+                                if folded || ui.rect_contains_pointer(row.with_min_x(hit.left())) {
+                                    ui.painter().text(
+                                        egui::pos2(cx, cy),
+                                        Align2::CENTER_CENTER,
+                                        if folded { "▶" } else { "▼" },
+                                        FontId::proportional(9.0),
+                                        if resp.hovered() {
+                                            p.text
+                                        } else if folded {
+                                            p.muted
+                                        } else {
+                                            p.faint
+                                        },
+                                    );
+                                }
+                                if resp.hovered() {
+                                    ctx.set_cursor_icon(CursorIcon::PointingHand);
+                                }
+                                if resp.clicked() {
+                                    fold_toggle = Some(key.to_string());
+                                    consumed = true;
+                                }
+                            }
                             ui.add_space(4.0);
                         }
                         let col_bottom = ui.cursor().top();
@@ -3667,6 +3723,20 @@ impl App {
             ctx.request_repaint();
         }
         self.toc_active = toc_active;
+        if let Some(k) = fold_toggle {
+            if let Some(folds) = self.docs.get_mut(&name).map(|d| &mut d.folds) {
+                if !folds.remove(&k) {
+                    folds.insert(k);
+                }
+            }
+            // 접은 구간 안에서 편집 중이었으면 제목으로 커서를 옮긴다 (다음 프레임에 다시 펼쳐지지 않게)
+            if self
+                .active
+                .is_some_and(|a| self.nav_slots().iter().all(|s| s.start != a))
+            {
+                self.deactivate();
+            }
+        }
         if delete_block_now {
             if self.delete_current_blocks() {
                 self.status = "표를 삭제했습니다".into();
@@ -6031,12 +6101,15 @@ impl App {
                                     );
                                     let idx =
                                         matches.iter().position(|&m| m == sel).map_or(0, |i| i + 1);
-                                    ui.label(
-                                        RichText::new(format!("{idx}/{}", matches.len()))
-                                            .family(FontFamily::Monospace)
-                                            .size(11.0)
-                                            .color(p.faint),
-                                    );
+                                    match &self.find.err {
+                                        Some(e) => ui.label(RichText::new(e).size(11.0).color(RED)),
+                                        None => ui.label(
+                                            RichText::new(format!("{idx}/{}", matches.len()))
+                                                .family(FontFamily::Monospace)
+                                                .size(11.0)
+                                                .color(p.faint),
+                                        ),
+                                    };
                                     r
                                 })
                                 .inner;
@@ -6051,19 +6124,41 @@ impl App {
                                 });
                                 r.request_focus();
                             }
-                            let case_color = if self.find.case { p.accent } else { p.muted };
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("Aa").size(12.0).color(case_color),
-                                    )
-                                    .min_size(vec2(28.0, 26.0)),
-                                )
-                                .on_hover_text("대소문자 구분 (Case Sensitive)")
-                                .clicked()
-                            {
-                                self.find.case = !self.find.case;
+                            for (label, tip, on) in [
+                                ("Aa", "대소문자 구분 (Alt+C)", &mut self.find.case),
+                                ("ab", "단어 단위 (Alt+W)", &mut self.find.word),
+                                (
+                                    ".*",
+                                    "정규식 (Alt+R) — 바꿀 내용에 $1 사용 가능",
+                                    &mut self.find.regex,
+                                ),
+                            ] {
+                                let color = if *on { p.accent } else { p.muted };
+                                let text = RichText::new(label).size(12.0).color(color);
+                                let text = if label == "ab" {
+                                    text.underline()
+                                } else {
+                                    text
+                                };
+                                if ui
+                                    .add(egui::Button::new(text).min_size(vec2(28.0, 26.0)))
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    *on = !*on;
+                                }
                             }
+                            ui.input_mut(|i| {
+                                for (key, on) in [
+                                    (Key::C, &mut self.find.case),
+                                    (Key::W, &mut self.find.word),
+                                    (Key::R, &mut self.find.regex),
+                                ] {
+                                    if i.consume_key(Modifiers::ALT, key) {
+                                        *on = !*on;
+                                    }
+                                }
+                            });
                             if ui
                                 .add(
                                     egui::Button::new(RichText::new("▲").size(11.0).color(p.muted))
@@ -6559,6 +6654,7 @@ impl App {
                         cached_rev,
                         cached_spell_rev,
                         issues,
+                        checking,
                     } => {
                         self.spellcheck_modal(
                             ui,
@@ -6568,6 +6664,7 @@ impl App {
                             cached_rev,
                             cached_spell_rev,
                             issues,
+                            checking,
                             &mut close,
                         );
                     }
@@ -6611,17 +6708,28 @@ impl App {
         cached_rev: &mut u64,
         cached_spell_rev: &mut u64,
         issues: &mut Vec<crate::spell::SpellIssue>,
+        checking: &mut bool,
         close: &mut bool,
     ) {
+        // 작업 스레드 결과 받기 (마지막으로 보낸 검사만)
+        if let Some((t, found)) = self.spell_worker.as_ref().and_then(|w| w.poll()) {
+            if t == self.spell_ticket {
+                *issues = found;
+                *checking = false;
+            }
+        }
         if let Some(doc) = self.doc() {
             if self.current != *cached_key
                 || doc.rev != *cached_rev
                 || self.spell_rev != *cached_spell_rev
             {
-                *issues = crate::spell::check_document(&doc.text, &self.spell_ignore);
+                // 모달 밖에서 바뀐 문서: 이전 결과의 위치가 틀어졌으니 비우고 다시 검사한다
+                issues.clear();
                 *cached_key = self.current.clone();
                 *cached_rev = doc.rev;
                 *cached_spell_rev = self.spell_rev;
+                self.submit_spellcheck(ui.ctx());
+                *checking = true;
             }
         } else {
             *cached_key = None;
@@ -6660,7 +6768,20 @@ impl App {
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if issues.is_empty() {
+                    if *checking {
+                        ui.add(egui::Spinner::new().size(13.0).color(p.muted));
+                        ui.label(
+                            RichText::new(if issues.is_empty() {
+                                "검사 중..."
+                            } else {
+                                "다시 검사 중..."
+                            })
+                            .size(12.5)
+                            .color(p.muted),
+                        );
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(100));
+                    } else if issues.is_empty() {
                         ui.label(
                             RichText::new("맞춤법 및 띄어쓰기 오류가 없습니다.")
                                 .size(12.5)
@@ -6721,7 +6842,9 @@ impl App {
                 bottom: 14,
             })
             .show(ui, |ui| {
-                if issues.is_empty() {
+                if issues.is_empty() && *checking {
+                    ui.add_space(60.0);
+                } else if issues.is_empty() {
                     Frame::new()
                         .fill(p.elevated)
                         .stroke(Stroke::new(1.0, p.border))
@@ -6902,7 +7025,7 @@ impl App {
                 }
             });
 
-        let has_auto_fix = issues.iter().any(|i| !i.suggestions.is_empty());
+        let has_auto_fix = !*checking && issues.iter().any(|i| !i.suggestions.is_empty());
         footer(ui, p, None, |ui| {
             if has_auto_fix && ghost(ui, p, "모두 자동 교정", Some(p.accent)).clicked() {
                 fix_all = true;
@@ -6916,12 +7039,24 @@ impl App {
         if toggle_live {
             self.toggle_spellcheck();
         }
+        // 고치거나 무시한 항목은 바로 목록에서 빼고(남은 위치는 보정), 확인 검사는 작업 스레드로 보낸다
+        let before = self.doc().map_or(0, |d| d.text.len());
         if let Some((rg, rep)) = fix_req {
-            self.apply_spell_fix(rg, &rep);
+            self.apply_spell_fix(rg.clone(), &rep);
+            let delta = self.doc().map_or(0, |d| d.text.len()) as isize - before as isize;
+            let cut = rg.start.saturating_sub(usize::from(rep.is_empty()));
+            issues.retain(|i| i.range.end <= cut || i.range.start >= rg.end);
+            for i in issues.iter_mut().filter(|i| i.range.start >= rg.end) {
+                i.range = (i.range.start as isize + delta) as usize
+                    ..(i.range.end as isize + delta) as usize;
+            }
+            self.resync_spellcheck(ui.ctx(), cached_key, cached_rev, cached_spell_rev, checking);
         } else if let Some(w) = ignore_req {
             self.ignore_spell_word(&w);
+            issues.retain(|i| i.word.trim() != w.trim());
+            self.resync_spellcheck(ui.ctx(), cached_key, cached_rev, cached_spell_rev, checking);
         } else if fix_all {
-            let n = self.apply_all_spell_fixes();
+            let n = self.apply_all_spell_fixes(std::mem::take(issues));
             self.status = if n > 0 {
                 format!("맞춤법 {n}건을 자동 교정했습니다")
             } else {
@@ -6933,6 +7068,36 @@ impl App {
             *close = true;
         } else if recheck {
             *cached_rev = u64::MAX;
+        }
+    }
+
+    fn submit_spellcheck(&mut self, ctx: &egui::Context) {
+        let Some(text) = self.doc().map(|d| d.text.clone()) else {
+            return;
+        };
+        let worker = self.spell_worker.get_or_insert_with(|| {
+            let ctx = ctx.clone();
+            crate::spell::Worker::new(move || ctx.request_repaint())
+        });
+        self.spell_ticket += 1;
+        worker.submit(self.spell_ticket, text, self.spell_ignore.clone());
+    }
+
+    // 모달 안에서 직접 바꾼 뒤: 목록은 이미 맞춰 두었으니 비우지 않고 확인 검사만 보낸다
+    fn resync_spellcheck(
+        &mut self,
+        ctx: &egui::Context,
+        cached_key: &mut Option<String>,
+        cached_rev: &mut u64,
+        cached_spell_rev: &mut u64,
+        checking: &mut bool,
+    ) {
+        if let Some(rev) = self.doc().map(|d| d.rev) {
+            *cached_key = self.current.clone();
+            *cached_rev = rev;
+            *cached_spell_rev = self.spell_rev;
+            self.submit_spellcheck(ctx);
+            *checking = true;
         }
     }
 
@@ -9505,6 +9670,7 @@ fn help_body(ui: &mut egui::Ui, p: &Pal) {
                             ),
                             ("Ctrl + F / H", "본문 찾기 / 찾기 및 바꾸기"),
                             ("F3 / Shift + F3", "다음 / 이전 일치 항목"),
+                            ("Alt + C / W / R", "찾기: 대소문자 / 단어 단위 / 정규식"),
                             ("F7 / Shift + F7", "맞춤법 검사 열기 / 실시간 밑줄 토글"),
                             (
                                 "Ctrl + B / I / K",

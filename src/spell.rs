@@ -23,6 +23,45 @@ pub fn check_document(text: &str, ignore: &HashSet<String>) -> Vec<SpellIssue> {
     check_text(text, ignore, true)
 }
 
+// 전체 문서 검사를 맡는 작업 스레드. 큰 문서는 OS 검사기 호출만 몇 초 걸려 화면이 멈추지 않게 한다.
+// 스레드는 프로세스가 끝날 때까지 산다 (COM 개체를 스레드 종료 중에 해제하지 않도록, engine() 참고).
+pub struct Worker {
+    tx: std::sync::mpsc::Sender<(u64, String, HashSet<String>)>,
+    rx: std::sync::mpsc::Receiver<(u64, Vec<SpellIssue>)>,
+}
+
+impl Worker {
+    pub fn new(wake: impl Fn() + Send + 'static) -> Worker {
+        let (tx, jobs) = std::sync::mpsc::channel::<(u64, String, HashSet<String>)>();
+        let (done, rx) = std::sync::mpsc::channel();
+        let _ = std::thread::Builder::new()
+            .name("spellcheck".into())
+            .spawn(move || {
+                while let Ok(mut job) = jobs.recv() {
+                    // 밀린 요청은 마지막 것만 검사한다
+                    while let Ok(newer) = jobs.try_recv() {
+                        job = newer;
+                    }
+                    let issues = check_document(&job.1, &job.2);
+                    if done.send((job.0, issues)).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            });
+        Worker { tx, rx }
+    }
+
+    pub fn submit(&self, ticket: u64, text: String, ignore: HashSet<String>) {
+        let _ = self.tx.send((ticket, text, ignore));
+    }
+
+    // 끝난 검사 중 가장 최근 것
+    pub fn poll(&self) -> Option<(u64, Vec<SpellIssue>)> {
+        self.rx.try_iter().last()
+    }
+}
+
 pub fn check_block(block: &str, ignore: &HashSet<String>) -> Vec<SpellIssue> {
     check_text(block, ignore, false)
 }
@@ -1809,16 +1848,91 @@ mod win_spell {
             return;
         }
         let eng = engine();
-        if has_ascii_word {
-            if let Some(en) = &eng.en {
-                check_with(en, seg, base, true, ignore, out);
+        // 문장 단위로 나눠 결과를 기억한다: 긴 문단에서 한 글자를 고쳐도 그 문장만 OS 검사기에 다시 묻는다
+        for (off, sentence) in sentences(seg) {
+            if has_ascii_word && sentence.bytes().any(|b| b.is_ascii_alphabetic()) {
+                if let Some(en) = &eng.en {
+                    check_cached(en, sentence, base + off, true, ignore, out);
+                }
+            }
+            if has_ko && sentence.chars().any(is_hangul) {
+                if let Some(ko) = &eng.ko {
+                    check_cached(ko, sentence, base + off, false, ignore, out);
+                }
             }
         }
-        if has_ko {
-            if let Some(ko) = &eng.ko {
-                check_with(ko, seg, base, false, ignore, out);
+    }
+
+    // 문장 끝(. ? ! 。 뒤 공백)에서 자른 (시작 바이트, 조각). 경계가 글 내용으로만 정해져야
+    // 앞 문장을 고쳐도 뒤 문장 조각이 그대로여서 캐시에 맞는다.
+    // ponytail: 문장 부호 없이 긴 덩어리는 통째로 한 조각
+    fn sentences(seg: &str) -> Vec<(usize, &str)> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut prev_end = false;
+        for (i, c) in seg.char_indices() {
+            if prev_end && c.is_whitespace() {
+                let end = i + c.len_utf8();
+                out.push((start, &seg[start..end]));
+                start = end;
             }
+            prev_end = matches!(c, '.' | '?' | '!' | '。');
         }
+        if start < seg.len() {
+            out.push((start, &seg[start..]));
+        }
+        out
+    }
+
+    // 같은 조각은 OS 검사기에 다시 묻지 않는다 (무시 단어는 꺼낼 때 거른다)
+    fn check_cached(
+        checker: &ComPtr,
+        sentence: &str,
+        base: usize,
+        is_english: bool,
+        ignore: &HashSet<String>,
+        out: &mut Vec<SpellIssue>,
+    ) {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        thread_local! {
+            static CACHE: RefCell<HashMap<(bool, String), Vec<SpellIssue>>> = RefCell::default();
+        }
+        CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            let key = (is_english, sentence.to_string());
+            if !c.contains_key(&key) {
+                if c.len() > 20_000 {
+                    c.clear(); // ponytail: 상한에서 통째로 비운다, LRU는 필요해지면
+                }
+                let mut found = Vec::new();
+                check_with(
+                    checker,
+                    sentence,
+                    0,
+                    is_english,
+                    &HashSet::new(),
+                    &mut found,
+                );
+                c.insert(key.clone(), found);
+            }
+            for i in &c[&key] {
+                if !is_ignored(&i.word, ignore) {
+                    let mut i = i.clone();
+                    i.range = (i.range.start + base)..(i.range.end + base);
+                    out.push(i);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn sentences_split_after_sentence_end_only() {
+        let s = "첫 문장입니다. Second one? 셋째!마지막";
+        let parts: Vec<_> = sentences(s).into_iter().map(|x| x.1).collect();
+        assert_eq!(parts, ["첫 문장입니다. ", "Second one? ", "셋째!마지막"]);
+        assert_eq!(parts.concat(), s);
+        assert_eq!(sentences("v1.2 x").len(), 1);
     }
 }
 

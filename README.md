@@ -2,7 +2,7 @@
 
 **Rust로 만든 순수 로컬 Markdown 편집기 — 브라우저·웹뷰·로컬 서버 없이 네이티브 창 하나로 동작합니다.**
 
-![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-66%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-71%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
@@ -33,6 +33,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 - **떠 있는 서식 막대 & 서식 복사**: 글자나 여러 블록을 선택하면 굵게·기울임·취소선·형광펜·코드·키캡·**글머리 목록·번호 목록**·링크·서식 지우기·**서식 복사/붙여넣기(`Ctrl+Alt+B`/`Ctrl+Alt+P`)** 막대가 나타납니다.
 - **스마트 목록 & 계층 들여쓰기**: 목록에서 `Enter`를 누르면 다음 기호·번호를 이어 쓰고, 빈 항목에서 `Enter`를 누르면 목록이 끝납니다. `Tab`/`Shift+Tab`으로 일반 문단 2칸 들여쓰기 및 불릿·연번 하위 계층화/역들여쓰기를 지원하며, 외부 챗봇 결과를 붙여넣을 때도 유니코드 불릿·굵게 감싼 연번·제목/표/구분선 블록을 자동으로 정규화합니다.
 - 렌더링된 **할 일 체크박스를 클릭하면 원문이 바로 바뀝니다.**
+- **제목 접기**: 제목 왼쪽에 마우스를 올리면 나타나는 `▼`를 누르면 다음 같은(또는 상위) 수준 제목까지 접힙니다. `↑`/`↓`는 접힌 구간을 건너뛰고, 찾기·목차로 안쪽에 들어가면 자동으로 펼쳐집니다 (파일 내용은 바뀌지 않음).
 - 마지막 블록 아래 빈 곳을 클릭하면 새 블록이 생깁니다.
 - **문서 단위 실행 취소** (`Ctrl+Z` / `Ctrl+Y`): 글자 입력뿐 아니라 블록 나누기·합치기, 서식, 슬래시 메뉴, 모두 바꾸기, 체크박스까지 되돌립니다. 이어 친 입력은 한 단계로 묶입니다.
 - 서식 단축키는 **토글**입니다: 굵은 글자에서 `Ctrl+B`를 다시 누르면 해제됩니다. `Ctrl+K`는 링크를 만든 뒤 주소 자리를 선택해 둡니다.
@@ -42,8 +43,8 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 - **작업 폴더 파일 탐색기** (`Ctrl+O`): 필터, `↑↓`/`Enter` 이동·열기, 파일 삭제, 새 파일, 폴더 변경.
 - **표 직접 편집**: 표 블록을 클릭하거나 삽입하면 마크다운(`| |`) 원문 대신 격자 표 에디터로 열려 셀을 바로 수정하고 `+ 행`/`+ 열`/`Tab`/`Enter` 이동이 가능합니다 (필요 시 `마크다운 보기` 전환 가능).
 - **목차 서랍**: 왼쪽에서 열리는 제목 목록. 현재 위치 강조, 클릭하면 해당 제목으로 이동.
-- **찾기·바꾸기 막대** (`Ctrl+F`/`Ctrl+H`): 오른쪽 위에 떠 있는 막대, 대소문자 구분, 일치 개수. 선택한 글자가 검색어로 들어가고 `F3`/`Shift+F3`으로 이동합니다.
-- **오프라인 맞춤법 및 띄어쓰기 검사** (`F7`/`Shift+F7`): 외부 서버 없이 한국어 규칙·영어 오타 사전·Windows 네이티브 맞춤법 검사기를 결합해 코드·수식·URL·표를 제외한 본문을 검사합니다. 편집 중 실시간 물결 밑줄, 우클릭 제안 교정, 전체 검사 모달(모두 자동 교정·사전 무시)을 지원합니다.
+- **찾기·바꾸기 막대** (`Ctrl+F`/`Ctrl+H`): 오른쪽 위에 떠 있는 막대, 대소문자 구분(`Alt+C`)·단어 단위(`Alt+W`)·정규식(`Alt+R`, 바꿀 내용에 `$1` 캡처 사용), 일치 개수. 선택한 글자가 검색어로 들어가고 `F3`/`Shift+F3`으로 이동합니다.
+- **오프라인 맞춤법 및 띄어쓰기 검사** (`F7`/`Shift+F7`): 외부 서버 없이 한국어 규칙·영어 오타 사전·Windows 네이티브 맞춤법 검사기를 결합해 코드·수식·URL·표를 제외한 본문을 검사합니다. 편집 중 실시간 물결 밑줄, 우클릭 제안 교정, 전체 검사 모달(모두 자동 교정·사전 무시)을 지원합니다. 전체 검사는 별도 스레드에서 돌아 큰 문서에서도 화면이 멈추지 않습니다.
 - **시작 화면**: 열린 문서가 없으면 새 문서·폴더 열기·파일 열기 버튼을 보여 줍니다. 시작 메뉴에서 처음 실행하면 `문서\MDEditor`가 기본 작업 폴더입니다.
 - **상태 알약**: 저장됨/저장되지 않음 표시와 글자·줄·읽기 시간.
 - **설정 메뉴 & 글꼴 선택**: 라이트/다크 테마, 가운데/전체 너비, 글꼴 종류 선택(시스템 기본·맑은 고딕·Pretendard·나눔고딕·직접 `.ttf`/`.otf` 파일 선택 등), 글꼴 크기, 마크다운 원본/HTML 복사, 도움말, 종료.
@@ -83,6 +84,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | `Ctrl+Shift+O` | 작업 폴더 바꾸기 |
 | `Ctrl+Z` / `Ctrl+Y` | 실행 취소 / 다시 실행 |
 | `Ctrl+F` / `Ctrl+H` | 찾기 / 바꾸기 (`Enter`·`F3` 다음, `Shift+Enter`·`Shift+F3` 이전) |
+| `Alt+C` / `Alt+W` / `Alt+R` | 찾기 막대: 대소문자 구분 / 단어 단위 / 정규식 |
 | `F7` / `Shift+F7` | 맞춤법·띄어쓰기 전체 검사 열기 / 실시간 물결 밑줄 토글 |
 | `Ctrl+B` / `Ctrl+I` / `Ctrl+K` | 굵게 / 기울임 / 링크 (다시 누르면 해제) |
 | `Ctrl+Shift+S` / `Ctrl+Shift+H` | 취소선 (`~~`) / 형광펜 강조 (`==`) (다시 누르면 해제) |

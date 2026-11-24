@@ -1,5 +1,15 @@
 # MDEditor 작업 기록
 
+## 2026-11-24 — v0.14.0: 제목 접기, 찾기 정규식·단어 단위, 맞춤법 전체 검사 백그라운드화, 긴 문단 입력 지연 수정
+
+- **제목 접기 (`src/textops.rs`, `src/ui.rs`, `src/main.rs`)**: 제목 왼쪽에 마우스를 올리면 `▼`, 접히면 `▶`가 보인다. 다음 같은(또는 상위) 수준 제목까지 숨긴다(`hide_folded`). 접힘 상태는 제목 줄 원문으로 기억하며 파일에는 저장하지 않는다. `↑`/`↓`/`←`/`→`/`Shift+방향키`는 접힌 구간을 건너뛰고(`nav_slots`), 찾기·목차·편집으로 안쪽에 들어가면 그 제목이 펼쳐진다. 합치기·지우기(`Backspace`/`Delete`)는 숨김 구간을 포함한 원래 슬롯(`doc_slots`)을 써서 숨은 내용이 지워지지 않는다. 키 스윕에서 처음 구현이 접힌 제목 끝 `Delete`로 숨은 구간 전체를 지우던 것을 찾아 고쳤다.
+- **찾기 정규식·단어 단위 (`src/textops.rs`, `src/ui.rs`)**: 찾기 막대에 `ab`(단어 단위, `Alt+W`)·`.*`(정규식, `Alt+R`) 토글 추가(`Alt+C`는 대소문자). 정규식 바꾸기는 `$1`·`${이름}` 캡처를 쓴다. 잘못된 정규식은 일치 개수 자리에 "정규식 오류"로 표시. 길이 0 일치는 건너뛴다. `regex` 크레이트 추가(유니코드 범주 표 `\p{..}` 제외로 크기 절약).
+- **맞춤법 전체 검사를 작업 스레드로 (`src/spell.rs`, `src/ui.rs`)**: `F7` 검사 창이 열리면 스피너를 보여 주고 별도 스레드(`spell::Worker`, 밀린 요청은 마지막 것만)에서 검사한다. 창에서 교정·무시하면 목록은 바로 맞춰 두고(남은 항목 위치 보정) 확인 검사만 다시 보낸다. 이전에는 교정할 때마다 전체 재검사로 큰 문서에서 몇 초씩 멈췄다.
+- **긴 문단 입력 지연 (`src/spell.rs`)**: 실시간 맞춤법 밑줄이 키 입력마다 활성 블록 전체를 OS 검사기에 다시 물었다. 문장 단위로 잘라 결과를 기억해 바뀐 문장만 다시 묻는다(`sentences`, `check_cached`).
+- **측정 (`perf_typing_large_doc`, 최적화 빌드, 4,601줄·1,601블록 문서)**: 일반 문단 입력 키당 중앙값 약 4~7ms(p95 약 18ms). 26,000자 한 문단 입력 키당 535ms(최대 1.9초) → 27ms.
+- **확인**: 선택 글자 수 표시는 이미 상태바에 있었다("N자 선택됨").
+- **검증**: `heading_fold_hides_section_skips_arrows_and_reveals`, `fold_boundary_keys_never_drop_hidden_text`, `spellcheck_modal_fix_keeps_remaining_positions`, `sentences_split_after_sentence_end_only`, 찾기 정규식 단위 테스트 추가. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`(71개 통과, 성능 측정 1개 제외).
+
 ## 2026-11-24 — v0.13.3: 창을 닫아도 mdeditor.exe가 끝나지 않던(좀비 프로세스) 문제 수정
 
 - **원인 (`src/spell.rs`)**: Windows 맞춤법 검사기 COM 객체(`ISpellChecker`)를 UI 스레드의 `thread_local`이 소유했다. Windows에서 Rust는 메인 스레드 `thread_local` 소멸자를 프로세스 종료 중(`DLL_PROCESS_DETACH`, 로더 잠금을 잡은 채, COM 작업 스레드는 이미 종료됨)에 실행하므로 `ComPtr::drop`의 `Release()`가 영원히 기다렸다. 그래서 편집하며 실시간 맞춤법 검사가 한 번이라도 돈 창을 닫으면, 창은 사라지고 종료 코드 0도 기록되지만 스레드 하나가 남아 프로세스가 끝나지 않았다(`HasExited=True`, 스레드 1개, 강제 종료 불가, 재부팅해야 사라짐).

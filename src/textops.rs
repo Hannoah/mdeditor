@@ -2036,14 +2036,17 @@ pub(crate) fn find_all(s: &str, query: &str, case: bool) -> Vec<Sel> {
     out
 }
 
+#[cfg(test)]
 pub(crate) fn replace_all(s: &str, matches: &[Sel], with: &str) -> String {
-    if matches.is_empty() {
-        return s.to_string();
-    }
+    replace_each(s, matches.iter().map(|&m| (m, with)))
+}
+
+// 일치 구간(문자 인덱스, 오름차순)마다 다른 글자로 바꾼다
+pub(crate) fn replace_each<'a>(s: &str, items: impl IntoIterator<Item = (Sel, &'a str)>) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_b = 0usize;
     let mut prev_c = 0usize;
-    for &(a, b) in matches {
+    for ((a, b), with) in items {
         let ba = prev_b + byte_idx(&s[prev_b..], a.saturating_sub(prev_c));
         let bb = ba + byte_idx(&s[ba..], b.saturating_sub(a));
         out.push_str(&s[prev_b..ba]);
@@ -2053,6 +2056,77 @@ pub(crate) fn replace_all(s: &str, matches: &[Sel], with: &str) -> String {
     }
     out.push_str(&s[prev_b..]);
     out
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct FindOpts {
+    pub case: bool,
+    pub word: bool,  // 단어 단위
+    pub regex: bool, // 정규식
+}
+
+fn find_regex(query: &str, o: FindOpts) -> Result<regex::Regex, String> {
+    let pat = if o.regex {
+        query.to_string()
+    } else {
+        regex::escape(query)
+    };
+    let pat = if o.word {
+        format!(r"\b(?:{pat})\b")
+    } else {
+        pat
+    };
+    regex::RegexBuilder::new(&pat)
+        .case_insensitive(!o.case)
+        .multi_line(true)
+        .build()
+        .map_err(|e| match e {
+            regex::Error::Syntax(_) => "정규식 오류".to_string(),
+            _ => "정규식이 너무 큽니다".to_string(),
+        })
+}
+
+// 찾기 옵션을 반영한 일치 구간과 바꿀 글자. 정규식이면 $1·${이름} 캡처를 풀어 쓴다.
+// 길이 0인 일치(^, a* 등)는 건너뛴다.
+pub(crate) fn find_replacements(
+    s: &str,
+    query: &str,
+    o: FindOpts,
+    with: Option<&str>,
+) -> Result<Vec<(Sel, String)>, String> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !o.word && !o.regex {
+        let w = with.unwrap_or("");
+        return Ok(find_all(s, query, o.case)
+            .into_iter()
+            .map(|m| (m, w.to_string()))
+            .collect());
+    }
+    let re = find_regex(query, o)?;
+    let mut out = Vec::new();
+    let (mut last_b, mut ci) = (0, 0);
+    for c in re.captures_iter(s) {
+        let m = c.get(0).unwrap();
+        if m.is_empty() {
+            continue;
+        }
+        let a = ci + char_len(&s[last_b..m.start()]);
+        let b = a + char_len(m.as_str());
+        let rep = match with {
+            Some(w) if o.regex => {
+                let mut r = String::new();
+                c.expand(w, &mut r);
+                r
+            }
+            Some(w) => w.to_string(),
+            None => String::new(),
+        };
+        out.push(((a, b), rep));
+        (last_b, ci) = (m.end(), b);
+    }
+    Ok(out)
 }
 
 // 목차: (레벨, 제목, 줄 번호, 줄 시작 문자 인덱스, 줄 시작 바이트 인덱스). 코드 펜스 안은 제외.
@@ -2566,4 +2640,74 @@ pub(crate) fn slot_index(slots: &[Range<usize>], target: &Range<usize>) -> Optio
     slots
         .binary_search_by(|s| s.start.cmp(&target.start).then(s.end.cmp(&target.end)))
         .ok()
+}
+
+// 접힌 제목(folds: 제목 줄 원문) 아래, 같거나 높은 수준의 다음 제목 전까지의 슬롯을 뺀다.
+// 숨는 슬롯 중 reveal이 참인 것이 있으면 그 슬롯을 가린 제목 원문을 돌려준다 (호출한 쪽이 펼친다).
+// ponytail: 원문이 같은 제목은 함께 접힌다. 위치 기반 키는 모든 편집 경로에서 보정해야 해서 쓰지 않는다.
+pub(crate) fn hide_folded(
+    text: &str,
+    slots: &mut Vec<Range<usize>>,
+    folds: &std::collections::HashSet<String>,
+    reveal: impl Fn(&Range<usize>) -> bool,
+) -> Option<String> {
+    if folds.is_empty() {
+        return None;
+    }
+    let mut owner: Option<(usize, &str)> = None;
+    let mut revealed = None;
+    slots.retain(|r| {
+        let raw = text.get(r.clone()).unwrap_or("");
+        let lv = (!r.is_empty())
+            .then(|| heading_level(raw.trim_start()))
+            .flatten();
+        if let (Some(l), Some((ol, _))) = (lv, owner) {
+            if l <= ol {
+                owner = None;
+            }
+        }
+        if let Some((_, key)) = owner {
+            if revealed.is_none() && reveal(r) {
+                revealed = Some(key.to_string());
+            }
+            return false;
+        }
+        if let Some(l) = lv {
+            if folds.contains(raw.trim()) {
+                owner = Some((l, raw.trim()));
+            }
+        }
+        true
+    });
+    revealed
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    #[test]
+    fn hide_folded_hides_until_same_or_higher_heading() {
+        let t = "# A\n\none\n\n## B\n\ntwo\n\n# C\n\nthree";
+        let blocks = split_blocks(t);
+        let mut slots = collect_doc_slots(t, &blocks, None);
+        let all = slots.clone();
+        let folds: std::collections::HashSet<String> = ["# A".to_string()].into();
+        assert_eq!(hide_folded(t, &mut slots, &folds, |_| false), None);
+        let texts: Vec<&str> = slots.iter().map(|r| &t[r.clone()]).collect();
+        assert_eq!(texts, ["# A", "# C", "three"]);
+        // 숨은 슬롯을 드러내야 하면 가린 제목을 알려준다
+        let mut s2 = all.clone();
+        let two = t.find("two").unwrap();
+        assert_eq!(
+            hide_folded(t, &mut s2, &folds, |r| r.start == two),
+            Some("# A".into())
+        );
+        // 하위 제목만 접으면 그 아래만 숨는다
+        let mut s3 = all;
+        let folds: std::collections::HashSet<String> = ["## B".to_string()].into();
+        hide_folded(t, &mut s3, &folds, |_| false);
+        let texts: Vec<&str> = s3.iter().map(|r| &t[r.clone()]).collect();
+        assert_eq!(texts, ["# A", "one", "## B", "# C", "three"]);
+    }
 }

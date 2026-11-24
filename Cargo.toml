@@ -1,6 +1,6 @@
 [package]
 name = "mdeditor"
-version = "0.13.3"
+version = "0.14.0"
 edition = "2021"
 description = "A native Markdown editor & previewer desktop app in Rust (eframe/egui)"
 
@@ -12,6 +12,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rfd = "0.18"
 # HTML 내보내기 (egui_commonmark가 이미 쓰는 파서, html 기능만 추가)
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# 찾기 정규식·단어 단위. ponytail: \p{..} 유니코드 범주 표는 크기 때문에 뺐다 (\w·\b·대소문자는 유니코드 지원)
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
 
 [target.'cfg(not(windows))'.dependencies]
 arboard = "3"

@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // MDEditor — 순수 로컬 네이티브 Markdown 편집기 (eframe/egui). 브라우저·웹뷰·로컬 서버 없음.
 // 실행: mdeditor [폴더|파일]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -473,6 +473,8 @@ struct Doc {
     typed_at: Option<Instant>,
     // 탭 전환 시 복원되는 문서별 편집 위치/선택 상태
     view: TabView,
+    // 접은 제목 줄 원문 (보기 상태일 뿐 파일에는 저장하지 않는다)
+    folds: HashSet<String>,
 }
 
 // 탭 전환 때 저장·복원하는 편집 위치/선택 상태
@@ -546,6 +548,7 @@ impl Doc {
             outline: Vec::new(),
             rev: 0,
             view: TabView::default(),
+            folds: HashSet::new(),
         };
         doc.refresh_meta();
         if doc.text.is_empty() {
@@ -580,6 +583,7 @@ impl Doc {
                 last_sel: empty.then_some((0, 0)),
                 ..TabView::default()
             },
+            folds: HashSet::new(),
         };
         doc.refresh_meta();
         doc
@@ -883,6 +887,7 @@ enum Dialog {
         cached_rev: u64,
         cached_spell_rev: u64,
         issues: Vec<spell::SpellIssue>,
+        checking: bool, // 작업 스레드가 검사 중 (issues는 직전 결과)
     },
     Help,
 }
@@ -900,19 +905,32 @@ struct Find {
     query: String,
     with: String,
     case: bool,
+    word: bool,
+    regex: bool,
     focus: bool,
-    cache_key: (u64, String, bool),
+    cache_key: (u64, String, FindOpts),
     cached: Vec<Sel>,
+    err: Option<String>, // 잘못된 정규식
 }
 
 impl Find {
+    fn opts(&self) -> FindOpts {
+        FindOpts {
+            case: self.case,
+            word: self.word,
+            regex: self.regex,
+        }
+    }
+
     fn matches(&mut self, doc: &Doc) -> &[Sel] {
-        if self.cache_key.0 != doc.rev
-            || self.cache_key.1 != self.query
-            || self.cache_key.2 != self.case
-        {
-            self.cached = find_all(&doc.text, &self.query, self.case);
-            self.cache_key = (doc.rev, self.query.clone(), self.case);
+        let o = self.opts();
+        if self.cache_key.0 != doc.rev || self.cache_key.1 != self.query || self.cache_key.2 != o {
+            let r = find_replacements(&doc.text, &self.query, o, None);
+            self.cached = r
+                .as_ref()
+                .map_or_else(|_| Vec::new(), |v| v.iter().map(|x| x.0).collect());
+            self.err = r.err();
+            self.cache_key = (doc.rev, self.query.clone(), o);
         }
         &self.cached
     }
@@ -1013,6 +1031,8 @@ struct App {
     line_numbers: bool,
     spellcheck: bool,
     spell_ignore: std::collections::HashSet<String>,
+    spell_worker: Option<spell::Worker>, // 전체 검사 작업 스레드 (처음 쓸 때 만든다)
+    spell_ticket: u64,                   // 마지막으로 보낸 전체 검사 번호
     spell_rev: u64,
     spell_block_cache: Option<(u64, u64, Vec<spell::SpellIssue>)>,
     font_family: String,
@@ -1160,6 +1180,8 @@ impl App {
             line_numbers: flag("line_numbers"),
             spellcheck,
             spell_ignore,
+            spell_worker: None,
+            spell_ticket: 0,
             spell_rev: 0,
             spell_block_cache: None,
             font_family,
@@ -1779,14 +1801,15 @@ impl App {
             self.status = "검사할 문서가 없습니다".into();
             return;
         };
-        let issues = spell::check_document(&doc.text, &self.spell_ignore);
-        let doc_rev = doc.rev;
+        let _ = doc;
+        // 첫 프레임에 작업 스레드로 검사를 보낸다 (cached_rev가 맞지 않으므로)
         self.dialog = Some(Dialog::Spellcheck {
             selected: 0,
             cached_key: self.current.clone(),
-            cached_rev: doc_rev,
+            cached_rev: u64::MAX,
             cached_spell_rev: self.spell_rev,
-            issues,
+            issues: Vec::new(),
+            checking: true,
         });
     }
 
@@ -1817,11 +1840,11 @@ impl App {
         self.spell_block_cache = None;
     }
 
-    fn apply_all_spell_fixes(&mut self) -> usize {
+    // issues: 지금 문서 텍스트로 검사한 결과
+    fn apply_all_spell_fixes(&mut self, issues: Vec<spell::SpellIssue>) -> usize {
         let Some(doc) = self.doc() else {
             return 0;
         };
-        let issues = spell::check_document(&doc.text, &self.spell_ignore);
         let fixes: Vec<(Range<usize>, String)> = issues
             .into_iter()
             .filter_map(|mut i| {
@@ -2536,6 +2559,16 @@ impl App {
             .map(|r| r.start);
         let mut out = Vec::new();
         collect_doc_slots_into(&doc.text, &doc.blocks, active_empty, &mut out);
+        out
+    }
+
+    // 방향키 이동용: 접힌 제목 아래 구간을 건너뛴다.
+    // 합치기·지우기는 doc_slots를 써야 한다 (보이는 이웃과 합치면 그 사이 숨은 내용이 지워진다)
+    fn nav_slots(&self) -> Vec<Range<usize>> {
+        let mut out = self.doc_slots();
+        if let Some(doc) = self.doc() {
+            hide_folded(&doc.text, &mut out, &doc.folds, |_| false);
+        }
         out
     }
 
@@ -3883,7 +3916,7 @@ impl App {
             .rfind('\n')
             .map_or(r.start, |i| r.start + i + 1);
         let col = char_len(&doc.text[ls..b]);
-        let slots = self.doc_slots();
+        let slots = self.nav_slots();
         let Some(idx) = slot_index(&slots, &r) else {
             return false;
         };
@@ -3937,7 +3970,7 @@ impl App {
         } else if local.0 < vis_end {
             return false;
         }
-        let slots = self.doc_slots();
+        let slots = self.nav_slots();
         let Some(idx) = slot_index(&slots, &r) else {
             return false;
         };
@@ -3960,7 +3993,7 @@ impl App {
     // Shift + 방향키로 블록 경계를 넘어 다중 블록 선택 확장/축소
     fn shift_arrow(&mut self, ctx: &egui::Context, up: bool, horizontal: bool) -> bool {
         if let Some(bs) = self.block_sel.clone() {
-            let slots = self.doc_slots();
+            let slots = self.nav_slots();
             if slots.is_empty() {
                 return false;
             }
@@ -4007,7 +4040,7 @@ impl App {
         if !at_edge {
             return false;
         }
-        let slots = self.doc_slots();
+        let slots = self.nav_slots();
         let Some(idx) = slot_index(&slots, &r) else {
             return false;
         };
@@ -5377,33 +5410,39 @@ impl App {
     }
 
     fn replace_one(&mut self, ctx: &egui::Context) {
-        let (q, w, case) = (
+        let (q, w, o) = (
             self.find.query.clone(),
             self.find.with.clone(),
-            self.find.case,
+            self.find.opts(),
         );
         self.edit(ctx, |t, sel| {
-            let hit = find_all(t, &q, case).into_iter().any(|m| m == sel);
-            hit.then(|| {
-                let at = sel.0 + char_len(&w);
-                (replace_range(t, sel, &w), (at, at))
-            })
+            let hit = find_replacements(t, &q, o, Some(&w))
+                .ok()?
+                .into_iter()
+                .find(|m| m.0 == sel)?;
+            let at = sel.0 + char_len(&hit.1);
+            Some((replace_range(t, sel, &hit.1), (at, at)))
         });
         self.focus_editor = false;
         self.find_step(ctx, true);
     }
 
     fn replace_everything(&mut self, ctx: &egui::Context) {
-        let (q, w, case) = (
+        let (q, w, o) = (
             self.find.query.clone(),
             self.find.with.clone(),
-            self.find.case,
+            self.find.opts(),
         );
         let mut count = 0;
         self.edit(ctx, |t, _| {
-            let m = find_all(t, &q, case);
+            let m = find_replacements(t, &q, o, Some(&w)).ok()?;
             count = m.len();
-            (!m.is_empty()).then(|| (replace_all(t, &m, &w), (0, 0)))
+            (!m.is_empty()).then(|| {
+                (
+                    replace_each(t, m.iter().map(|(r, s)| (*r, s.as_str()))),
+                    (0, 0),
+                )
+            })
         });
         self.pending_sel = None;
         self.focus_editor = false;
@@ -5830,6 +5869,50 @@ mod tests {
         assert!(find_all("x", "", false).is_empty());
         let m = find_all("aXbX", "X", true);
         assert_eq!(replace_all("aXbX", &m, "yy"), "ayybyy");
+
+        // 단어 단위·정규식 (문자 인덱스, 한글 포함)
+        let o = |case, word, regex| FindOpts { case, word, regex };
+        let sels = |s: &str, q: &str, f| -> Vec<Sel> {
+            find_replacements(s, q, f, None)
+                .unwrap()
+                .into_iter()
+                .map(|x| x.0)
+                .collect()
+        };
+        assert_eq!(
+            sels("cat category Cat", "cat", o(false, true, false)),
+            vec![(0, 3), (13, 16)]
+        );
+        assert_eq!(
+            sels("한글 한글을 글", "한글", o(true, true, false)),
+            vec![(0, 2)]
+        );
+        assert_eq!(sels("a.b axb", "a.b", o(true, true, false)), vec![(0, 3)]); // 단어 단위만이면 . 은 글자 그대로
+        assert_eq!(
+            sels("가1 나22", r"\d+", o(true, false, true)),
+            vec![(1, 2), (4, 6)]
+        );
+        assert_eq!(sels("x\ny", "^", o(true, false, true)), vec![]); // 길이 0 일치는 건너뜀
+        assert_eq!(sels("ab\ncd", "^c", o(true, false, true)), vec![(3, 4)]); // 줄 단위 ^
+        assert_eq!(
+            find_replacements("a", "(", o(true, false, true), None).unwrap_err(),
+            "정규식 오류"
+        );
+        // 캡처 치환은 정규식 모드에서만, 단어 단위는 $도 글자 그대로
+        let r = find_replacements(
+            "홍 길동, 김 철수",
+            r"(\S+) (\S+)",
+            o(true, false, true),
+            Some("$2 $1"),
+        )
+        .unwrap();
+        let s = "홍 길동, 김 철수";
+        assert_eq!(
+            replace_each(s, r.iter().map(|(m, w)| (*m, w.as_str()))),
+            "길동, 홍 철수 김"
+        );
+        let r = find_replacements("a b", "a", o(true, true, false), Some("$1")).unwrap();
+        assert_eq!(r[0].1, "$1");
     }
 
     #[test]
@@ -7896,21 +7979,44 @@ mod tests {
         assert!(h.state().spellcheck);
 
         // 2. F7로 맞춤법 검사 모달 열기
+        // 전체 검사는 작업 스레드에서 돈다: 결과가 올 때까지 프레임을 돌린다
+        let settle = |h: &mut egui_kittest::Harness<App>| {
+            for _ in 0..500 {
+                h.step();
+                if matches!(
+                    h.state().dialog,
+                    Some(Dialog::Spellcheck {
+                        checking: false,
+                        ..
+                    })
+                ) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("spellcheck worker did not finish");
+        };
         h.key_press(egui::Key::F7);
         h.run_steps(2);
         assert!(matches!(h.state().dialog, Some(Dialog::Spellcheck { .. })));
+        settle(&mut h);
+        if let Some(Dialog::Spellcheck { issues, .. }) = &h.state().dialog {
+            assert!(issues.iter().any(|i| i.word == "teh"));
+        }
 
         // 3. 단어 무시 및 자동 교정 동작 확인
         h.state_mut().ignore_spell_word("teh");
         h.run_steps(2);
-        if let Some(Dialog::Spellcheck { issues, .. }) = &h.state().dialog {
+        settle(&mut h);
+        let issues = if let Some(Dialog::Spellcheck { issues, .. }) = &h.state().dialog {
             assert!(issues.iter().all(|i| i.word != "teh"));
             assert!(issues.iter().any(|i| i.kind == spell::IssueKind::Spacing));
+            issues.clone()
         } else {
             panic!("Spellcheck modal should remain open");
-        }
+        };
 
-        let fixed = h.state_mut().apply_all_spell_fixes();
+        let fixed = h.state_mut().apply_all_spell_fixes(issues);
         assert_eq!(fixed, 1);
         assert_eq!(
             h.state().doc().unwrap().text,
@@ -8616,5 +8722,289 @@ mod tests {
         assert!(dir2.join("외부").join("sub").join("copy.md").is_file());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn spellcheck_modal_fix_keeps_remaining_positions() {
+        use egui_kittest::kittest::Queryable;
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_spell_shift");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d2 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(960.0, 900.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.set_text(
+                    "the the cat
+
+Hello teh world.
+"
+                    .to_string(),
+                    (0, 0),
+                );
+                app
+            });
+        h.run_steps(2);
+        h.state_mut().open_spellcheck();
+        for _ in 0..500 {
+            h.step();
+            if matches!(
+                h.state().dialog,
+                Some(Dialog::Spellcheck {
+                    checking: false,
+                    ..
+                })
+            ) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        h.run_steps(8); // 결과가 들어와 커진 모달이 자리를 잡을 때까지
+        let pos = h.get_by_label("중복 삭제").rect().center();
+        h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        h.step();
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.step();
+        }
+        assert_eq!(
+            h.state().doc().unwrap().text,
+            "the cat
+
+Hello teh world.
+"
+        );
+        // 확인 검사가 오기 전이든 후든 남은 항목은 문서의 같은 단어를 가리킨다
+        for _ in 0..3 {
+            let Some(Dialog::Spellcheck { issues, .. }) = &h.state().dialog else {
+                panic!("modal closed");
+            };
+            let text = &h.state().doc().unwrap().text;
+            assert!(issues.iter().any(|i| i.word == "teh"));
+            for i in issues.iter().filter(|i| i.word == "teh") {
+                assert_eq!(&text[i.range.clone()], "teh");
+            }
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heading_fold_hides_section_skips_arrows_and_reveals() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_fold");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("doc.md");
+        let src = "# A\n\none\n\n## B\n\ntwo\n\n# C\n\nthree\n";
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+        h.state_mut().deactivate();
+        h.run_steps(2);
+        let c = src.find("# C").unwrap();
+        let shown = |h: &egui_kittest::Harness<App>| -> Vec<usize> {
+            h.state()
+                .canvas_rects
+                .iter()
+                .filter(|(r, _)| !r.is_empty())
+                .map(|(r, _)| r.start)
+                .collect()
+        };
+        let click = |h: &mut egui_kittest::Harness<App>| {
+            let row = h
+                .state()
+                .canvas_rects
+                .iter()
+                .find(|(r, _)| r.start == 0)
+                .unwrap()
+                .1;
+            let dx = if h.state().line_numbers { 5.0 } else { 14.0 };
+            let top = row.top() + 26.0;
+            let pos = egui::pos2(row.left() - dx, top + (row.bottom() - top).min(38.4) * 0.5);
+            h.input_mut().events.push(egui::Event::PointerMoved(pos));
+            h.step();
+            for pressed in [true, false] {
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                h.step();
+            }
+            h.run_steps(2);
+        };
+
+        // 1. 화살표 클릭: 다음 "# " 제목 전까지 숨기고, 블록 편집으로 넘어가지 않는다
+        click(&mut h);
+        assert!(h.state().doc().unwrap().folds.contains("# A"));
+        assert_eq!(shown(&h), vec![0, c, src.find("three").unwrap()]);
+        assert_eq!(h.state().active, None);
+        assert_eq!(h.state().doc().unwrap().text, src);
+
+        // 2. ↓/↑는 접힌 구간을 건너뛴다
+        h.state_mut().go(0, 3);
+        h.run_steps(2);
+        h.key_press(egui::Key::ArrowDown);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(c));
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        assert_eq!(h.state().active, Some(0));
+        assert!(h.state().doc().unwrap().folds.contains("# A"));
+
+        // 3. 찾기 등으로 숨은 블록에 커서가 가면 펼친다
+        let two = src.find("two").unwrap();
+        h.state_mut().pending_sel = Some((two, two + 3));
+        h.run_steps(3);
+        assert!(h.state().doc().unwrap().folds.is_empty());
+        assert_eq!(h.state().active, Some(two));
+
+        // 4. 접힌 구간 안에서 편집 중에 접으면 편집을 끝내고 접힌 채로 둔다
+        click(&mut h);
+        assert!(h.state().doc().unwrap().folds.contains("# A"));
+        assert_eq!(h.state().active, None);
+        click(&mut h);
+        assert!(h.state().doc().unwrap().folds.is_empty());
+        assert_eq!(shown(&h).len(), 6);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 큰 문서 입력 지연 측정 (기본 실행 제외):
+    // cargo test --release perf_typing -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn perf_typing_large_doc() {
+        let dir = std::env::temp_dir().join("mdeditor_perf_typing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut src = String::new();
+        for i in 0..200 {
+            src.push_str(&format!(
+                "## 섹션 {i}\n\n본문 문단입니다. **굵게** 와 `코드` 그리고 [링크](https://example.com) 가 섞인 한국어 문장이 이어집니다. The quick brown fox jumps over the lazy dog.\n\n- 목록 항목 하나\n- 목록 항목 둘\n  - 하위 항목\n\n1. 번호 하나\n2. 번호 둘\n\n> 인용문입니다.\n\n| 열1 | 열2 |\n| --- | --- |\n| a | b |\n\n```rust\nfn main() {{ println!(\"hi\"); }}\n```\n\n- [ ] 할 일\n\n"
+            ));
+        }
+        // 아주 긴 문단 하나 (한 블록 안 레이아웃 비용)
+        src.push_str(&"긴 문단의 문장입니다. Long paragraph sentence. ".repeat(600));
+        src.push('\n');
+        let file = dir.join("big.md");
+        std::fs::write(&file, &src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(5);
+        let lines = src.lines().count();
+        let blocks = h.state().doc().unwrap().blocks.len();
+        eprintln!(
+            "PERF doc: {lines} lines, {blocks} blocks, {} bytes",
+            src.len()
+        );
+
+        let stats = |name: &str, mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let p = |q: f64| v[((v.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "PERF {name:<28} median {:6.2} ms  p95 {:6.2} ms  max {:6.2} ms",
+                p(0.5),
+                p(0.95),
+                v[v.len() - 1]
+            );
+        };
+        let idle = |h: &mut egui_kittest::Harness<App>| -> Vec<f64> {
+            (0..30)
+                .map(|_| {
+                    let t = Instant::now();
+                    h.step();
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect()
+        };
+        let typing = |h: &mut egui_kittest::Harness<App>, at: usize, label: &str| {
+            h.state_mut().go(at, at);
+            h.state_mut().scroll_to = Some(at);
+            h.run_steps(5);
+            let mut v = Vec::new();
+            for i in 0..60 {
+                h.event(egui::Event::Text(
+                    if i % 2 == 0 { "가" } else { "a" }.into(),
+                ));
+                let t = Instant::now();
+                h.step();
+                v.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            stats(label, v);
+        };
+
+        stats("idle frame (top)", idle(&mut h));
+        let mid = src.find("## 섹션 100").unwrap() + "## 섹션 100\n\n".len();
+        typing(&mut h, mid, "typing: middle paragraph");
+        let first = "## 섹션 0\n\n".len();
+        typing(&mut h, first, "typing: first paragraph");
+        let long = src.rfind("긴 문단").unwrap();
+        typing(&mut h, long, "typing: 26k-char paragraph");
+        h.state_mut().spellcheck = false;
+        typing(&mut h, long, "  ... live spellcheck off");
+        typing(&mut h, mid, "  ... middle, spellcheck off");
+        h.state_mut().spellcheck = true;
+        stats("idle frame (bottom)", idle(&mut h));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fold_boundary_keys_never_drop_hidden_text() {
+        let dir = std::env::temp_dir().join("mdeditor_fold_sweep");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "# A\n\none\n\n## B\n\ntwo\n\n# C\n\nthree\n";
+        let file = dir.join("doc.md");
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1000.0, 800.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+        let c = src.find("# C").unwrap();
+        let keys = [
+            (egui::Key::Backspace, egui::Modifiers::NONE),
+            (egui::Key::Delete, egui::Modifiers::NONE),
+            (egui::Key::Enter, egui::Modifiers::NONE),
+            (egui::Key::ArrowDown, egui::Modifiers::NONE),
+            (egui::Key::ArrowRight, egui::Modifiers::NONE),
+            (egui::Key::ArrowLeft, egui::Modifiers::NONE),
+            (egui::Key::ArrowUp, egui::Modifiers::NONE),
+        ];
+        for (bs, caret) in [(0, 3), (c, c), (c, c + 3)] {
+            for (key, m) in keys {
+                h.state_mut().deactivate();
+                h.state_mut().set_text(src.to_string(), (0, 0));
+                h.state_mut().doc_mut().unwrap().folds = ["# A".to_string()].into();
+                h.state_mut().go(bs, caret);
+                h.run_steps(3);
+                h.key_press_modifiers(m, key);
+                h.run_steps(3);
+                let t = &h.state().doc().unwrap().text;
+                assert!(
+                    t.contains("one") && t.contains("## B") && t.contains("two"),
+                    "{key:?} at {bs}/{caret}: {t:?}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
