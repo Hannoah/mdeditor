@@ -1,5 +1,28 @@
 # MDEditor 작업 기록
 
+## 2026-11-24 — v0.13.0: 서식 복사, 줄 번호·저장 경로 변경, Tab/연번·볼드·챗봇 붙여넣기·모달 한글 IME 개선 및 Tab 크래시 수정
+
+- **파일 저장 경로 변경 / 다른 위치로 저장 추가 (`src/main.rs`, `src/ui.rs`)**:
+  - `파일로 저장`·`새 파일` 모달에 현재 저장 폴더 표시 및 `폴더 변경...`·`다른 위치로 저장...`(OS 탐색기) 버튼과 절대 경로 입력 저장 지원 추가.
+  - `Ctrl+Alt+S` 단축키·설정(`⚙`) 메뉴·탭 우클릭 메뉴·하단 상태바 폴더 우클릭으로 어느 문서에서든 저장 폴더 변경 및 다른 경로 저장(`save_as_path`) 가능, 작업 폴더 전환 시 작성 중인 임시 메모 유지.
+- **문서 줄 번호 표시(Line Numbers) 추가 (`src/ui.rs`, `src/main.rs`)**:
+  - 캔버스 왼쪽 여백에 문서 전체 기준 줄 번호 거터(활성 블록은 논리 줄별 번호 및 현재 커서 줄 강조)를 표시하고, `Ctrl+Alt+N`·설정 메뉴·하단 상태바(`줄 번호`) 버튼으로 켜고 끄며 영구 저장.
+  - 하단 상태바에 현재 커서 줄 번호(`현재줄/전체줄`) 함께 표시.
+- **서식 복사(Format Painter) 기능 추가 (`src/textops.rs`, `src/main.rs`, `src/ui.rs`, `src/theme.rs`)**:
+  - `sample_format`·`apply_format`·`describe_format`를 구현해 글자 서식(굵게·기울임·취소선·강조·코드)과 블록 유형(제목·할 일·글머리·번호·인용·문단)을 복사(`Ctrl+Alt+B`)했다가 다른 글/줄에 붙여넣기(`Ctrl+Alt+P`) 지원.
+  - 선택 영역 플로팅 서식 막대, 캔버스 우클릭 메뉴, 도움말 단축키 안내에 서식 복사/붙여넣기 추가.
+- **`Tab` 들여쓰기 일관성 개선 및 다중 블록 병합 시 크래시(`0xc0000409`) 수정 (`src/main.rs`, `src/textops.rs`, `src/ui.rs`)**:
+  - 다중 목록 블록 선택(`block_sel`) 상태에서 `Tab`으로 앞 목록에 병합되어 단일 블록으로 합쳐질 때 `set_text()`가 `self.block_sel`을 비우지 않아 `status_bar()`→`selected_chars()`가 구 바이트 범위로 UTF-8 문자열을 슬라이싱하며 패닉하던 버그 수정.
+  - `clamp_char_range`를 추가해 `selected_chars`, `cursor`, `delete_block_sel`, `replace_block_sel`, `copy_selection`, `shortcuts_block_sel`, `restore_tab_view`가 항상 UTF-8 문자 경계 안에서 동작하도록 방어.
+  - 일반 문단·단독/첫 불릿·연번에서도 `Tab`/`Shift+Tab` 2칸 들여쓰기 및 하위 목록 계층화가 동작하고 편집·보기 화면 들여쓰기가 일치하도록 개선 (`list_item_step`, `indent_list`, `render_markdown_native`).
+- **모달 입력창 한글 IME 조합 불가 수정 (`src/ui.rs`)**:
+  - `파일로 저장`(`Dialog::SaveScratch`)·`새 파일`·`이름 변경`·`파일 탐색기` 필터 입력창이 매 프레임 `request_focus()`를 호출해 `egui 0.37`이 매 프레임 IME 조합을 중단하던 문제를 `focus_once()`로 수정.
+- **연번 서식화·볼드(`**`) 노출 방지·챗봇 붙여넣기 정규화 (`src/textops.rs`, `src/ui.rs`)**:
+  - `normalize_typed_line_marker`로 숨긴 불릿 뒤나 `**1. ...**` 안쪽에서 연번 입력 시 즉시 번호 목록화.
+  - `wrap_selection`·`wrap_multiline_selection`·`inline_spans`·`MdInlineBuf`(`unclosed_bold`/`future_bold_closer`/`repaired_strong`) 개선으로 공백·한국어 조사·괄호·인라인 코드 조합에서 `**` 기호 노출 방지.
+  - `normalize_pasted_markdown`으로 외부 챗봇 결과 붙여넣기 시 유니코드 불릿·탭·굵게 감싼 연번·제목/구분선/표/코드 블록 경계를 자동 정리.
+- **검증**: `save_as_path_switches_folder_and_saves_anywhere`, `line_numbers_toggle_and_render_test`, `format_painter_copies_inline_and_block_format`, `korean_ime_types_in_save_scratch_dialog`, `tab_merged_block_sel_clears_block_sel_and_never_panics`, `tab_key_all_scenarios_no_panic`, `tab_indents_text_and_builds_subitems_in_all_cases` 추가, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`(64개 통과).
+
 ## 2026-11-23 — v0.12.3: 블록 지정 스크롤 선택 유지 및 목록·빈 줄·IME 편집 버그 일괄 수정
 
 - **블록 지정 중 위로 스크롤 시 뒤쪽(시작점) 선택 끊김 수정 (`src/ui.rs`, `src/main.rs`)**:

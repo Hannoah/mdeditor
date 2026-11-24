@@ -2,7 +2,7 @@
 
 **Rust로 만든 순수 로컬 Markdown 편집기 — 브라우저·웹뷰·로컬 서버 없이 네이티브 창 하나로 동작합니다.**
 
-![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-57%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
+![Rust 2021](https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square&logo=rust&logoColor=white) ![Native](https://img.shields.io/badge/UI-eframe%2Fegui-blue?style=flat-square) ![Memory](https://img.shields.io/badge/Memory-~4.4MB-success?style=flat-square) ![Binary Size](https://img.shields.io/badge/Binary_Size-~9MB-blue?style=flat-square) ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-lightgrey?style=flat-square) ![Tests](https://img.shields.io/badge/Tests-64%20Passed-brightgreen?style=flat-square) ![License](https://img.shields.io/badge/License-MIT-orange?style=flat-square)
 
 ---
 
@@ -30,8 +30,8 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
   - **캔버스(본문·블록) 우클릭**: 상단 글자 서식 아이콘 바(굵게·기울임·취소선·형광펜·코드·키캡·링크·서식 지우기), 잘라내기/복사/붙여넣기/전체 선택, **`블록 전환 ▸`** 하위 메뉴(일반 텍스트·제목 1~3·할 일·글머리·번호·인용구·할 일 완료 토글·코드·콜아웃·토글·블록 위/아래 이동), **`삽입 ▸`** 하위 메뉴(빈 블록·표·Mermaid 그래프·구분선·이미지), 블록 복제/삭제만 깔끔하게 정리한 컴팩트 메뉴 제공.
   - **상단 탭 우클릭**: 새 탭, 탭 내용 복제, 파일 저장/이름 변경, 파일 전체 경로 복사, 탭 닫기, 다른 탭 모두 닫기, 오른쪽 탭 모두 닫기, 파일 삭제를 지원합니다.
   - **파일 탐색기 항목 우클릭**: 파일 열기, 이름 변경(`F2`), 경로 복사, 파일 삭제(`Delete`)를 지원합니다.
-- **떠 있는 서식 막대**: 글자나 여러 블록을 선택하면 굵게·기울임·취소선·형광펜·코드·키캡·**글머리 목록·번호 목록**·링크·서식 지우기 막대가 나타납니다.
-- **스마트 목록 & 계층 들여쓰기**: 목록에서 `Enter`를 누르면 다음 기호·번호를 이어 쓰고, 빈 항목에서 `Enter`를 누르면 목록이 끝납니다. `Tab`/`Shift+Tab`으로 숫자 목록 아래 불릿 포인트 계층화 및 역들여쓰기를 지원하며, 자동 줄바꿈된 목록 항목도 편집·보기 모드에서 동일한 내어쓰기로 표시됩니다.
+- **떠 있는 서식 막대 & 서식 복사**: 글자나 여러 블록을 선택하면 굵게·기울임·취소선·형광펜·코드·키캡·**글머리 목록·번호 목록**·링크·서식 지우기·**서식 복사/붙여넣기(`Ctrl+Alt+B`/`Ctrl+Alt+P`)** 막대가 나타납니다.
+- **스마트 목록 & 계층 들여쓰기**: 목록에서 `Enter`를 누르면 다음 기호·번호를 이어 쓰고, 빈 항목에서 `Enter`를 누르면 목록이 끝납니다. `Tab`/`Shift+Tab`으로 일반 문단 2칸 들여쓰기 및 불릿·연번 하위 계층화/역들여쓰기를 지원하며, 외부 챗봇 결과를 붙여넣을 때도 유니코드 불릿·굵게 감싼 연번·제목/표/구분선 블록을 자동으로 정규화합니다.
 - 렌더링된 **할 일 체크박스를 클릭하면 원문이 바로 바뀝니다.**
 - 마지막 블록 아래 빈 곳을 클릭하면 새 블록이 생깁니다.
 - **문서 단위 실행 취소** (`Ctrl+Z` / `Ctrl+Y`): 글자 입력뿐 아니라 블록 나누기·합치기, 서식, 슬래시 메뉴, 모두 바꾸기, 체크박스까지 되돌립니다. 이어 친 입력은 한 단계로 묶입니다.
@@ -64,7 +64,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 - 다른 프로그램이 열려 있는 파일을 바꾸면 창으로 돌아올 때 다시 불러옵니다. 편집 중이던 문서는 덮어쓰지 않고 경고만 합니다.
 - 새 문서와 이름 변경은 작업 폴더 밖으로 나가는 경로(`..`, 절대 경로, 드라이브 지정)와 Windows 예약 이름(`CON`, `NUL`, `COM1` 등) 및 금지 문자를 거부합니다.
 - UTF-8이 아닌 파일은 빈 문서로 위장하지 않고 열기 오류를 표시합니다.
-- 마지막 작업 폴더·문서·테마·전체 너비·글꼴 크기·창 크기를 기억합니다.
+- 마지막 작업 폴더·문서·테마·전체 너비·글꼴 크기·줄 번호 표시·창 크기를 기억합니다.
 
 ---
 
@@ -73,6 +73,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | 단축키 | 기능 |
 |---|---|
 | `Ctrl+S` | 저장 |
+| `Ctrl+Alt+S` | 다른 위치·이름으로 저장 (저장 경로 변경) |
 | `Ctrl+N` / `Ctrl+T` | 새 편집 탭 열기 |
 | `Ctrl+Shift+N` | 작업 폴더에 새 마크다운 파일 만들기 |
 | `Ctrl+W` | 현재 탭 닫기 |
@@ -87,6 +88,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | `Ctrl+Shift+S` / `Ctrl+Shift+H` | 취소선 (`~~`) / 형광펜 강조 (`==`) (다시 누르면 해제) |
 | `Ctrl+E` / `Ctrl+Shift+K` | 인라인 코드 (`` ` ``) / 키보드 키캡 (`[[키]]`) (다시 누르면 해제) |
 | `Ctrl+\` | 선택 영역의 인라인 서식 지우기 |
+| `Ctrl+Alt+B` / `Ctrl+Alt+P` | 서식 복사 / 서식 붙여넣기 |
 | `Ctrl+Alt+0` | 일반 텍스트(문단) 블록으로 전환 |
 | `Ctrl+Alt+1` / `2` / `3` | 제목 1 / 제목 2 / 제목 3 블록으로 전환 (다시 누르면 해제) |
 | `Ctrl+Alt+4` / `5` / `6` / `7` | 할 일 목록 / 글머리 목록 / 번호 목록 / 인용구로 전환 |
@@ -98,7 +100,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | `Ctrl+Shift+L` | 왼쪽 문서 목차(TOC) 서랍 열기 / 닫기 |
 | `Ctrl+Shift+E` | HTML 파일로 내보내기 |
 | `Ctrl+Shift+C` / `Ctrl+Alt+C` | 마크다운 원본 복사 / HTML 코드 복사 |
-| `Ctrl+Alt+D` / `W` / `F` | 라이트·다크 테마 / 가운데↔전체 너비 / 글꼴 크기 전환 |
+| `Ctrl+Alt+D` / `W` / `F` / `N` | 라이트·다크 테마 / 가운데↔전체 너비 / 글꼴 크기 / 줄 번호 전환 |
 | `F11` / `Ctrl+Shift+F` | 집중 크게 보기 (상·하단 바 숨기기 토글) |
 | `Ctrl+P` | 인쇄 (PDF로 저장 가능) |
 | `Ctrl+Q` | 종료 |
@@ -177,7 +179,7 @@ package.ps1        배포 빌드: 테스트 → 릴리즈 → 설치 파일 → 
 ## 🧪 테스트
 
 ```bash
-cargo test                                    # 57개
+cargo test                                    # 64개
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

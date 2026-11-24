@@ -899,6 +899,8 @@ enum Fmt {
     Wrap(&'static str, &'static str, &'static str),
     Block(BlockKind),
     Clear,
+    BrushCopy,  // 서식 복사
+    BrushPaste, // 서식 붙여넣기
 }
 
 // 슬래시(/) 블록 메뉴 (웹 버전과 같은 목록)
@@ -984,6 +986,7 @@ struct App {
     full_width: bool,
     focus_mode: bool,
     small_text: bool,
+    line_numbers: bool,
     spellcheck: bool,
     spell_ignore: std::collections::HashSet<String>,
     spell_rev: u64,
@@ -1046,6 +1049,7 @@ struct App {
     recovery_at: Option<Instant>,
     draft_dirty: bool,
     pasted: PastedSlot, // (대상 탭 키, 백그라운드 이미지 저장 결과)
+    format_brush: Option<FormatSample>, // 복사해 둔 서식 (서식 복사 / 붙여넣기)
 }
 
 type ScanSlot = std::sync::Arc<std::sync::Mutex<Option<(u64, Vec<String>)>>>; // (세대, 파일 목록)
@@ -1129,6 +1133,7 @@ impl App {
             full_width: flag("full_width"),
             focus_mode: false,
             small_text: flag("small_text"),
+            line_numbers: flag("line_numbers"),
             spellcheck,
             spell_ignore,
             spell_rev: 0,
@@ -1191,6 +1196,7 @@ impl App {
             recovery_at: None,
             draft_dirty: false,
             pasted: Default::default(),
+            format_brush: None,
         };
         if has_arg {
             app.switch_root(root, open);
@@ -1323,9 +1329,15 @@ impl App {
                 self.focus_editor = true;
             } else {
                 let v = &doc.view;
-                self.active = v.active.filter(|&a| a <= doc.text.len());
+                self.active = v
+                    .active
+                    .filter(|&a| a <= doc.text.len() && doc.text.is_char_boundary(a));
                 self.blank = v.blank;
-                self.block_sel = v.block_sel.clone();
+                self.block_sel = v
+                    .block_sel
+                    .as_ref()
+                    .map(|r| clamp_char_range(&doc.text, r))
+                    .filter(|r| r.start < r.end);
                 self.block_sel_anchor = v.block_sel_anchor;
                 self.block_sel_head = v.block_sel_head;
                 self.last_sel = v.last_sel;
@@ -1495,14 +1507,27 @@ impl App {
     }
 
     fn switch_root(&mut self, root: PathBuf, open: Option<String>) {
+        let keep_scratch = open.is_none()
+            && self.current.as_deref().is_some_and(|k| {
+                is_scratch_key(k) && self.docs.get(k).is_some_and(|d| !d.text.is_empty())
+            });
         self.deactivate();
         self.root = root;
         self.docs.retain(|k, _| is_scratch_key(k));
         self.tabs.retain(|k| is_scratch_key(k));
-        self.current = self.tabs.first().cloned();
+        if !keep_scratch {
+            self.current = self.tabs.first().cloned();
+        }
         self.files.clear();
         self.block_heights.clear();
         self.status = format!("작업 폴더: {}", self.root.display());
+        if keep_scratch {
+            self.refresh_files();
+            if let Some(cur) = self.current.clone() {
+                self.restore_tab_view(&cur);
+            }
+            return;
+        }
         // 열 파일이 정해져 있으면 폴더 스캔을 미룬다 (파일 탐색기를 열 때 스캔) → 큰 폴더에서도 바로 뜬다
         let mut first = open.filter(|n| self.root.join(n).is_file());
         if first.is_none() {
@@ -1901,6 +1926,134 @@ impl App {
         }
     }
 
+    fn save_as_path(&mut self, dest: &Path) -> Result<String, String> {
+        let Some(cur_key) = self.current.clone() else {
+            return Err("열린 문서가 없습니다".into());
+        };
+        let dest = if dest.extension().is_none() {
+            dest.with_extension("md")
+        } else {
+            dest.to_path_buf()
+        };
+        let parent_dir = match dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(p) => {
+                std::fs::create_dir_all(p).map_err(|e| format!("폴더 생성 실패: {e}"))?;
+                canon(p).unwrap_or_else(|| p.to_path_buf())
+            }
+            None => self.root.clone(),
+        };
+        let file_name = dest
+            .file_name()
+            .ok_or_else(|| "파일 이름이 올바르지 않습니다".to_string())?;
+        let dest_canon = parent_dir.join(file_name);
+        let body = self
+            .docs
+            .get(&cur_key)
+            .map(Doc::encoded)
+            .unwrap_or_default();
+        save_atomic(&dest_canon, body.as_bytes()).map_err(|e| format!("저장 실패: {e}"))?;
+        self.save_current_tab_view();
+        let mut doc = self
+            .docs
+            .remove(&cur_key)
+            .unwrap_or_else(|| Doc::scratch(String::new()));
+        let was_scratch = is_scratch_key(&cur_key) || doc.scratch;
+        doc.scratch = false;
+        doc.saved = doc.text.clone();
+        doc.edited_at = None;
+        doc.dirty_flag = false;
+        doc.mtime = modified(&dest_canon);
+
+        let rel = if let Some(r) = dest_canon.strip_prefix(&self.root).ok().map(to_slash) {
+            if let Some(pos) = self.tabs.iter().position(|t| *t == cur_key) {
+                if self.tabs.contains(&r) && self.tabs[pos] != r {
+                    self.tabs.remove(pos);
+                } else {
+                    self.tabs[pos] = r.clone();
+                }
+            } else if !self.tabs.contains(&r) {
+                self.tabs.push(r.clone());
+            }
+            self.docs.insert(r.clone(), doc);
+            r
+        } else {
+            self.save_all();
+            self.deactivate();
+            self.root = parent_dir;
+            self.docs.retain(|k, _| is_scratch_key(k));
+            self.tabs.retain(|k| is_scratch_key(k));
+            self.block_heights.clear();
+            let r = to_slash(Path::new(file_name));
+            if was_scratch {
+                if let Some(slot) = self.tabs.iter_mut().find(|t| **t == cur_key) {
+                    *slot = r.clone();
+                } else if !self.tabs.contains(&r) {
+                    self.tabs.push(r.clone());
+                }
+            } else if !self.tabs.contains(&r) {
+                self.tabs.push(r.clone());
+            }
+            self.docs.insert(r.clone(), doc);
+            r
+        };
+        self.current = Some(rel.clone());
+        if was_scratch {
+            self.draft_dirty = true;
+        }
+        self.refresh_files();
+        self.status = format!("저장됨: {}", dest_canon.display());
+        Ok(rel)
+    }
+
+    fn save_as_dialog(&mut self) -> bool {
+        let Some(cur_key) = self.current.clone() else {
+            return false;
+        };
+        let default_name = if is_scratch_key(&cur_key) {
+            "새문서.md".to_string()
+        } else {
+            Path::new(&cur_key)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "새문서.md".to_string())
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_directory(self.doc_dir())
+            .set_file_name(&default_name)
+            .add_filter("Markdown", &["md", "markdown"])
+            .save_file()
+        else {
+            return false;
+        };
+        match self.save_as_path(&path) {
+            Ok(_) => true,
+            Err(e) => {
+                self.status = e;
+                false
+            }
+        }
+    }
+
+    fn pick_save_folder(&mut self) {
+        if let Some(dir) = rfd::FileDialog::new()
+            .set_directory(&self.root)
+            .pick_folder()
+        {
+            let (new_root, _) = resolve_target(Some(&dir), &self.root);
+            self.save_all();
+            if !self.any_dirty() {
+                self.root = new_root;
+                self.docs.retain(|k, _| is_scratch_key(k));
+                self.tabs.retain(|k| is_scratch_key(k));
+                self.block_heights.clear();
+                self.refresh_files();
+                self.status = format!("저장 폴더: {}", self.root.display());
+            } else if !matches!(self.dialog, Some(Dialog::Conflict(_))) {
+                self.dialog = Some(Dialog::Unsaved(After::Switch(new_root, None)));
+            }
+        }
+    }
+
     fn create_file(&mut self, input: &str) -> Result<(), String> {
         let name = validate_name(input)?;
         let path = self.root.join(&name);
@@ -2076,9 +2229,12 @@ impl App {
             let Some(doc) = self.doc() else {
                 return 0;
             };
-            let s = bs.start.min(doc.text.len());
-            let e = bs.end.min(doc.text.len());
-            return if e > s { char_len(&doc.text[s..e]) } else { 0 };
+            let r = clamp_char_range(&doc.text, bs);
+            return if r.end > r.start {
+                char_len(&doc.text[r])
+            } else {
+                0
+            };
         }
         if self.active.is_some() {
             if let Some((a, b)) = self.last_sel {
@@ -2176,9 +2332,8 @@ impl App {
             return (0, 0);
         };
         if let Some(bs) = &self.block_sel {
-            let s = bs.start.min(doc.text.len());
-            let e = bs.end.min(doc.text.len());
-            return (char_len(&doc.text[..s]), char_len(&doc.text[..e]));
+            let r = clamp_char_range(&doc.text, bs);
+            return (char_len(&doc.text[..r.start]), char_len(&doc.text[..r.end]));
         }
         let len = doc.chars;
         let Some(r) = self.active_block() else {
@@ -2325,8 +2480,8 @@ impl App {
             return false;
         };
         let len = doc.text.len();
-        let start = sel.start.min(len);
-        let end = sel.end.min(len);
+        let clamped = clamp_char_range(&doc.text, &sel);
+        let (start, end) = (clamped.start, clamped.end);
         if start >= end && len > 0 {
             return false;
         }
@@ -2386,8 +2541,8 @@ impl App {
         let Some(doc) = self.doc_mut() else {
             return;
         };
-        let start = sel.start.min(doc.text.len());
-        let end = sel.end.min(doc.text.len());
+        let clamped = clamp_char_range(&doc.text, &sel);
+        let (start, end) = (clamped.start, clamped.end);
         doc.text.replace_range(start..end, with);
         doc.edited_at = Some(Instant::now());
         doc.refresh_meta();
@@ -2466,7 +2621,11 @@ impl App {
                     .iter()
                     .rfind(|b| b.end > b0 && b.start < b1)
                     .map_or(b1, |b| b.start);
-                Some((b0..b1, anchor_block, head_block))
+                if b0 == b1 || (anchor_block == head_block && b0 > anchor_block) {
+                    None
+                } else {
+                    Some((b0..b1, anchor_block, head_block))
+                }
             } else {
                 None
             }
@@ -2478,6 +2637,11 @@ impl App {
             self.block_sel_anchor = Some(anchor);
             self.block_sel_head = Some(head);
         } else {
+            if was_block_sel {
+                self.block_sel = None;
+                self.block_sel_anchor = None;
+                self.block_sel_head = None;
+            }
             if self.active_block().is_some_and(|r| !r.is_empty()) {
                 self.blank = 0;
             }
@@ -2565,9 +2729,51 @@ impl App {
         self.focus_editor = true;
     }
 
+    // 서식 복사: 커서·선택 위치의 서식을 기억(copy)했다가 다른 글에 입힌다(paste)
+    fn format_brush_action(&mut self, ctx: &egui::Context, copy: bool) {
+        if self.current.is_none() || self.is_visual_table_active() {
+            return;
+        }
+        if self.active_block().is_none() && self.block_sel.is_none() {
+            self.status = "서식을 복사할 글을 먼저 선택하세요".into();
+            return;
+        }
+        if copy {
+            let sel = self.cursor(ctx);
+            let sample = {
+                let Some(doc) = self.doc() else {
+                    return;
+                };
+                sample_format(&doc.text, sel)
+            };
+            self.status = format!("서식 복사됨: {}", describe_format(&sample));
+            self.format_brush = Some(sample);
+            return;
+        }
+        let Some(sample) = self.format_brush.clone() else {
+            self.status = "먼저 서식을 복사하세요 (Ctrl+Alt+B)".into();
+            return;
+        };
+        let sel = self.cursor(ctx);
+        let changed = self.doc().and_then(|d| apply_format(&d.text, sel, &sample));
+        match changed {
+            Some((text, new_sel)) => {
+                self.set_text(text, new_sel);
+                self.status = format!("서식 적용됨: {}", describe_format(&sample));
+            }
+            None => {
+                self.status = "이미 같은 서식입니다 (글자를 선택하면 글자 서식도 입혀집니다)".into()
+            }
+        }
+    }
+
     fn format(&mut self, ctx: &egui::Context, f: Fmt) {
         if let Fmt::Block(kind) = f {
             self.convert_block(ctx, kind);
+            return;
+        }
+        if matches!(f, Fmt::BrushCopy | Fmt::BrushPaste) {
+            self.format_brush_action(ctx, matches!(f, Fmt::BrushCopy));
             return;
         }
         if self.active_block().is_none() && self.block_sel.is_none() {
@@ -2582,7 +2788,7 @@ impl App {
             Fmt::Wrap(pre, suf, ph) => {
                 self.edit(ctx, |t, sel| Some(wrap_selection(t, sel, pre, suf, ph)))
             }
-            Fmt::Block(_) => unreachable!(),
+            Fmt::Block(_) | Fmt::BrushCopy | Fmt::BrushPaste => unreachable!(),
             Fmt::Clear => self.edit(ctx, |t, (a, b)| {
                 if a == b {
                     return None;
@@ -2764,15 +2970,7 @@ impl App {
 
     fn indent_active(&mut self, ctx: &egui::Context) {
         self.edit(ctx, |t, sel| {
-            if let Some(r) = indent_list(t, sel, false) {
-                return Some(r);
-            }
-            let multi = t[byte_idx(t, sel.0)..byte_idx(t, sel.1)].contains('\n');
-            if multi {
-                Some(indent_lines(t, sel, false))
-            } else {
-                Some((replace_range(t, sel, "  "), (sel.0 + 2, sel.0 + 2)))
-            }
+            indent_list(t, sel, false).or_else(|| Some(indent_lines(t, sel, false)))
         });
     }
 
@@ -2896,10 +3094,9 @@ impl App {
             return;
         };
         if let Some(bs) = &self.block_sel {
-            let s = bs.start.min(doc.text.len());
-            let e = bs.end.min(doc.text.len());
-            if s < e {
-                ctx.copy_text(doc.text[s..e].to_string());
+            let r = clamp_char_range(&doc.text, bs);
+            if r.start < r.end {
+                ctx.copy_text(doc.text[r].to_string());
                 self.status = "선택한 블록을 복사했습니다".into();
             }
             return;
@@ -2939,7 +3136,8 @@ impl App {
 
     fn paste_from_clipboard(&mut self, ctx: &egui::Context) {
         if let Some(s) = theme::clipboard_text() {
-            self.insert(ctx, &s);
+            let norm = normalize_pasted_markdown(&s);
+            self.insert(ctx, &norm);
         } else {
             self.status = "클립보드에 붙여넣을 텍스트가 없습니다".into();
         }
@@ -4267,8 +4465,11 @@ impl App {
             self.context_menu = None;
             self.dialog = Some(Dialog::NewFile(String::new()));
             return true;
-        }
-        if k(cmd, Key::N) || k(cmd, Key::T) {
+        } else if has_alt && k(alt_cmd, Key::N) {
+            self.context_menu = None;
+            self.line_numbers = !self.line_numbers;
+            return true;
+        } else if (!has_alt && k(cmd, Key::N)) || (!has_alt && k(cmd, Key::T)) {
             self.context_menu = None;
             self.new_tab();
             return true;
@@ -4315,8 +4516,23 @@ impl App {
                 self.small_text = !self.small_text;
                 return true;
             }
+            if k(alt_cmd, Key::S) {
+                self.context_menu = None;
+                self.save_as_dialog();
+                return true;
+            }
             // 블록 전환 및 삽입 단축키 (Ctrl+Alt+0~9, G, T, M, -)
             if !self.find.open && self.current.is_some() {
+                if k(alt_cmd, Key::B) {
+                    self.context_menu = None;
+                    self.format(ctx, Fmt::BrushCopy);
+                    return true;
+                }
+                if k(alt_cmd, Key::P) {
+                    self.context_menu = None;
+                    self.format(ctx, Fmt::BrushPaste);
+                    return true;
+                }
                 for (key, kind) in [
                     (Key::Num0, BlockKind::Paragraph),
                     (Key::Num1, BlockKind::Heading(1)),
@@ -4593,9 +4809,7 @@ impl App {
                     self.outdent_active(ctx);
                     return true;
                 } else if k(Modifiers::NONE, Key::Tab) {
-                    self.edit(ctx, |t, sel| {
-                        indent_list(t, sel, false).or_else(|| Some(indent_lines(t, sel, false)))
-                    });
+                    self.indent_active(ctx);
                     return true;
                 }
                 if k(Modifiers::NONE, Key::Backspace) || k(Modifiers::NONE, Key::Delete) {
@@ -4632,10 +4846,9 @@ impl App {
                 });
                 if do_copy || do_cut {
                     if let (Some(bs), Some(doc)) = (&self.block_sel, self.doc()) {
-                        let s = bs.start.min(doc.text.len());
-                        let e = bs.end.min(doc.text.len());
-                        if s < e {
-                            ctx.copy_text(doc.text[s..e].to_string());
+                        let r = clamp_char_range(&doc.text, bs);
+                        if r.start < r.end {
+                            ctx.copy_text(doc.text[r].to_string());
                         }
                     }
                     if do_cut {
@@ -5370,8 +5583,10 @@ mod tests {
         let s = tab("1. AA\n2. BB\n3. CC", 1);
         assert_eq!(s, "1. AA\n   1. BB\n2. CC");
         assert_eq!(item_depths(&s), [1, 2, 1]);
-        // 한 번 더: 형제가 없으면 더 들어가지 않는다
-        assert_eq!(tab(&s, 1), s);
+        // 한 번 더 Tab을 누르면 한 단계 더(+2칸) 하위 항목으로 들여써지고 Shift+Tab으로 단계별 복귀한다
+        let s2 = tab(&s, 1);
+        assert_eq!(s2, "1. AA\n     1. BB\n2. CC");
+        assert_eq!(shift_tab(&s2, 1), s);
         // 글머리 목록 3단계
         let s = tab(&tab("- a\n- b\n- c", 1), 2);
         assert_eq!(s, "- a\n  - b\n  - c");
@@ -5506,8 +5721,9 @@ mod tests {
             Some(("```\nQ\n```".into(), 5)),
             "빈 코드 블록에 친 글자는 닫는 ``` 앞 줄로"
         );
-        // 첫 항목 Tab은 아무 변화 없음, 목록 아닌 줄은 None
-        assert_eq!(tab("- a", 0), "- a");
+        // 첫 항목도 Tab으로 하위 항목(2칸 들여쓰기)이 되고, 목록 아닌 줄은 None
+        assert_eq!(tab("- a", 0), "  - a");
+        assert_eq!(shift_tab("  - a", 0), "- a");
         assert!(indent_list("plain", (0, 0), false).is_none());
     }
 
@@ -7831,5 +8047,384 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tab_indents_text_and_builds_subitems_in_all_cases() {
+        // 1. 단독·첫 불릿/넘버링 항목에서도 Tab으로 하위 단계(depth 1, 2) 진입 및 Shift+Tab 복귀
+        let mut st = Vec::new();
+        assert_eq!(list_item_step(&mut st, "  - 하위"), Some((1, None)));
+        let mut st = Vec::new();
+        assert_eq!(list_item_step(&mut st, "    - 손자"), Some((2, None)));
+        let mut st = Vec::new();
+        assert_eq!(list_item_step(&mut st, "  1. 번호하위"), Some((1, Some(1))));
+        // 번호 항목("1. 부모") 아래 2칸 들여쓰기된 하위 불릿("  - 하위")이 있어도 부모 스택이 끊기지 않는다
+        let mut st = Vec::new();
+        let steps: Vec<_> = "1. 부모\n  - 하위\n2. 둘째부모"
+            .split('\n')
+            .map(|l| list_item_step(&mut st, l).unwrap())
+            .collect();
+        assert_eq!(steps, [(0, Some(1)), (1, None), (0, Some(2))]);
+
+        // 숨긴 불릿("- ") 뒤나 굵게("**") 안쪽 맨 앞에서 연번("1. ", "4. ") 입력 시 즉시 번호 목록으로 서식화된다
+        assert_eq!(
+            normalize_typed_line_marker("- 4. 보안 설계", 5),
+            Some(("4. 보안 설계".into(), 3))
+        );
+        assert_eq!(
+            normalize_typed_line_marker("4. - 보안 설계", 3),
+            Some(("4. 보안 설계".into(), 3))
+        );
+        assert_eq!(
+            normalize_typed_line_marker("**1. 보안 설계**", 5),
+            Some(("1. **보안 설계**".into(), 5))
+        );
+
+        // 4. 볼드(**) 설정 시 공백 포함 선택·부분 선택 해제·복수 볼드 병합·다중 줄 선택에서 ** 기호가 노출되지 않는다
+        assert_eq!(
+            wrap_selection("보안 및 역할 ", (0, 8), "**", "**", "굵게").0,
+            "**보안 및 역할** "
+        );
+        assert_eq!(
+            wrap_selection("**보안 및 역할 기반**", (2, 6), "**", "**", "굵게").0,
+            "보안 및 **역할 기반**"
+        );
+        assert_eq!(
+            wrap_selection("**보안 및 역할 기반**", (7, 9), "**", "**", "굵게").0,
+            "**보안 및** 역할 **기반**"
+        );
+        assert_eq!(
+            wrap_selection("앞 **보안** 뒤", (0, 10), "**", "**", "굵게").0,
+            "**앞 보안 뒤**"
+        );
+        assert_eq!(
+            wrap_selection("**보안** 및 **역할**", (0, 15), "**", "**", "굵게").0,
+            "**보안 및 역할**"
+        );
+        assert_eq!(
+            wrap_selection("- 첫째\n- 둘째", (0, 9), "**", "**", "굵게").0,
+            "- **첫째**\n- **둘째**"
+        );
+        // 인라인 코드가 포함된 볼드+조사 조합 및 괄호 볼드+조사 다중 조합도 보기 화면 LayoutJob에서 **가 그대로 노출되지 않는다
+        let pal = theme::pal(false);
+        let job =
+            crate::ui::inline_md_view_job("**보안(`RBAC`)**은 **중요 **하다", 16.0, &pal, false);
+        assert!(
+            !job.text.contains("**"),
+            "exposed ** in view job: {}",
+            job.text
+        );
+        let job2 = crate::ui::inline_md_view_job("- **항목(A)**은 설명**(B)**", 16.0, &pal, false);
+        assert!(
+            !job2.text.contains("**"),
+            "exposed ** in mispaired CJK view job: {}",
+            job2.text
+        );
+
+        // 5. 외부 챗봇 결과 붙여넣기 정규화: 굵게 감싼 연번, 유니코드 불릿, 구분선·제목·표 블록 분리
+        let raw_chat = "### 1. 보안 개요\n**1. 보안 및 역할 기반 접근 제어 설계**\n\t• **역할(RBAC)**은 권한을 분리합니다.\n--- \n| 구분 | 설명 |\n| --- | --- |\n| A | B |\n마무리 문단";
+        let norm_chat = normalize_pasted_markdown(raw_chat);
+        assert_eq!(
+            norm_chat,
+            "### 1. 보안 개요\n\n1. **보안 및 역할 기반 접근 제어 설계**\n  - **역할(RBAC)**은 권한을 분리합니다.\n\n--- \n\n| 구분 | 설명 |\n| --- | --- |\n| A | B |\n\n마무리 문단"
+        );
+
+        // 2. 빈 줄(\n\n)로 나뉜 다중 불릿/넘버링 블록 선택 후 Tab 시 빈 줄을 병합하며 하위 항목으로 전환
+        let doc = "1. 부모\n\n2. 자식1\n\n3. 자식2\n\n4. 다음부모";
+        let c_start = char_len("1. 부모\n\n");
+        let c_end = char_len("1. 부모\n\n2. 자식1\n\n3. 자식2");
+        let (indented, _) = indent_list(doc, (c_start, c_end), false).unwrap();
+        assert_eq!(
+            indented, "1. 부모\n   1. 자식1\n   2. 자식2\n\n2. 다음부모",
+            "다중 목록 블록 Tab 시 하위 항목으로 합쳐지고 뒤쪽 번호 목록도 다시 매겨져야 한다"
+        );
+
+        // 3. UI에서 일반 문단(커서가 줄 끝·중간 또는 단일 줄 선택 상태) 및 불릿에 Tab/Shift+Tab 입력 검증
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_tab_indent");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d2 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 500.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.set_text("일반 문단 텍스트".into(), (9, 9));
+                app
+            });
+        h.run_steps(2);
+        // 줄 끝에서 Tab 2번 → 글자 중간 공백이 아니라 줄 앞 4칸 들여쓰기가 되어야 한다
+        h.key_press(Key::Tab);
+        h.step();
+        assert_eq!(h.state().doc().unwrap().text, "  일반 문단 텍스트");
+        h.key_press(Key::Tab);
+        h.step();
+        assert_eq!(h.state().doc().unwrap().text, "    일반 문단 텍스트");
+        // Shift+Tab 1번 → 2칸 내어쓰기
+        h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        h.step();
+        assert_eq!(h.state().doc().unwrap().text, "  일반 문단 텍스트");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_painter_copies_inline_and_block_format() {
+        // 굵게 + 제목 2 서식을 복사해서 일반 글에 입힌다
+        let src = "## **보안** 설계\n\n평문 입니다";
+        let sample = sample_format(src, (5, 5)); // 굵게 안쪽 커서
+        assert_eq!(sample.inline, vec![Inline::Bold]);
+        assert_eq!(sample.block, BlockKind::Heading(2));
+        assert_eq!(describe_format(&sample), "굵게 · 제목 2");
+
+        let target = "평문 입니다";
+        let (out, sel) = apply_format(target, (0, 2), &sample).unwrap();
+        assert_eq!(out, "## **평문** 입니다");
+        let (a, b) = sel;
+        assert_eq!(out.chars().skip(a).take(b - a).collect::<String>(), "평문");
+
+        // 글자 서식이 없는 견본은 선택한 글자의 굵게를 벗긴다
+        let plain = FormatSample {
+            inline: Vec::new(),
+            block: BlockKind::Paragraph,
+        };
+        let (out, _) = apply_format("앞 **강조** 뒤", (4, 6), &plain).unwrap();
+        assert_eq!(out, "앞 강조 뒤");
+
+        // 목록 줄 서식 복사 → 커서만 있어도 줄 유형이 바뀐다
+        let list = sample_format("- 항목", (3, 3));
+        assert_eq!(list.block, BlockKind::Bullet);
+        let (out, _) = apply_format("일반 문장", (2, 2), &list).unwrap();
+        assert_eq!(out, "- 일반 문장");
+
+        // 이미 같은 서식이면 변경 없음
+        assert!(apply_format("- 항목", (3, 3), &list).is_none());
+
+        // 여러 줄 선택에는 줄마다 서식을 입힌다
+        let bold = FormatSample {
+            inline: vec![Inline::Bold],
+            block: BlockKind::Paragraph,
+        };
+        let (out, _) = apply_format("첫째\n둘째", (0, 5), &bold).unwrap();
+        assert_eq!(out, "**첫째**\n**둘째**");
+    }
+
+    #[test]
+    fn korean_ime_types_in_save_scratch_dialog() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_dialog_ime");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d2 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 500.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.dialog = Some(Dialog::SaveScratch(String::new()));
+                app
+            });
+        h.run_steps(3);
+        // "한글" 조합: ㅎ → 하 → 한 → (확정) 한, ㄱ → 글
+        for (pre, commit) in [
+            ("ㅎ", None),
+            ("하", None),
+            ("한", Some("한")),
+            ("ㄱ", None),
+            ("그", None),
+            ("글", Some("글")),
+        ] {
+            match commit {
+                Some(c) => h.event(egui::Event::Ime(egui::ImeEvent::Commit(c.into()))),
+                None => h.event(egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: pre.into(),
+                    active_range_chars: None,
+                })),
+            }
+            h.step();
+            // 매 프레임 포커스를 다시 요청해 IME 조합을 끊으면 안 된다
+            let interrupted = h
+                .ctx
+                .output(|o| o.ime.is_some_and(|i| i.should_interrupt_composition));
+            assert!(!interrupted, "IME 조합이 매 프레임 끊긴다 (preedit {pre})");
+        }
+        h.run_steps(2);
+        match h.state().dialog.as_ref() {
+            Some(Dialog::SaveScratch(name)) => assert_eq!(name, "한글"),
+            _ => panic!("저장 대화상자가 닫혔다"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tab_key_all_scenarios_no_panic() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_tab_all");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cases: &[(&str, Sel)] = &[
+            ("", (0, 0)),
+            ("- ", (2, 2)),
+            ("- 항목", (4, 4)),
+            ("- 부모\n- 자식", (7, 7)),
+            ("1. ", (3, 3)),
+            ("1. 부모\n2. 자식", (8, 8)),
+            ("1. 부모\n\n2. 자식", (10, 10)),
+            ("- 부모\n\n- 자식", (8, 8)),
+            ("# 제목\n\n본문", (7, 7)),
+            ("```rust\nfn a() {}\n```", (10, 10)),
+            ("> 인용", (4, 4)),
+            ("- [ ] 할일", (6, 6)),
+            ("가나다\n라마바", (5, 5)),
+            ("가나다", (0, 3)),
+            ("10. 열번째\n11. 열한번째", (14, 14)),
+            ("| a | b |\n| --- | --- |\n| 1 | 2 |", (2, 2)),
+        ];
+        for (idx, (doc_text, sel)) in cases.iter().enumerate() {
+            let d2 = dir.clone();
+            let txt = (*doc_text).to_string();
+            let s = *sel;
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(900.0, 600.0))
+                .with_accessibility_check(false)
+                .build_eframe(move |cc| {
+                    let mut app = App::new(cc, None, &d2);
+                    if !txt.is_empty() {
+                        app.set_text(txt, s);
+                    }
+                    app
+                });
+            h.run_steps(2);
+            h.key_press(Key::Tab);
+            h.run_steps(2);
+            h.key_press(Key::Tab);
+            h.run_steps(2);
+            h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+            h.run_steps(2);
+            h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+            h.run_steps(2);
+            assert!(
+                h.state().current.is_some(),
+                "case {idx} ({doc_text:?}) closed tab unexpectedly"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tab_merged_block_sel_clears_block_sel_and_never_panics() {
+        // 빈 줄로 나뉜 하위 번호 목록 블록들을 block_sel로 잡은 뒤 Tab으로 상위 목록에 병합할 때
+        // 이전 바이트 범위가 남아 status_bar(selected_chars)에서 UTF-8 경계 패닉이 나지 않아야 한다.
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_tab_block_sel_merge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d2 = dir.clone();
+        let initial = "1. 부모\n\n2. 한국어\n\n3. 테스트";
+        let sel_start = initial.find("2. ").unwrap();
+        let sel_end = initial.len();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.set_text(initial.into(), (0, 0));
+                app.pending_sel = None;
+                app.active = None;
+                app.block_sel = Some(sel_start..sel_end);
+                app.block_sel_anchor = Some(sel_start);
+                app.block_sel_head = Some(initial.rfind("3. ").unwrap());
+                app
+            });
+        h.run_steps(2);
+        h.key_press(Key::Tab);
+        h.run_steps(3);
+        assert_eq!(
+            h.state().doc().unwrap().text,
+            "1. 부모\n   1. 한국어\n   2. 테스트"
+        );
+        assert_eq!(h.state().block_sel, None);
+
+        // Shift+Tab / 비정상 바이트 경계에서도 selected_chars()가 패닉하지 않는다
+        h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        h.run_steps(2);
+        h.state_mut().block_sel = Some((sel_start + 4)..(sel_end - 1));
+        let _ = h.state().selected_chars();
+        h.run_steps(2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn line_numbers_toggle_and_render_test() {
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_line_numbers");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d2 = dir.clone();
+        let initial = "# 제목\n\n첫째 줄\n둘째 줄\n\n\n마지막 줄";
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(960.0, 640.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.set_text(initial.into(), (0, 0));
+                app.pending_sel = None;
+                app.active = Some(initial.find("첫째 줄").unwrap());
+                app
+            });
+        assert!(!h.state().line_numbers);
+        h.run_steps(2);
+
+        // Ctrl+Alt+N 으로 줄 번호 켜고 끄기
+        let alt_cmd = Modifiers::COMMAND | Modifiers::ALT;
+        h.key_press_modifiers(alt_cmd, Key::N);
+        h.run_steps(3);
+        assert!(h.state().line_numbers);
+
+        // 전체 너비 모드에서도 줄 번호 여백과 함께 정상 렌더링된다
+        h.key_press_modifiers(alt_cmd, Key::W);
+        h.run_steps(2);
+        assert!(h.state().full_width);
+        assert!(h.state().line_numbers);
+
+        // 다시 Ctrl+Alt+N 으로 끄기
+        h.key_press_modifiers(alt_cmd, Key::N);
+        h.run_steps(2);
+        assert!(!h.state().line_numbers);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_as_path_switches_folder_and_saves_anywhere() {
+        let base = std::env::temp_dir().join("mdeditor_test_save_as_path");
+        let _ = std::fs::remove_dir_all(&base);
+        let dir1 = base.join("ws1");
+        let dir2 = base.join("ws2");
+        std::fs::create_dir_all(&dir1).unwrap();
+        let d1 = dir1.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(960.0, 640.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d1);
+                app.set_text("# 메모\n\n내용".into(), (0, 0));
+                app
+            });
+        h.run_steps(2);
+
+        // 1. 작업 폴더 밖(dir2/외부/note.md)으로 저장하면 폴더가 생성·전환되고 파일이 저장된다
+        let ext_path = dir2.join("외부").join("note");
+        let rel = h.state_mut().save_as_path(&ext_path).unwrap();
+        assert_eq!(rel, "note.md");
+        assert_eq!(h.state().current.as_deref(), Some("note.md"));
+        assert!(dir2.join("외부").join("note.md").is_file());
+        assert_eq!(h.state().root, canon(&dir2.join("외부")).unwrap());
+
+        // 2. 이미 저장된 파일을 같은 폴더 하위 경로(sub/copy.md)로 다른 이름 저장
+        let sub_path = h.state().root.join("sub").join("copy.md");
+        let rel2 = h.state_mut().save_as_path(&sub_path).unwrap();
+        assert_eq!(rel2, "sub/copy.md");
+        assert_eq!(h.state().current.as_deref(), Some("sub/copy.md"));
+        assert!(dir2.join("외부").join("sub").join("copy.md").is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -10,6 +10,19 @@ pub(crate) fn byte_idx(s: &str, ci: usize) -> usize {
     s.char_indices().nth(ci).map_or(s.len(), |(b, _)| b)
 }
 
+pub(crate) fn clamp_char_range(s: &str, r: &Range<usize>) -> Range<usize> {
+    let len = s.len();
+    let mut start = r.start.min(len);
+    while start > 0 && !s.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = r.end.clamp(start, len);
+    while end > start && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    start..end
+}
+
 pub(crate) fn char_len(s: &str) -> usize {
     s.chars().count()
 }
@@ -35,11 +48,15 @@ pub(crate) fn replace_range(s: &str, (a, b): Sel, with: &str) -> String {
 // 이미 같은 기호로 감싸져 있으면 벗긴다(토글). 링크는 바로 주소를 칠 수 있게 URL 자리를 선택한다.
 pub(crate) fn wrap_selection(
     s: &str,
-    (mut a, b): Sel,
+    (mut a, mut b): Sel,
     pre: &str,
     suf: &str,
     placeholder: &str,
 ) -> (String, Sel) {
+    let is_link = suf.starts_with("](");
+    if a < b && !is_link && s[byte_idx(s, a)..byte_idx(s, b)].contains('\n') {
+        return wrap_multiline_selection(s, (a, b), pre, suf, placeholder);
+    }
     if a < b {
         let ls = line_start(s, a);
         let le = line_end(s, a);
@@ -51,10 +68,132 @@ pub(crate) fn wrap_selection(
                 a = content_start;
             }
         }
+        if !is_link {
+            let sel_str = &s[byte_idx(s, a)..byte_idx(s, b)];
+            let trimmed = sel_str.trim_matches([' ', '\t']);
+            if !trimmed.is_empty() {
+                let lead_ws = sel_str.len() - sel_str.trim_start_matches([' ', '\t']).len();
+                let trail_ws = sel_str.len() - sel_str.trim_end_matches([' ', '\t']).len();
+                a += char_len(&sel_str[..lead_ws]);
+                b -= char_len(&sel_str[sel_str.len() - trail_ws..]);
+            }
+        }
     }
+    let (pl, sl) = (char_len(pre), char_len(suf));
+    let target_kind = (pre == suf)
+        .then_some(match pre {
+            "**" | "__" => Some(Inline::Bold),
+            "==" => Some(Inline::Mark),
+            "~~" => Some(Inline::Strike),
+            "*" => Some(Inline::Italic),
+            "`" => Some(Inline::Code),
+            _ => None,
+        })
+        .flatten();
+
+    if let Some(tk) = target_kind {
+        let ls = line_start(s, a);
+        let le = line_end(s, b);
+        let line = &s[byte_idx(s, ls)..byte_idx(s, le)];
+        let m = if is_collapsed_line(line) {
+            0
+        } else {
+            hidden_prefix(line).min(line.len())
+        };
+        let content_start = ls + char_len(&line[..m]);
+        let rest = &line[m..];
+        let spans: Vec<(usize, usize, usize, usize)> = inline_spans(rest)
+            .into_iter()
+            .filter(|sp| sp.4 == tk)
+            .map(|(os, bs, be, ce, _)| {
+                (
+                    content_start + char_len(&rest[..os]),
+                    content_start + char_len(&rest[..bs]),
+                    content_start + char_len(&rest[..be]),
+                    content_start + char_len(&rest[..ce]),
+                )
+            })
+            .collect();
+
+        if a == b {
+            if let Some(&(os, bs, be, ce)) =
+                spans.iter().find(|&&(os, _, _, ce)| a >= os && a <= ce)
+            {
+                let inner_str = &s[byte_idx(s, bs)..byte_idx(s, be)];
+                let out = replace_range(s, (os, ce), inner_str);
+                let na = if a <= bs {
+                    os
+                } else if a >= be {
+                    os + (be - bs)
+                } else {
+                    a - (bs - os)
+                };
+                return (out, (na, na));
+            }
+        } else {
+            let overlapping: Vec<(usize, usize, usize, usize)> = spans
+                .into_iter()
+                .filter(|&(os, bs, be, ce)| (ce > a && os < b) || (bs == a && be == b))
+                .collect();
+            if overlapping.len() == 1 && a >= overlapping[0].0 && b <= overlapping[0].3 {
+                let (os, bs, be, ce) = overlapping[0];
+                let ua = a.clamp(bs, be);
+                let ub = b.clamp(bs, be);
+                let b_bs = byte_idx(s, bs);
+                let b_be = byte_idx(s, be);
+                let full_inner = &s[b_bs..b_be];
+                let rel_ua = byte_idx(s, ua) - b_bs;
+                let rel_ub = byte_idx(s, ub) - b_bs;
+                let left_trim = full_inner[..rel_ua].trim_end_matches([' ', '\t']);
+                let right_trim = full_inner[rel_ub..].trim_start_matches([' ', '\t']);
+                let mid_start = left_trim.len();
+                let mid_end = full_inner.len() - right_trim.len();
+                let mid = &full_inner[mid_start..mid_end];
+                let mut rep = String::with_capacity(full_inner.len() + 8);
+                let mut sel_offset = os;
+                if !left_trim.is_empty() {
+                    rep.push_str(pre);
+                    rep.push_str(left_trim);
+                    rep.push_str(suf);
+                    sel_offset += pl + char_len(left_trim) + sl;
+                }
+                sel_offset += char_len(&full_inner[mid_start..rel_ua]);
+                rep.push_str(mid);
+                if !right_trim.is_empty() {
+                    rep.push_str(pre);
+                    rep.push_str(right_trim);
+                    rep.push_str(suf);
+                }
+                let out = replace_range(s, (os, ce), &rep);
+                let sel_len = ub - ua;
+                return (out, (sel_offset, sel_offset + sel_len));
+            } else if !overlapping.is_empty() {
+                let union_a = overlapping.first().map_or(a, |sp| a.min(sp.0));
+                let union_b = overlapping.last().map_or(b, |sp| b.max(sp.3));
+                let mut clean = String::new();
+                let mut cur = union_a;
+                for (os, bs, be, ce) in overlapping {
+                    if cur < os {
+                        clean.push_str(&s[byte_idx(s, cur)..byte_idx(s, os)]);
+                    }
+                    clean.push_str(&s[byte_idx(s, bs)..byte_idx(s, be)]);
+                    cur = ce;
+                }
+                if cur < union_b {
+                    clean.push_str(&s[byte_idx(s, cur)..byte_idx(s, union_b)]);
+                }
+                let clean_trim = clean.trim_matches([' ', '\t']);
+                let rep = format!("{pre}{clean_trim}{suf}");
+                let out = replace_range(s, (union_a, union_b), &rep);
+                let start = union_a + pl;
+                let end = start + char_len(clean_trim);
+                return (out, (start, end));
+            }
+        }
+    }
+
     let (ba, bb) = (byte_idx(s, a), byte_idx(s, b));
     let (before, sel, after) = (&s[..ba], &s[ba..bb], &s[bb..]);
-    let (pl, sl) = (char_len(pre), char_len(suf));
     if a != b {
         // 기울임(*)이 굵게(**)의 별표를 벗기지 않게 한다
         let bold_not_italic = pre == "*" && before.ends_with("**") && !before.ends_with("***");
@@ -84,6 +223,97 @@ pub(crate) fn wrap_selection(
         Some(url) if a != b => (out, (end + 2, end + 2 + char_len(url))),
         _ => (out, (start, end)),
     }
+}
+
+fn wrap_multiline_selection(
+    s: &str,
+    (a, b): Sel,
+    pre: &str,
+    suf: &str,
+    placeholder: &str,
+) -> (String, Sel) {
+    let mut segs: Vec<(usize, usize)> = Vec::new();
+    let mut cur_c = line_start(s, a);
+    let end_le = line_end(s, b);
+    while cur_c <= end_le {
+        let le = line_end(s, cur_c);
+        let line = &s[byte_idx(s, cur_c)..byte_idx(s, le)];
+        let m = if is_collapsed_line(line) {
+            0
+        } else {
+            hidden_prefix(line).min(line.len())
+        };
+        let content_c = cur_c + char_len(&line[..m]);
+        let mut sa = a.max(cur_c);
+        let mut sb = b.min(le);
+        if sa < content_c && sb > content_c {
+            sa = content_c;
+        }
+        if sa < sb {
+            let slice = &s[byte_idx(s, sa)..byte_idx(s, sb)];
+            let trimmed = slice.trim_matches([' ', '\t']);
+            if !trimmed.is_empty() {
+                let lead = slice.len() - slice.trim_start_matches([' ', '\t']).len();
+                let trail = slice.len() - slice.trim_end_matches([' ', '\t']).len();
+                sa += char_len(&slice[..lead]);
+                sb -= char_len(&slice[slice.len() - trail..]);
+                segs.push((sa, sb));
+            }
+        }
+        if le >= char_len(s) {
+            break;
+        }
+        cur_c = le + 1;
+    }
+    if segs.is_empty() {
+        return (s.to_string(), (a, b));
+    }
+    let all_wrapped = segs.iter().all(|&(sa, sb)| {
+        let (_, new_sel) = wrap_selection(s, (sa, sb), pre, suf, placeholder);
+        (new_sel.1 - new_sel.0) <= (sb - sa) && {
+            let (out, _) = wrap_selection(s, (sa, sb), pre, suf, placeholder);
+            char_len(&out) < char_len(s)
+        }
+    });
+    let mut cur_s = s.to_string();
+    let mut delta: isize = 0;
+    let mut first_a = a;
+    let mut last_b = b;
+    for (idx, (sa, sb)) in segs.into_iter().enumerate() {
+        let adj_a = (sa as isize + delta) as usize;
+        let adj_b = (sb as isize + delta) as usize;
+        let old_len = char_len(&cur_s);
+        let (next_s, (na, nb)) = wrap_selection(&cur_s, (adj_a, adj_b), pre, suf, placeholder);
+        let new_len = char_len(&next_s);
+        let step_diff = new_len as isize - old_len as isize;
+        // 일부 줄만 이미 감싸져 있을 때 전체를 감싸는 동작이면 벗겨진 줄을 다시 감싼다
+        if !all_wrapped && step_diff < 0 {
+            let (rewrapped, (ra, rb)) = wrap_selection(&next_s, (na, nb), pre, suf, placeholder);
+            let rw_diff = char_len(&rewrapped) as isize - old_len as isize;
+            cur_s = rewrapped;
+            delta += rw_diff;
+            if idx == 0 {
+                first_a = ra.saturating_sub(char_len(pre));
+            }
+            last_b = rb + char_len(suf);
+        } else {
+            cur_s = next_s;
+            delta += step_diff;
+            if idx == 0 {
+                first_a = if step_diff > 0 {
+                    na.saturating_sub(char_len(pre))
+                } else {
+                    na
+                };
+            }
+            last_b = if step_diff > 0 {
+                nb + char_len(suf)
+            } else {
+                nb
+            };
+        }
+    }
+    (cur_s, (first_a, last_b.max(first_a)))
 }
 
 // 선택 영역에서 인라인 마크다운 서식(**굵게**, __굵게__, *기울임*, ~~취소선~~, ==강조==, `코드`, [[키]], [글자](주소))만 벗기고
@@ -156,6 +386,151 @@ pub(crate) fn clear_inline_formatting(s: &str) -> String {
     lines_out.join("\n")
 }
 
+// ---------- 서식 복사 (Format Painter) ----------
+
+// 복사해 둔 서식: 글자 서식(굵게·기울임·취소선·강조·코드)과 줄 유형(제목·목록·인용 등)
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct FormatSample {
+    pub(crate) inline: Vec<Inline>,
+    pub(crate) block: BlockKind,
+}
+
+const FORMAT_MARKS: [(Inline, &str, &str); 5] = [
+    (Inline::Bold, "**", "굵게"),
+    (Inline::Italic, "*", "기울임"),
+    (Inline::Strike, "~~", "취소선"),
+    (Inline::Mark, "==", "강조"),
+    (Inline::Code, "`", "코드"),
+];
+
+fn format_mark_pair(kind: Inline) -> Option<(&'static str, &'static str)> {
+    FORMAT_MARKS
+        .iter()
+        .find(|(k, _, _)| *k == kind)
+        .map(|(_, pre, _)| (*pre, *pre))
+}
+
+// 선택(또는 커서) 위치의 글자 서식 종류. 선택 양끝 공백은 무시하고, 선택 전체를 감싸는 서식만 센다.
+fn selection_inline_kinds(s: &str, (mut a, mut b): Sel) -> Vec<Inline> {
+    if a < b {
+        let st = &s[byte_idx(s, a)..byte_idx(s, b)];
+        let lead = char_len(&st[..st.len() - st.trim_start_matches([' ', '\t']).len()]);
+        let trail = char_len(&st[st.trim_end_matches([' ', '\t']).len()..]);
+        if lead + trail < b - a {
+            a += lead;
+            b -= trail;
+        }
+    }
+    let ls = line_start(s, a);
+    let le = line_end(s, a);
+    let line = &s[byte_idx(s, ls)..byte_idx(s, le)];
+    let m = if is_collapsed_line(line) {
+        0
+    } else {
+        hidden_prefix(line).min(line.len())
+    };
+    let rest = &line[m..];
+    let base = ls + char_len(&line[..m]);
+    let mut out = Vec::new();
+    for (os, _, _, ce, kind) in inline_spans(rest) {
+        if format_mark_pair(kind).is_none() {
+            continue;
+        }
+        let (os, ce) = (base + char_len(&rest[..os]), base + char_len(&rest[..ce]));
+        if os <= a && b <= ce && !out.contains(&kind) {
+            out.push(kind);
+        }
+    }
+    out
+}
+
+fn line_block_kind(s: &str, ci: usize) -> BlockKind {
+    let ls = line_start(s, ci);
+    let le = line_end(s, ci);
+    detect_line_kind(&s[byte_idx(s, ls)..byte_idx(s, le)])
+        .1
+        .unwrap_or(BlockKind::Paragraph)
+}
+
+// 선택(또는 커서) 위치의 서식을 견본으로 만든다.
+pub(crate) fn sample_format(s: &str, sel: Sel) -> FormatSample {
+    FormatSample {
+        inline: selection_inline_kinds(s, sel),
+        block: line_block_kind(s, sel.0),
+    }
+}
+
+// 견본 서식을 선택 영역에 입힌다. 줄 유형은 선택한 줄에, 글자 서식은 선택한 글자에 적용한다
+// (글자를 고르지 않고 커서만 있으면 줄 유형만 바꾼다). 바뀐 게 없으면 None.
+pub(crate) fn apply_format(s: &str, sel: Sel, sample: &FormatSample) -> Option<(String, Sel)> {
+    let mut text = s.to_string();
+    let mut sel = sel;
+    if line_block_kind(&text, sel.0) != sample.block {
+        let (out, ns) = convert_lines_kind(&text, sel, sample.block);
+        text = out;
+        sel = ns;
+        if sample.block == BlockKind::Numbered && sel.0 == sel.1 {
+            let (renum, c) = renumber_block_at(&text, sel.0);
+            text = renum;
+            sel = (c, c);
+        }
+    }
+    if sel.0 < sel.1 {
+        let picked = &text[byte_idx(&text, sel.0)..byte_idx(&text, sel.1)];
+        if picked.contains('\n') {
+            // 여러 줄: 기존 글자 서식을 모두 벗기고 견본 서식을 줄마다 입힌다
+            let clean = clear_inline_formatting(picked);
+            let new_len = char_len(&clean);
+            text = replace_range(&text, sel, &clean);
+            sel = (sel.0, sel.0 + new_len);
+            for kind in &sample.inline {
+                if let Some((pre, suf)) = format_mark_pair(*kind) {
+                    let ph = FORMAT_MARKS
+                        .iter()
+                        .find(|m| m.0 == *kind)
+                        .map_or("", |m| m.2);
+                    let (t, ns) = wrap_selection(&text, sel, pre, suf, ph);
+                    text = t;
+                    sel = ns;
+                }
+            }
+        } else {
+            // 한 줄: 지금 서식과 견본이 다른 종류만 토글(켜기/끄기)한다
+            let cur = selection_inline_kinds(&text, sel);
+            for (kind, pre, ph) in FORMAT_MARKS {
+                if cur.contains(&kind) != sample.inline.contains(&kind) {
+                    let (t, ns) = wrap_selection(&text, sel, pre, pre, ph);
+                    text = t;
+                    sel = ns;
+                }
+            }
+        }
+    }
+    (text != s).then_some((text, sel))
+}
+
+// 상태 표시용 설명 (예: "굵게 · 기울임 · 제목 2")
+pub(crate) fn describe_format(f: &FormatSample) -> String {
+    let mut parts: Vec<String> = FORMAT_MARKS
+        .iter()
+        .filter(|(k, _, _)| f.inline.contains(k))
+        .map(|(_, _, name)| (*name).to_string())
+        .collect();
+    match f.block {
+        BlockKind::Heading(n) => parts.push(format!("제목 {n}")),
+        BlockKind::Todo => parts.push("할 일".into()),
+        BlockKind::Bullet => parts.push("글머리 목록".into()),
+        BlockKind::Numbered => parts.push("번호 목록".into()),
+        BlockKind::Quote => parts.push("인용구".into()),
+        _ => {}
+    }
+    if parts.is_empty() {
+        "서식 없음".into()
+    } else {
+        parts.join(" · ")
+    }
+}
+
 // Tab / Shift+Tab: 선택된 줄 전체를 2칸 들여쓰기·내어쓰기 (탭 문자 '\t' 내어쓰기 및 다중 블록 빈 줄 보존 지원)
 pub(crate) fn indent_lines(s: &str, (a, b): Sel, outdent: bool) -> (String, Sel) {
     let (ls, le) = (line_start(s, a), line_end(s, b));
@@ -222,12 +597,17 @@ pub(crate) fn list_item_step(
     while stack.last().is_some_and(|t| ind < t.0) {
         sib = stack.pop();
     }
+    let mut base_col = stack.last().map_or(0, |t| t.0);
+    while base_col + 2 <= ind {
+        base_col += 2;
+        stack.push((base_col, None));
+    }
     let num = (!digits.is_empty()).then(|| match sib {
         Some((_, Some(n))) => n + 1,
         _ => digits.parse().unwrap_or(1),
     });
     let depth = stack.len();
-    stack.push((col, num));
+    stack.push((ind + 2, num));
     Some((depth, num))
 }
 
@@ -429,13 +809,20 @@ pub(crate) fn inline_spans(line: &str) -> Vec<(usize, usize, usize, usize, Inlin
                     .next_back()
                     .is_some_and(char::is_alphanumeric);
             let inner = &line[i + 2..];
-            if !prev_alnum && !inner.starts_with(char::is_whitespace) {
-                if let Some(off) = inner.find(mark) {
+            if !prev_alnum {
+                if let Some(mut off) = inner.find(mark) {
+                    if mark == "**" && inner[off..].starts_with("***") && !inner.starts_with('*') {
+                        off += 1;
+                    }
                     let body = &inner[..off];
-                    if !body.is_empty()
-                        && !body.contains('\n')
-                        && !body.ends_with(char::is_whitespace)
-                    {
+                    let ws_ok = if mark == "__" {
+                        !body.starts_with(char::is_whitespace)
+                            && !body.ends_with(char::is_whitespace)
+                    } else {
+                        !body.starts_with(char::is_whitespace)
+                            || !body.ends_with(char::is_whitespace)
+                    };
+                    if !body.trim().is_empty() && !body.contains('\n') && ws_ok {
                         let kind = match mark {
                             "**" | "__" => Inline::Bold,
                             "==" => Inline::Mark,
@@ -487,13 +874,10 @@ pub(crate) fn inline_spans(line: &str) -> Vec<(usize, usize, usize, usize, Inlin
 }
 
 // 줄에서 인라인 서식을 읽기 시작하는 바이트 위치 (md_job과 같은 규칙).
-// 제목·구분선·접기 제목/닫는 줄·알림 상자 제목 줄은 인라인 서식 없음(None).
+// 구분선·접기 제목/닫는 줄·알림 상자 제목 줄은 인라인 서식 없음(None).
 pub(crate) fn inline_start(line: &str) -> Option<usize> {
     let t = line.trim_start();
-    if heading_level(t).is_some()
-        || is_hr_line(line)
-        || t.starts_with(":::")
-        || (t.starts_with('>') && callout_kind(t).is_some())
+    if is_hr_line(line) || t.starts_with(":::") || (t.starts_with('>') && callout_kind(t).is_some())
     {
         return None;
     }
@@ -862,6 +1246,244 @@ pub(crate) fn delete_empty_list_line(s: &str, c: usize) -> Option<(String, usize
     None
 }
 
+// 줄 맨 앞(숨긴 불릿 "- " 뒤나 굵게 "**" 안쪽 등)에서 새 목록 기호("1. ", "- " 등)를 쳤을 때
+// 기존 목록 기호를 새 기호로 교체하거나 인라인 서식 바깥(줄 맨 앞)으로 꺼내 즉시 목록 서식화가 되게 한다.
+pub(crate) fn normalize_typed_line_marker(s: &str, caret: usize) -> Option<(String, usize)> {
+    let ls = line_start(s, caret);
+    let le = line_end(s, caret);
+    let lb = byte_idx(s, ls);
+    let leb = byte_idx(s, le);
+    let line = &s[lb..leb];
+    let ind = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[ind..];
+
+    // 1) 이미 목록 기호가 있는 줄에서 바로 앞뒤에 새 목록 기호나 제목·펜스·표가 들어온 경우
+    //    (예: "- 1. 텍스트", "1. - 텍스트", "4. - 텍스트", "- ### 제목")
+    if let Some(m1) = list_marker_bytes(rest) {
+        let after_m1 = &rest[m1..];
+        let m1_chars = char_len(&rest[..m1]);
+        let c_after_m1 = ls + ind + m1_chars;
+        if let Some(m2) = list_marker_bytes(after_m1) {
+            let m2_chars = char_len(&after_m1[..m2]);
+            let c_after_m2 = c_after_m1 + m2_chars;
+            if caret == c_after_m2 {
+                let out = replace_range(s, (ls + ind, c_after_m1), "");
+                return Some((out, caret - m1_chars));
+            } else if caret == c_after_m1 {
+                let out = replace_range(s, (c_after_m1, c_after_m2), "");
+                return Some((out, caret));
+            } else {
+                // 붙여넣기 등으로 커서가 줄 끝에 있는 경우: 번호+불릿("4. - ")이면 번호 유지, 불릿+번호("- 1. ")나 불릿+불릿("- - ")이면 뒤 기호 유지
+                let m1_is_num = rest.as_bytes().first().is_some_and(u8::is_ascii_digit);
+                let m2_is_num = after_m1.as_bytes().first().is_some_and(u8::is_ascii_digit);
+                if m1_is_num && !m2_is_num {
+                    let out = replace_range(s, (c_after_m1, c_after_m2), "");
+                    return Some((out, caret.saturating_sub(m2_chars)));
+                } else {
+                    let out = replace_range(s, (ls + ind, c_after_m1), "");
+                    return Some((out, caret.saturating_sub(m1_chars)));
+                }
+            }
+        } else if heading_level(after_m1).is_some()
+            || after_m1.starts_with("```")
+            || after_m1.starts_with("~~~")
+            || (ind == 0 && after_m1.starts_with('|') && after_m1.contains('|'))
+        {
+            let out = replace_range(s, (ls + ind, c_after_m1), "");
+            return Some((out, caret.saturating_sub(m1_chars)));
+        }
+    }
+
+    // 2) 줄이 인라인 서식 여는 기호("**", "__", "==", "~~", "*")로 시작할 때 그 바로 안쪽에서 목록/제목 기호를 친 경우
+    //    (예: "**1. 텍스트**" → "1. **텍스트**")
+    for open in ["**", "__", "==", "~~", "*"] {
+        if let Some(after_open) = rest.strip_prefix(open) {
+            if open == "*" && after_open.starts_with('*') {
+                continue;
+            }
+            let marker_len = list_marker_bytes(after_open).or_else(|| {
+                let lv = heading_level(after_open)?;
+                after_open
+                    .get(lv..lv + 1)
+                    .is_some_and(|c| c == " ")
+                    .then_some(lv + 1)
+            });
+            if let Some(m) = marker_len {
+                let body = &after_open[m..];
+                if body.contains(open) {
+                    let open_chars = char_len(open);
+                    let m_chars = char_len(&after_open[..m]);
+                    let expected_caret = ls + ind + open_chars + m_chars;
+                    if caret == expected_caret || caret == le {
+                        let marker_str = &after_open[..m];
+                        let swapped = format!("{marker_str}{open}");
+                        let out = replace_range(s, (ls + ind, expected_caret), &swapped);
+                        return Some((out, caret));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// 외부 챗봇(ChatGPT·Claude·Gemini 등)이나 웹/문서에서 복사한 텍스트를 붙여넣을 때
+// 유니코드 불릿(•, ◦, ▪)·탭 구분 기호·굵게 감싸진 연번(**1. 제목**)·블록 경계(제목/표/구분선/코드)를 정규화한다.
+pub(crate) fn normalize_pasted_markdown(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    let cleaned = raw
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\u{00a0}', " ")
+        .replace(['\u{200b}', '\u{feff}'], "");
+    let mut norm_lines: Vec<String> = Vec::new();
+    let mut in_fence = false;
+    for line in cleaned.split('\n') {
+        let t_check = line.trim_start();
+        if t_check.starts_with("```") || t_check.starts_with("~~~") {
+            in_fence = !in_fence;
+            norm_lines.push(t_check.to_string());
+            continue;
+        }
+        if in_fence {
+            norm_lines.push(line.to_string());
+            continue;
+        }
+        // 선행 탭(\t)을 2칸 공백으로 변환
+        let mut ind_spaces = 0usize;
+        let mut byte_consumed = 0usize;
+        for ch in line.chars() {
+            if ch == ' ' {
+                ind_spaces += 1;
+                byte_consumed += 1;
+            } else if ch == '\t' {
+                ind_spaces += 2;
+                byte_consumed += 1;
+            } else {
+                break;
+            }
+        }
+        let indent = " ".repeat(ind_spaces);
+        let mut rest = line[byte_consumed..].to_string();
+
+        // 유니코드 글머리 기호(•, ◦, ▪, ‣, ⁃, ·)나 탭이 붙은 불릿(-\t, *\t)을 표준 "- "로 변환
+        for u_bullet in [
+            "• ", "◦ ", "▪ ", "‣ ", "⁃ ", "· ", "•\t", "◦\t", "▪\t", "‣\t", "-\t", "*\t", "+\t",
+        ] {
+            if let Some(after) = rest.strip_prefix(u_bullet) {
+                rest = format!("- {}", after.trim_start_matches([' ', '\t']));
+                break;
+            }
+        }
+        // 번호 뒤 탭("1.\t", "1)\t")을 공백으로 변환
+        let d = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if (1..10).contains(&d) && (rest[d..].starts_with(".\t") || rest[d..].starts_with(")\t")) {
+            let sep = &rest[d..d + 1];
+            let after = rest[d + 2..].trim_start_matches([' ', '\t']);
+            rest = format!("{}{sep} {after}", &rest[..d]);
+        }
+        // 챗봇 특유의 굵게 감싼 번호 항목("**1. 제목**" 또는 "**1. 제목:** 설명")을 "1. **제목**"으로 변환
+        if let Some(after_bold) = rest.strip_prefix("**").filter(|s| !s.starts_with('*')) {
+            if let Some((0, col)) = list_cols(after_bold) {
+                if col > 2 && after_bold[col..].contains("**") {
+                    rest = format!("{}**{}", &after_bold[..col], &after_bold[col..]);
+                }
+            }
+        }
+        // 중복 목록 기호("4. - 항목", "- - 항목") 정리
+        if let Some(m1) = list_marker_bytes(&rest) {
+            let after_m1 = &rest[m1..];
+            if let Some(m2) = list_marker_bytes(after_m1) {
+                let m1_is_num = rest.as_bytes().first().is_some_and(u8::is_ascii_digit);
+                let m2_is_num = after_m1.as_bytes().first().is_some_and(u8::is_ascii_digit);
+                if m1_is_num && !m2_is_num {
+                    rest = format!("{}{}", &rest[..m1], &after_m1[m2..]);
+                } else {
+                    rest = after_m1.to_string();
+                }
+            }
+        }
+        if rest.trim().is_empty() {
+            norm_lines.push(String::new());
+        } else {
+            norm_lines.push(format!("{indent}{rest}"));
+        }
+    }
+
+    if norm_lines.len() <= 1 {
+        return norm_lines.into_iter().next().unwrap_or_default();
+    }
+
+    // 다중 줄 붙여넣기 시 제목(#)·구분선(---)·표(| ... |) 앞뒤에 빈 줄이 없으면 블록이 섞이지 않게 빈 줄을 보강한다
+    let n = norm_lines.len();
+    let mut is_tbl = vec![false; n];
+    for i in 0..n {
+        if i + 1 < n
+            && split_table_row(&norm_lines[i]).is_some()
+            && split_table_row(&norm_lines[i + 1]).is_some_and(|cells| {
+                !cells.is_empty() && cells.iter().all(|c| parse_table_sep(c).is_some())
+            })
+        {
+            is_tbl[i] = true;
+            is_tbl[i + 1] = true;
+            let mut j = i + 2;
+            while j < n
+                && !norm_lines[j].trim().is_empty()
+                && split_table_row(&norm_lines[j]).is_some()
+            {
+                is_tbl[j] = true;
+                j += 1;
+            }
+        }
+    }
+
+    let mut out_lines: Vec<String> = Vec::with_capacity(n + 8);
+    let mut in_fence = false;
+    for (i, line) in norm_lines.into_iter().enumerate() {
+        let t = line.trim_start();
+        let is_fence_line = t.starts_with("```") || t.starts_with("~~~");
+        let prev_non_empty = out_lines.last().is_some_and(|l| !l.trim().is_empty());
+        if !in_fence && prev_non_empty && !t.is_empty() {
+            let prev = out_lines.last().unwrap();
+            let prev_t = prev.trim_start();
+            let prev_is_heading = heading_level(prev_t).is_some();
+            let cur_is_heading = heading_level(t).is_some();
+            let prev_is_hr = is_hr_line(prev);
+            let cur_is_hr = is_hr_line(&line);
+            let prev_tbl = i > 0 && is_tbl[i - 1];
+            let cur_tbl = is_tbl[i];
+            if prev_is_heading
+                || cur_is_heading
+                || prev_is_hr
+                || cur_is_hr
+                || is_fence_line
+                || (prev_tbl != cur_tbl)
+            {
+                out_lines.push(String::new());
+            }
+        }
+        let closing_fence = in_fence && is_fence_line;
+        if is_fence_line {
+            in_fence = !in_fence;
+        }
+        out_lines.push(line);
+        if closing_fence {
+            out_lines.push(String::new());
+        }
+    }
+    // 연속된 3개 이상 빈 줄은 단일 빈 줄(\n\n)로 압축
+    let mut final_lines: Vec<String> = Vec::with_capacity(out_lines.len());
+    for l in out_lines {
+        if l.is_empty() && final_lines.last().is_some_and(String::is_empty) {
+            continue;
+        }
+        final_lines.push(l);
+    }
+    final_lines.join("\n")
+}
+
 // 코드 블록 편집이 숨긴 ``` 줄을 건드렸으면 그 부분만 되돌린다 (코드 부분의 변경은 유지).
 // 반환: (고친 블록, 커서 문자 위치). 펜스가 멀쩡하면 None.
 pub(crate) fn keep_code_fences(old: &str, new: &str) -> Option<(String, usize)> {
@@ -943,8 +1565,8 @@ pub(crate) fn renumber_lists(lines: &mut [String]) {
 }
 
 // Tab / Shift+Tab (목록 줄): 계층 구조대로 들여쓰기·내어쓰기.
-// Tab → 바로 위 형제 항목의 내용 열로 (형제가 없으면 첫 항목이라 들여쓸 수 없음),
-// Shift+Tab → 부모 항목의 들여쓰기로. 하위 항목도 함께 움직이고 번호는 다시 매긴다.
+// Tab → 바로 위 형제 항목의 내용 열(또는 +2칸 하위 단계)로,
+// Shift+Tab → 부모 항목의 들여쓰기(또는 -2칸 상위 단계)로. 하위 항목도 함께 움직이고 번호는 다시 매긴다.
 // 첫 줄이 목록이 아니면 None.
 // ponytail: 문서 전체를 줄로 나눈다(O(n)). Tab은 드물어서 충분하다.
 pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String, Sel)> {
@@ -969,30 +1591,39 @@ pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String
             .take_while(|l| !l.trim().is_empty())
             .filter_map(|l| list_cols(l))
     };
-    let mut merge_blank_at: Option<usize> = None;
+    let mut merge_blank_range: Option<Range<usize>> = None;
     let target = if outdent {
-        above().find(|&(i, _)| i < ind).map_or(0, |(i, _)| i)
+        match above().find(|&(i, _)| i < ind) {
+            Some((_, col)) if ind > col => (ind - 2).max(col),
+            Some((i, _)) => i,
+            None => ind.saturating_sub(2),
+        }
+    } else if let Some((i, col)) = above().find(|&(i, _)| i <= ind) {
+        if i == ind {
+            col
+        } else {
+            ind + 2
+        }
+    } else if above().next().is_some() {
+        ind + 2
     } else {
-        match above().find(|&(i, _)| i <= ind) {
-            Some((i, col)) if i == ind => col,
-            Some(_) => ind,
-            None if la >= 2 && orig[la - 1].trim().is_empty() => {
-                // 바로 위 블록이 목록(예: "1. 항목\n\n- 하위")이면 빈 줄을 합쳐 하위 계층으로 들여쓴다
-                match orig[..la - 1]
-                    .iter()
-                    .rev()
-                    .take_while(|l| !l.trim().is_empty())
-                    .filter_map(|l| list_cols(l))
-                    .find(|&(i, _)| i <= ind)
-                {
-                    Some((i, col)) if i == ind => {
-                        merge_blank_at = Some(la - 1);
-                        col
-                    }
-                    _ => ind,
-                }
+        // 바로 위 블록이 목록(예: "1. 항목\n\n- 하위")이면 빈 줄을 합쳐 하위 계층으로 들여쓴다
+        let prev_non_empty = (0..la).rev().find(|&i| !orig[i].trim().is_empty());
+        if let Some(p_end) = prev_non_empty.filter(|&p| p + 1 < la && list_cols(orig[p]).is_some())
+        {
+            merge_blank_range = Some((p_end + 1)..la);
+            match orig[..=p_end]
+                .iter()
+                .rev()
+                .take_while(|l| !l.trim().is_empty())
+                .filter_map(|l| list_cols(l))
+                .find(|&(i, _)| i <= ind)
+            {
+                Some((i, col)) if i == ind => col,
+                _ => ind + 2,
             }
-            None => ind, // 형제 없음: 그대로
+        } else {
+            ind + 2
         }
     };
     let delta = target as isize - ind as isize;
@@ -1009,31 +1640,66 @@ pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String
     while end + 1 < orig.len() && !orig[end + 1].trim().is_empty() && lead(orig[end + 1]) > ind {
         end += 1;
     }
-    let mut lines: Vec<String> = orig.iter().map(|l| l.to_string()).collect();
-    for l in &mut lines[la..=end] {
-        if l.is_empty() {
+    let rm_before = merge_blank_range.unwrap_or(la..la);
+    let merge_inner_blanks = !outdent
+        && la < end
+        && orig[la..=end]
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| list_cols(l).is_some());
+    let mut lines: Vec<String> = Vec::with_capacity(orig.len());
+    let (mut new_la, mut new_lb, mut new_end) = (0, 0, 0);
+    for (i, &raw_l) in orig.iter().enumerate() {
+        if rm_before.contains(&i) {
             continue;
         }
-        if delta > 0 {
-            l.insert_str(0, &" ".repeat(delta as usize));
+        if i > la && i < end && i != lb && merge_inner_blanks && raw_l.trim().is_empty() {
+            continue;
+        }
+        let idx = lines.len();
+        if i == la {
+            new_la = idx;
+        }
+        if i == lb {
+            new_lb = idx;
+        }
+        if i == end {
+            new_end = idx;
+        }
+        let mut l = raw_l.to_string();
+        if i >= la && i <= end && !l.is_empty() {
+            if delta > 0 {
+                l.insert_str(0, &" ".repeat(delta as usize));
+            } else {
+                let n = lead(&l).min((-delta) as usize);
+                l.drain(..n);
+            }
+        }
+        lines.push(l);
+    }
+    let mut run_start = new_la;
+    while run_start > 0 {
+        if !lines[run_start - 1].trim().is_empty() {
+            run_start -= 1;
+        } else if run_start >= 2
+            && list_cols(&lines[run_start - 2]).is_some()
+            && list_cols(&lines[run_start]).is_some()
+        {
+            run_start -= 2;
         } else {
-            let n = lead(l).min((-delta) as usize);
-            l.drain(..n);
+            break;
         }
     }
-    let (new_la, new_lb, new_end) = if let Some(blank_idx) = merge_blank_at {
-        lines.remove(blank_idx);
-        (la - 1, lb - 1, end - 1)
-    } else {
-        (la, lb, end)
-    };
-    let run_start = (0..=new_la)
-        .rev()
-        .find(|&i| i == 0 || lines[i - 1].trim().is_empty())
-        .unwrap_or(0);
-    let run_end = (new_end..lines.len())
-        .find(|&i| i + 1 == lines.len() || lines[i + 1].trim().is_empty())
-        .unwrap_or(new_end);
+    let mut run_end = new_end;
+    while run_end + 1 < lines.len() {
+        if !lines[run_end + 1].trim().is_empty() {
+            run_end += 1;
+        } else if run_end + 2 < lines.len() && list_cols(&lines[run_end + 2]).is_some() {
+            run_end += 2;
+        } else {
+            break;
+        }
+    }
     renumber_lists(&mut lines[run_start..=run_end]);
     // 커서: 같은 줄에서 줄 길이 변화만큼 이동 (변화는 모두 내용 앞에서 일어난다)
     let at = |orig_line: usize, new_line: usize, col: usize| {
