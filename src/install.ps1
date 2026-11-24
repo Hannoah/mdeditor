@@ -26,7 +26,8 @@ $exts = @(".md", ".markdown")
 #    "저장되지 않은 변경사항" 창이 떠서 안 닫히면 강제 종료하지 않고 멈춘다 (편집 내용 보호).
 Step 1
 $procs = @(Get-Process -Name mdeditor -ErrorAction SilentlyContinue |
-    Where-Object { $_.Id -ne $KeepPid -and $_.Path -eq $targetExe })
+    Where-Object { $_.Id -ne $KeepPid -and $_.Path -eq $targetExe -and -not $_.HasExited })
+# 이미 끝났지만 커널에 스레드가 걸려 목록에 남은 프로세스(HasExited)는 WaitForExit가 영영 false라 제외한다
 foreach ($p in $procs) { [void]$p.CloseMainWindow() }
 foreach ($p in $procs) {
     if (-not $p.WaitForExit(8000)) {

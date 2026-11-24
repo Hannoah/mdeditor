@@ -13,7 +13,7 @@ $classes = "HKCU:\Software\Classes"
 
 # 1. 실행 중인 MDEditor 닫기 (정상 종료 요청 → 안 닫히면 강제 종료)
 Step 1
-$procs = @(Get-Process -Name mdeditor -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $targetExe })
+$procs = @(Get-Process -Name mdeditor -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $targetExe -and -not $_.HasExited })
 foreach ($p in $procs) { [void]$p.CloseMainWindow() }
 foreach ($p in $procs) {
     # 저장 확인 창이 떠서 안 닫히면 강제 종료하지 않는다 (편집 내용 보호)
