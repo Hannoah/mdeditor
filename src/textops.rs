@@ -1257,7 +1257,29 @@ pub(crate) fn normalize_typed_line_marker(s: &str, caret: usize) -> Option<(Stri
     let ind = line.len() - line.trim_start_matches(' ').len();
     let rest = &line[ind..];
 
-    // 1) 이미 목록 기호가 있는 줄에서 바로 앞뒤에 새 목록 기호나 제목·펜스·표가 들어온 경우
+    // 1) 할 일 체크리스트 입력 단축키: "[] ", "[ ] ", "[x] ", "- [] " 등 입력 시 즉시 체크리스트로 변환
+    for bullet in ["-", "*", "+"] {
+        let short_task = format!("{bullet} [] ");
+        if rest.starts_with(&short_task) && caret == ls + ind + 5 {
+            let rep = format!("{bullet} [ ] ");
+            let out = replace_range(s, (ls + ind, ls + ind + 5), &rep);
+            return Some((out, caret + 1));
+        }
+    }
+    if rest.starts_with("[] ") && caret == ls + ind + 3 {
+        let out = replace_range(s, (ls + ind, ls + ind + 3), "- [ ] ");
+        return Some((out, caret + 3));
+    }
+    if rest.starts_with("[ ] ") && caret == ls + ind + 4 {
+        let out = replace_range(s, (ls + ind, ls + ind + 4), "- [ ] ");
+        return Some((out, caret + 2));
+    }
+    if (rest.starts_with("[x] ") || rest.starts_with("[X] ")) && caret == ls + ind + 4 {
+        let out = replace_range(s, (ls + ind, ls + ind + 4), "- [x] ");
+        return Some((out, caret + 2));
+    }
+
+    // 2) 이미 목록 기호가 있는 줄에서 바로 앞뒤에 새 목록 기호나 제목·펜스·표가 들어온 경우
     //    (예: "- 1. 텍스트", "1. - 텍스트", "4. - 텍스트", "- ### 제목")
     if let Some(m1) = list_marker_bytes(rest) {
         let after_m1 = &rest[m1..];
@@ -1715,11 +1737,15 @@ pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String
     Some((lines.join("\n"), sel))
 }
 
+const TASK_MARKERS: [&str; 9] = [
+    "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
+];
+
 // 목록 줄 분석: (들여쓰기, 다음 줄에 쓸 기호, 현재 기호 길이(문자), 내용이 비었는지)
 pub(crate) fn list_marker(line: &str) -> Option<(String, String, usize, bool)> {
     let indent_len = line.len() - line.trim_start_matches(' ').len();
     let (indent, rest) = line.split_at(indent_len);
-    for task in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] "] {
+    for task in TASK_MARKERS {
         if let Some(body) = rest.strip_prefix(task) {
             let next = format!("{} [ ] ", &task[..1]);
             return Some((indent.into(), next, char_len(task), body.trim().is_empty()));
@@ -1748,7 +1774,7 @@ pub(crate) fn list_marker(line: &str) -> Option<(String, String, usize, bool)> {
 pub(crate) fn list_marker_bytes(line: &str) -> Option<usize> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     let rest = &line[indent..];
-    for task in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] "] {
+    for task in TASK_MARKERS {
         if rest.starts_with(task) {
             return Some(indent + task.len());
         }
@@ -1841,7 +1867,7 @@ pub(crate) fn detect_line_kind(line: &str) -> (usize, Option<BlockKind>, usize) 
         let m = (lv + 1).min(rest.len());
         return (indent, Some(BlockKind::Heading(lv)), m);
     }
-    for task in ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] "] {
+    for task in TASK_MARKERS {
         if rest.starts_with(task) {
             return (indent, Some(BlockKind::Todo), task.len());
         }
@@ -1947,6 +1973,7 @@ pub(crate) fn toggle_todo_lines(s: &str, (a, b): Sel) -> (String, Sel) {
             let new_line = if let Some(body) = rest
                 .strip_prefix("- [ ] ")
                 .or_else(|| rest.strip_prefix("* [ ] "))
+                .or_else(|| rest.strip_prefix("+ [ ] "))
             {
                 format!("{ind}- [x] {body}")
             } else if let Some(body) = rest
@@ -1954,6 +1981,8 @@ pub(crate) fn toggle_todo_lines(s: &str, (a, b): Sel) -> (String, Sel) {
                 .or_else(|| rest.strip_prefix("- [X] "))
                 .or_else(|| rest.strip_prefix("* [x] "))
                 .or_else(|| rest.strip_prefix("* [X] "))
+                .or_else(|| rest.strip_prefix("+ [x] "))
+                .or_else(|| rest.strip_prefix("+ [X] "))
             {
                 format!("{ind}- [ ] {body}")
             } else {
@@ -2709,5 +2738,110 @@ mod fold_tests {
         hide_folded(t, &mut s3, &folds, |_| false);
         let texts: Vec<&str> = s3.iter().map(|r| &t[r.clone()]).collect();
         assert_eq!(texts, ["# A", "one", "## B", "# C", "three"]);
+    }
+}
+
+// ---------- 다중 커서 (Ctrl+클릭 / Alt+드래그 열 편집) ----------
+
+/// 주 커서에서 일어난 편집(old → new, 주 커서 o → n)을 찾아, 주 커서와 추가 커서 모두에 똑같이 적용한다.
+/// 모든 위치는 문자 인덱스. 결과: (새 텍스트, 새 추가 커서들, 주 커서 이동량 = 앞쪽 커서에서 늘어난 글자 수)
+/// 타이핑·한글 조합(Preedit은 주 커서 앞 조합 글자를 바꿈)·Backspace·Delete·붙여넣기를 같은 식으로 처리한다.
+/// 지울 구간이 숨긴 마크다운 기호(hidden_runs)나 줄바꿈에 걸리는 커서는 그 커서만 건너뛴다 (주 커서 포함).
+/// ponytail: Vec<char> 복사 — 블록 하나 크기라 충분, 수십만 자 블록이면 바이트 인덱스로 바꿀 것
+pub(crate) fn replicate_edit(
+    old: &str,
+    new: &str,
+    o: usize,
+    n: usize,
+    extras: &[usize],
+) -> (String, Vec<usize>, isize) {
+    let hidden = hidden_runs(old);
+    let oc: Vec<char> = old.chars().collect();
+    let nc: Vec<char> = new.chars().collect();
+    let (lo, ln) = (oc.len(), nc.len());
+    let (o, n) = (o.min(lo), n.min(ln));
+    // 커서 뒤는 그대로, 커서 앞도 최대한 그대로라고 보고 바뀐 구간 하나를 찾는다
+    let mut s = 0;
+    while s < (lo - o).min(ln - n) && oc[lo - 1 - s] == nc[ln - 1 - s] {
+        s += 1;
+    }
+    let mut p = 0;
+    while p < o.min(n).min(lo - s).min(ln - s) && oc[p] == nc[p] {
+        p += 1;
+    }
+    let ins = &nc[p..ln - s];
+    let (rel_a, rel_b) = (p as isize - o as isize, (lo - s) as isize - o as isize);
+
+    let mut carets: Vec<(usize, bool)> = extras.iter().map(|&c| (c.min(lo), false)).collect();
+    carets.push((o, true));
+    carets.sort_unstable();
+    carets.dedup_by_key(|c| c.0);
+    let mut out = String::with_capacity(new.len() + ins.len() * extras.len());
+    let (mut prev, mut out_len) = (0usize, 0usize);
+    let (mut new_extras, mut shift) = (Vec::with_capacity(extras.len()), 0isize);
+    for (c, is_primary) in carets {
+        let a = ((c as isize + rel_a).max(0) as usize).clamp(prev, lo);
+        let b = ((c as isize + rel_b).max(0) as usize).clamp(a, lo);
+        let breaks = a < b
+            && (oc[a..b].contains(&'\n') || hidden.iter().any(|&(ha, he, _)| a < he && ha < b));
+        if breaks || c < prev {
+            let c = c.max(prev);
+            out.extend(&oc[prev..c]);
+            out_len += c - prev;
+            prev = c;
+        } else {
+            out.extend(&oc[prev..a]);
+            out.extend(ins);
+            out_len += a - prev + ins.len();
+            prev = b;
+        }
+        if is_primary {
+            shift = out_len as isize - (p + ins.len()) as isize;
+        } else if new_extras.last() != Some(&out_len) {
+            new_extras.push(out_len);
+        }
+    }
+    out.extend(&oc[prev..]);
+    let primary_at = (p + ins.len()) as isize + shift;
+    new_extras.retain(|&c| c as isize != primary_at);
+    (out, new_extras, shift)
+}
+
+#[cfg(test)]
+mod multi_caret_tests {
+    use super::*;
+
+    #[test]
+    fn replicate_edit_applies_primary_edit_at_every_caret() {
+        // 세 줄 맨 앞에 커서: 주 커서는 3번째 줄 앞(8), 추가 커서 0, 4
+        let old = "abc\ndef\nghi";
+        // 타이핑 "- "
+        let (t, ex, sh) = replicate_edit(old, "abc\ndef\n- ghi", 8, 10, &[0, 4]);
+        assert_eq!(t, "- abc\n- def\n- ghi");
+        assert_eq!((ex, sh), (vec![2, 8], 4));
+        // Backspace (각 줄 끝에서): 주 커서 11 → 10
+        let (t, ex, sh) = replicate_edit(old, "abc\ndef\ngh", 11, 10, &[3, 7]);
+        assert_eq!(t, "ab\nde\ngh");
+        assert_eq!((ex, sh), (vec![2, 5], -2));
+        // Delete (각 줄 맨 앞에서)
+        let (t, ex, _) = replicate_edit(old, "abc\ndef\nhi", 8, 8, &[0, 4]);
+        assert_eq!((t.as_str(), ex), ("bc\nef\nhi", vec![0, 3]));
+        // 같은 글자를 이어 치는 경우도 커서 기준으로 정확히 (aa| + a)
+        let (t, ex, _) = replicate_edit("aa\naa", "aa\naaa", 5, 6, &[2]);
+        assert_eq!((t.as_str(), ex), ("aaa\naaa", vec![3]));
+        // 한글 조합: Preedit "ㅎ" → "하" (주 커서는 조합 글자 뒤)
+        let (t, ex, _) = replicate_edit("xㅎ\nyㅎ", "xㅎ\ny하", 5, 5, &[2]);
+        assert_eq!((t.as_str(), ex), ("x하\ny하", vec![2]));
+        // 주 커서가 앞에 있으면 이동량 0, 뒤 커서만 밀린다
+        let (t, ex, sh) = replicate_edit("ab", "Xab", 0, 1, &[2]);
+        assert_eq!((t.as_str(), ex, sh), ("XabX", vec![4], 0));
+        // 커서끼리 지우다 겹치면 하나로 합친다
+        let (t, ex, _) = replicate_edit("ab", "b", 1, 0, &[2]);
+        assert_eq!((t.as_str(), ex), ("", vec![]));
+        // 숨긴 기호("- ")·줄바꿈을 지우게 되는 커서는 건너뛴다: 목록 내용 앞 Backspace, 줄 끝 Delete
+        let (t, ex, sh) = replicate_edit("- a1\n- b2", "- a1\n- 2", 9, 8, &[2]);
+        assert_eq!((t.as_str(), ex, sh), ("- a1\n- 2", vec![2], 0));
+        let (t, ex, _) = replicate_edit("ab\ncd", "abcd", 2, 2, &[5]);
+        assert_eq!((t.as_str(), ex), ("ab\ncd", vec![5]));
     }
 }

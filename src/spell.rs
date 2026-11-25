@@ -32,17 +32,29 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(wake: impl Fn() + Send + 'static) -> Worker {
+        Self::spawn("spellcheck", true, wake)
+    }
+
+    pub fn new_block(wake: impl Fn() + Send + 'static) -> Worker {
+        Self::spawn("spellcheck-live", false, wake)
+    }
+
+    fn spawn(name: &str, full_doc: bool, wake: impl Fn() + Send + 'static) -> Worker {
         let (tx, jobs) = std::sync::mpsc::channel::<(u64, String, HashSet<String>)>();
         let (done, rx) = std::sync::mpsc::channel();
         let _ = std::thread::Builder::new()
-            .name("spellcheck".into())
+            .name(name.into())
             .spawn(move || {
                 while let Ok(mut job) = jobs.recv() {
                     // 밀린 요청은 마지막 것만 검사한다
                     while let Ok(newer) = jobs.try_recv() {
                         job = newer;
                     }
-                    let issues = check_document(&job.1, &job.2);
+                    let issues = if full_doc {
+                        check_document(&job.1, &job.2)
+                    } else {
+                        check_block(&job.1, &job.2)
+                    };
                     if done.send((job.0, issues)).is_err() {
                         break;
                     }

@@ -72,6 +72,10 @@ impl eframe::App for App {
             self.insert_pasted_image(&ctx, &img);
         }
         self.poll_pasted(&ctx);
+        if std::mem::take(&mut self.clear_galleys_next_frame) {
+            self.clear_all_galley_caches();
+        }
+        self.poll_auto_save();
         self.poll_scan();
         self.handle_shortcuts(&ctx);
         self.auto_save_tick(&ctx, frame.storage_mut());
@@ -1035,13 +1039,21 @@ fn md_job_ex(
             // 노션식: 들여쓰기·기호(- / 1. / - [ ])는 투명하게 두고 렌더링 화면과 같은 자리에서 내용이 시작한다.
             // 기호 자리의 글머리·번호·체크박스는 paint_block_decor가 그린다. 텍스트는 마크다운 그대로.
             let len = len.min(line.len());
+            let todo_checked =
+                bare[..len].trim_start().ends_with("] ") && bare[..len].contains(['x', 'X']);
+            let text_color = if todo_checked { p.muted } else { p.text };
             let lh = body * 1.6 + LIST_ROW_GAP;
             hide_prefix(&mut job, &line[..len], LIST_STEP * (depth + 1) as f32, lh);
             let s1 = job.sections.len();
-            append_inline_md_source(&mut job, &line[len..], body, p, p.text);
+            append_inline_md_source(&mut job, &line[len..], body, p, text_color);
             for sec in &mut job.sections[s1 - 1..] {
                 sec.format.line_height = Some(lh);
                 sec.format.valign = Align::TOP;
+            }
+            if todo_checked {
+                for sec in &mut job.sections[s1..] {
+                    sec.format.strikethrough = Stroke::new(1.0, p.muted);
+                }
             }
         } else if let Some((name, m)) = footnote_def(bare) {
             // 각주 정의: "[^1]: "을 숨기고 paint_block_decor가 "[1]:" 표시를 그린다 (보기 화면과 같은 자리)
@@ -1118,29 +1130,119 @@ const LIST_STEP: f32 = LIST_PAD + LIST_MARKER_W + LIST_GAP;
 const LIST_ROW_GAP: f32 = 6.0; // 렌더링 화면의 항목 사이 간격(item_spacing.y)
 const BULLETS: [&str; 3] = ["•", "◦", "▪"];
 
-// egui 기본 체크박스와 같은 모양 (렌더링·편집 화면 공용)
-fn paint_checkbox(painter: &egui::Painter, c: egui::Pos2, checked: bool) {
-    let style = painter.ctx().global_style();
-    let w = &style.visuals.widgets.inactive;
-    let r = Rect::from_center_size(c, egui::Vec2::splat(style.spacing.icon_width));
-    painter.rect(
-        r,
-        w.corner_radius,
-        w.bg_fill,
-        w.bg_stroke,
-        egui::StrokeKind::Inside,
-    );
+// 할 일 체크박스 그리기 (편집·보기 화면 공용)
+fn paint_checkbox(painter: &egui::Painter, p: &Pal, c: egui::Pos2, checked: bool, hovered: bool) {
+    let r = Rect::from_center_size(c, egui::Vec2::splat(15.0));
+    let (fill, stroke) = if checked {
+        (p.accent, Stroke::new(1.5, p.accent))
+    } else if hovered {
+        (p.accent.gamma_multiply(0.10), Stroke::new(1.5, p.accent))
+    } else {
+        (p.elevated, Stroke::new(1.5, p.muted))
+    };
+    painter.rect(r, 3.5, fill, stroke, egui::StrokeKind::Inside);
     if checked {
-        let r = r.shrink(3.0);
         painter.add(egui::Shape::line(
             vec![
-                pos2(r.left(), r.center().y),
-                pos2(r.center().x, r.bottom()),
-                pos2(r.right(), r.top()),
+                pos2(r.left() + 3.0, r.center().y + 0.3),
+                pos2(r.left() + 6.0, r.bottom() - 3.3),
+                pos2(r.right() - 2.8, r.top() + 3.5),
             ],
-            w.fg_stroke,
+            Stroke::new(1.8, Color32::WHITE),
         ));
     }
+}
+
+fn todo_checkbox_toggle_byte(line: &str) -> Option<(usize, bool)> {
+    let len = list_marker_bytes(line)?;
+    if len < 3 || !line[..len].trim_start().ends_with("] ") {
+        return None;
+    }
+    let idx = len - 3;
+    match line.as_bytes().get(idx).copied() {
+        Some(b' ') => Some((idx, false)),
+        Some(b'x' | b'X') => Some((idx, true)),
+        _ => None,
+    }
+}
+
+// 편집 중인 블록 안에서도 체크박스를 클릭해 완료([x])/미완료([ ]) 전환한다
+fn toggle_edit_checkboxes(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    id: egui::Id,
+    out: &egui::text_edit::TextEditOutput,
+    buf: &mut str,
+    body: f32,
+    folded: bool,
+) -> (bool, Option<usize>) {
+    use egui::text::CCursor;
+    if is_math_block(buf) {
+        return (false, None);
+    }
+    let toggle = is_toggle_block(buf);
+    let mut stack = Vec::new();
+    let (mut ci, mut fence) = (0usize, false);
+    let mut line_byte_start = 0usize;
+    let mut toggle_byte: Option<usize> = None;
+    let mut hovered_line: Option<usize> = None;
+    let click_pos = out
+        .response
+        .clicked()
+        .then(|| ctx.input(|i| i.pointer.interact_pos()))
+        .flatten();
+    let snap = buf.to_owned();
+    for (li, line) in snap.split('\n').enumerate() {
+        let t = line.trim_start();
+        let line_chars = line.chars().count();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fence = !fence;
+        } else if fence || (toggle && li > 0 && folded) {
+        } else if let (Some(len), Some((depth, _))) =
+            (list_marker_bytes(line), list_item_step(&mut stack, line))
+        {
+            if let Some((rel_toggle, checked)) = todo_checkbox_toggle_byte(line) {
+                let x0 = if toggle && li > 0 { TOGGLE_INDENT } else { 0.0 };
+                let row_top = out.galley.pos_from_cursor(CCursor::new(ci + len)).top();
+                let c = out.galley_pos
+                    + vec2(
+                        x0 + LIST_STEP * depth as f32 + LIST_PAD + LIST_MARKER_W * 0.5,
+                        row_top + body * 0.75,
+                    );
+                let hit =
+                    Rect::from_center_size(c, vec2(LIST_MARKER_W + 4.0, (body * 1.5).max(20.0)));
+                let resp = ui
+                    .interact(hit, id.with(("todo-chk", li)), Sense::click())
+                    .on_hover_cursor(CursorIcon::PointingHand);
+                resp.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::accesskit::Role::CheckBox, true, checked, "")
+                });
+                if resp.hovered() {
+                    hovered_line = Some(li);
+                }
+                if toggle_byte.is_none()
+                    && (resp.clicked() || click_pos.is_some_and(|pos| hit.contains(pos)))
+                {
+                    toggle_byte = Some(line_byte_start + rel_toggle);
+                }
+            }
+        }
+        ci += line_chars + 1;
+        line_byte_start += line.len() + 1;
+    }
+    if let Some(pos) = toggle_byte {
+        // ' ' <-> 'x' 1바이트 ASCII 치환이라 UTF-8 경계와 길이가 그대로 유지된다
+        if let Some(b) = unsafe { buf.as_bytes_mut() }.get_mut(pos) {
+            *b = if matches!(*b, b'x' | b'X') {
+                b' '
+            } else {
+                b'x'
+            };
+            ctx.request_repaint();
+            return (true, hovered_line);
+        }
+    }
+    (false, hovered_line)
 }
 
 // 편집 중인 블록의 장식: 숨긴 기호 자리에 보기 화면과 같은 글머리·번호·체크박스, 인용 세로줄,
@@ -1157,6 +1259,7 @@ fn paint_block_decor(
     folded: bool,
     scheme: &str,
     spell_issues: &[crate::spell::SpellIssue],
+    hovered_todo_line: Option<usize>,
 ) {
     use egui::text::CCursor;
     if is_math_block(text) {
@@ -1260,7 +1363,13 @@ fn paint_block_decor(
             if c.y >= vis_y_min && c.y <= vis_y_max {
                 let m = line[..len].trim_start();
                 if m.ends_with("] ") {
-                    paint_checkbox(painter, c, m.contains(['x', 'X']));
+                    paint_checkbox(
+                        painter,
+                        p,
+                        c,
+                        m.contains(['x', 'X']),
+                        hovered_todo_line == Some(li),
+                    );
                 } else {
                     let label =
                         num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
@@ -1365,10 +1474,39 @@ fn paint_spell_wavy(
     }
 }
 
-struct BlockOut {
+pub(super) struct BlockOut {
+    pub(super) rect: Rect,
+    pub(super) changed: Option<String>,
+    pub(super) consumed: bool,
+    pub(super) line_ys: Vec<(usize, f32)>,
+}
+
+fn line_offset_at(src: &str, byte_pos: usize) -> usize {
+    let mut end = byte_pos.min(src.len());
+    while end > 0 && !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    src[..end].bytes().filter(|&b| b == b'\n').count()
+}
+
+fn record_galley_lines(
+    out: &mut Vec<(usize, f32)>,
+    base_line: usize,
     rect: Rect,
-    changed: Option<String>,
-    consumed: bool,
+    galley: &egui::Galley,
+    skip_first: bool,
+) {
+    let mut logical_idx = 0usize;
+    let mut at_line_start = true;
+    for row in &galley.rows {
+        if at_line_start {
+            if !(skip_first && logical_idx == 0) {
+                out.push((base_line + logical_idx, rect.top() + row.rect().center().y));
+            }
+            logical_idx += 1;
+        }
+        at_line_start = row.ends_with_newline;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1404,6 +1542,16 @@ fn needs_hanging_layout(text: &str) -> bool {
     false
 }
 
+fn layout_job_hash(job: &egui::text::LayoutJob) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    job.text.hash(&mut h);
+    job.wrap.max_width.to_bits().hash(&mut h);
+    job.first_row_min_height.to_bits().hash(&mut h);
+    job.sections.hash(&mut h);
+    h.finish()
+}
+
 // 목록·인용·접기·각주 블록의 편집 Galley를 줄 단위로 조합해
 // 자동 줄바꿈된 2번째 줄 이하도 보기 화면(render_md_stream)과 동일한
 // 내어쓰기(hanging indent)·줄바꿈 폭·줄간격(body*1.6)·항목 간격(LIST_ROW_GAP)을 유지한다.
@@ -1416,8 +1564,14 @@ fn layout_hanging_galley(
     wrap: f32,
     folded: bool,
     scheme: &str,
+    ppp_bits: u32,
+    line_cache: &mut HangingLineCache,
 ) -> std::sync::Arc<egui::Galley> {
     use egui::text::{LayoutJob, TextFormat};
+    if line_cache.0 != ppp_bits {
+        line_cache.0 = ppp_bits;
+        line_cache.1.clear();
+    }
     let fmt = |size: f32, family: FontFamily, color: Color32| TextFormat {
         font_id: FontId::new(size, family),
         color,
@@ -1461,6 +1615,7 @@ fn layout_hanging_galley(
         let mut indent_x = base_indent;
         let mut is_collapsed = false;
         let mut is_list_item = false;
+        let mut is_image = false;
 
         let is_fence = t.starts_with("```") || t.starts_with("~~~");
         if toggle && li > 0 && (folded || (li + 1 == n_lines && bare.trim() == ":::")) {
@@ -1494,6 +1649,7 @@ fn layout_hanging_galley(
             hide_prefix(&mut line_job, line, HR_ROW_H);
             last_list_indent = None;
         } else if let Some(url) = image_line(bare) {
+            is_image = true;
             let h = image_fit(ctx, scheme, url, (wrap - base_indent).max(80.0))
                 .0
                 .y;
@@ -1504,9 +1660,18 @@ fn layout_hanging_galley(
             list_item_step(&mut list_stack, bare),
         ) {
             let len = len.min(line.len());
+            let todo_checked =
+                bare[..len].trim_start().ends_with("] ") && bare[..len].contains(['x', 'X']);
+            let text_color = if todo_checked { p.muted } else { p.text };
             let lh = body * 1.6;
             hide_prefix(&mut line_job, &line[..len], lh);
-            append_inline_md_source(&mut line_job, &line[len..], body, p, p.text);
+            let s1 = line_job.sections.len();
+            append_inline_md_source(&mut line_job, &line[len..], body, p, text_color);
+            if todo_checked {
+                for sec in &mut line_job.sections[s1..] {
+                    sec.format.strikethrough = Stroke::new(1.0, p.muted);
+                }
+            }
             indent_x = base_indent + LIST_STEP * (depth + 1) as f32;
             is_list_item = true;
             last_list_indent = Some(indent_x);
@@ -1562,7 +1727,21 @@ fn layout_hanging_galley(
             );
         }
 
-        let line_galley = ctx.fonts_mut(|f| f.layout_job(line_job));
+        let line_galley = if is_image {
+            ctx.fonts_mut(|f| f.layout_job(line_job))
+        } else {
+            let lkey = layout_job_hash(&line_job);
+            if let Some(cached) = line_cache.1.get(&lkey).filter(|g| *g.job == line_job) {
+                std::sync::Arc::clone(cached)
+            } else {
+                let g = ctx.fonts_mut(|f| f.layout_job(line_job));
+                if line_cache.1.len() >= 512 {
+                    line_cache.1.clear();
+                }
+                line_cache.1.insert(lkey, std::sync::Arc::clone(&g));
+                g
+            }
+        };
         let row_count = line_galley.rows.len();
         for (ri, pr) in line_galley.rows.iter().enumerate() {
             let mut pr = pr.clone();
@@ -1627,9 +1806,11 @@ pub(crate) fn edit_galley_for_test(
     p: &Pal,
 ) -> std::sync::Arc<egui::Galley> {
     let mut cache = None;
+    let mut line_cache = (0, HashMap::new());
     editor_galley_cached(
         ctx,
         &mut cache,
+        &mut line_cache,
         text,
         body,
         wrap,
@@ -1645,6 +1826,7 @@ pub(crate) fn edit_galley_for_test(
 fn editor_galley_cached(
     ctx: &egui::Context,
     cache: &mut Option<(u64, u32, u32, bool, std::sync::Arc<egui::Galley>)>,
+    line_cache: &mut HangingLineCache,
     s: &str,
     body: f32,
     wrap: f32,
@@ -1667,7 +1849,9 @@ fn editor_galley_cached(
         }
     }
     let g = if wrap.is_finite() && needs_hanging_layout(s) {
-        layout_hanging_galley(ctx, s, body, pal, wrap, folded, scheme)
+        layout_hanging_galley(
+            ctx, s, body, pal, wrap, folded, scheme, ppp_bits, line_cache,
+        )
     } else {
         let mut job = md_job_ex(ctx, s, body, pal, dark, wrap, folded, scheme);
         job.wrap.max_width = wrap;
@@ -2306,6 +2490,9 @@ impl App {
             ui.add_space(6.0);
             divider(ui, p);
             ui.add_space(6.0);
+            if icon_btn(ui, p, theme::CHECK_SQUARE, "할 일 목록 (Ctrl+Alt+4)").clicked() {
+                self.convert_block(&ctx, BlockKind::Todo);
+            }
             if icon_btn(ui, p, theme::BULLET_LIST, "글머리 목록 (Ctrl+Alt+5)").clicked() {
                 self.convert_block(&ctx, BlockKind::Bullet);
             }
@@ -2795,13 +2982,10 @@ impl App {
         let mut toggle_font = false;
         let mut toggle_line_num = false;
         let folder_name = self.root_label().to_string();
-        let stats = self.doc().map(|d| {
-            let cur_line = self.last_sel.map(|(_, caret)| {
-                let b = byte_idx(&d.text, caret.min(d.chars));
-                1 + d.text[..b].bytes().filter(|&x| x == b'\n').count()
-            });
-            (d.chars, d.lines, self.selected_chars(), cur_line)
-        });
+        let cur_line = self.current_line_number();
+        let stats = self
+            .doc()
+            .map(|d| (d.chars, d.lines, self.selected_chars(), cur_line));
 
         ui.horizontal(|ui| {
             let (label, color, ring) = match self.doc() {
@@ -3378,6 +3562,7 @@ impl App {
                                 }
                                 block_rects.push((r.clone(), full_row));
                             } else {
+                                let mut block_line_ys: Vec<(usize, f32)> = Vec::new();
                                 let block_rect = if r.is_empty() {
                                     let (rect, _) =
                                         ui.allocate_exact_size(vec2(w, body * 1.6), Sense::hover());
@@ -3421,6 +3606,7 @@ impl App {
                                             consumed = true;
                                         }
                                         consumed |= out.consumed;
+                                        block_line_ys = out.line_ys;
                                         out.rect
                                     }
                                 };
@@ -3470,26 +3656,45 @@ impl App {
                                     self.scroll_to = None;
                                 }
                                 if self.line_numbers {
-                                    let top_pad = if r.is_empty() {
-                                        0.0
+                                    if !block_line_ys.is_empty() {
+                                        block_line_ys.sort_by_key(|&(off, _)| off);
+                                        block_line_ys.dedup_by_key(|x| x.0);
+                                        for (off, y) in block_line_ys {
+                                            if y >= clip.top() - 24.0 && y <= clip.bottom() + 24.0 {
+                                                paint_line_num(
+                                                    ui.painter(),
+                                                    &mut self.line_num_buf,
+                                                    gutter_right_x,
+                                                    y,
+                                                    cur_line + off,
+                                                    &num_font,
+                                                    p.faint,
+                                                );
+                                            }
+                                        }
                                     } else {
-                                        heading_level(text[r.clone()].trim_start())
-                                            .map_or(0.0, |lv| HEADING_TOP[lv - 1])
-                                    };
-                                    let y = block_rect.top()
-                                        + top_pad
-                                        + (block_rect.height() - top_pad).clamp(0.0, body * 1.6)
-                                            * 0.5;
-                                    if y >= clip.top() - 24.0 && y <= clip.bottom() + 24.0 {
-                                        paint_line_num(
-                                            ui.painter(),
-                                            &mut self.line_num_buf,
-                                            gutter_right_x,
-                                            y,
-                                            cur_line,
-                                            &num_font,
-                                            p.faint,
-                                        );
+                                        let top_pad = if r.is_empty() {
+                                            0.0
+                                        } else {
+                                            heading_level(text[r.clone()].trim_start())
+                                                .map_or(0.0, |lv| HEADING_TOP[lv - 1])
+                                        };
+                                        let y = block_rect.top()
+                                            + top_pad
+                                            + (block_rect.height() - top_pad)
+                                                .clamp(0.0, body * 1.6)
+                                                * 0.5;
+                                        if y >= clip.top() - 24.0 && y <= clip.bottom() + 24.0 {
+                                            paint_line_num(
+                                                ui.painter(),
+                                                &mut self.line_num_buf,
+                                                gutter_right_x,
+                                                y,
+                                                cur_line,
+                                                &num_font,
+                                                p.faint,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -3668,7 +3873,15 @@ impl App {
                 let base_chars = (self.active_char_cache.0 == r.start
                     && self.active_char_cache.1 == prev_rev)
                     .then_some(self.active_char_cache.2);
+                let prev_lines_before = self
+                    .active_line_cache
+                    .as_ref()
+                    .filter(|(k, bs, rv, _)| k == &name && *bs == r.start && *rv == prev_rev)
+                    .map(|x| x.3);
                 let new_chars = doc.apply_block_edit(r.clone(), &s);
+                if let Some(lb) = prev_lines_before {
+                    self.active_line_cache = Some((name.clone(), r.start, doc.rev, lb));
+                }
                 if let Some(info) = &mut self.cursor_info {
                     if info.block_start == r.start {
                         info.doc_rev = doc.rev;
@@ -3847,7 +4060,8 @@ impl App {
                     .map(|(r, _)| r.clone());
             }
         }
-        if !drag_active || *consumed || self.dialog.is_some() {
+        // Alt+드래그는 활성 블록 안 열(세로) 커서 — block_editor가 처리
+        if !drag_active || *consumed || self.dialog.is_some() || ctx.input(|i| i.modifiers.alt) {
             return;
         }
         let (Some(origin), Some(pos)) = (origin_opt, pos_opt) else {
@@ -4333,27 +4547,49 @@ impl App {
         let dark = self.dark;
         let ppp_bits = ctx.pixels_per_point().to_bits();
         let mut galley_cache = self.editor_galley_cache.take();
+        let mut hanging_cache = std::mem::take(&mut self.hanging_line_cache);
         let scheme = self.doc_scheme().to_string();
         if !self.raw_table_mode {
             if let Some(tbl) = parse_md_table(&buf) {
                 self.pending_click_pos = None;
                 self.drag_anchor = None;
                 self.drag_last_pos = None;
-                let (rect, tbl_changed, tbl_interacted, tbl_deactivate, tbl_delete) =
+                let (rect, tbl_changed, tbl_interacted, tbl_deactivate, tbl_delete, tbl_line_ys) =
                     self.render_table_editor(ui, ctx, p, id, body, tbl, &mut buf);
                 if let Some((gx, start_line)) = line_gutter {
                     let num_font = FontId::monospace((body * 0.78).max(11.0));
-                    paint_line_num(
-                        ui.painter(),
-                        &mut self.line_num_buf,
-                        gx,
-                        rect.top() + body * 0.8,
-                        start_line,
-                        &num_font,
-                        p.accent,
-                    );
+                    let active_row = self.last_table_cell.map(|(ri, _)| ri);
+                    if tbl_line_ys.is_empty() {
+                        paint_line_num(
+                            ui.painter(),
+                            &mut self.line_num_buf,
+                            gx,
+                            rect.top() + body * 0.8,
+                            start_line,
+                            &num_font,
+                            p.accent,
+                        );
+                    } else {
+                        for (off, y) in tbl_line_ys {
+                            if y >= canvas_area.top() - 24.0 && y <= canvas_area.bottom() + 24.0 {
+                                let is_cur = active_row.is_some_and(|ri| {
+                                    (ri == 0 && off == 0) || (ri > 0 && off == ri + 1)
+                                });
+                                paint_line_num(
+                                    ui.painter(),
+                                    &mut self.line_num_buf,
+                                    gx,
+                                    y,
+                                    start_line + off,
+                                    &num_font,
+                                    if is_cur { p.accent } else { p.faint },
+                                );
+                            }
+                        }
+                    }
                 }
                 self.editor_galley_cache = galley_cache;
+                self.hanging_line_cache = hanging_cache;
                 let changed = if tbl_changed {
                     Some(buf)
                 } else {
@@ -4384,6 +4620,10 @@ impl App {
         if math {
             ui.add_space(6.0); // 보기 화면 card()와 같은 위 여백
         }
+        // 다중 커서용: 클릭으로 커서가 옮겨지기 전 위치
+        let caret_before = egui::TextEdit::load_state(ctx, id)
+            .and_then(|s| s.cursor.char_range())
+            .map(|c| c.primary.index.0);
         let mut pre_click = None;
         let pre_pos = ui.cursor().min;
         if let Some((target_start, click_pos)) = self.pending_click_pos {
@@ -4393,6 +4633,7 @@ impl App {
                 let g = editor_galley_cached(
                     ctx,
                     &mut galley_cache,
+                    &mut hanging_cache,
                     &buf,
                     body,
                     wrap,
@@ -4435,6 +4676,15 @@ impl App {
         let mut picked_callout: Option<&'static str> = None;
         let mut copy_inner_code: Option<String> = None;
 
+        if self
+            .extra_carets
+            .as_ref()
+            .is_some_and(|(cid, _)| *cid != id)
+        {
+            self.extra_carets = None;
+        }
+        let multi_before = self.extra_carets.is_some().then(|| buf.clone());
+
         let take_focus = std::mem::take(&mut self.focus_editor);
         if take_focus
             || (self.dialog.is_none()
@@ -4475,6 +4725,7 @@ impl App {
                         editor_galley_cached(
                             ui.ctx(),
                             &mut galley_cache,
+                            &mut hanging_cache,
                             b.as_str(),
                             body,
                             wrap,
@@ -4503,6 +4754,7 @@ impl App {
                 editor_galley_cached(
                     ui.ctx(),
                     &mut galley_cache,
+                    &mut hanging_cache,
                     b.as_str(),
                     body,
                     wrap,
@@ -4599,11 +4851,19 @@ impl App {
             self.status = "코드를 복사했습니다".into();
         }
         self.editor_galley_cache = galley_cache;
+        self.hanging_line_cache = hanging_cache;
         let spell_issues = if code_frame_rect.is_none() && !math && !is_raw_table {
-            self.active_spell_issues(&buf)
+            self.active_spell_issues(ctx, &buf, r.start, self.ime_composing)
         } else {
             Vec::new()
         };
+        let (todo_toggled, hovered_todo_line) =
+            if code_frame_rect.is_none() && !math && !is_raw_table {
+                toggle_edit_checkboxes(ui, ctx, id, &out, &mut buf, body, folded)
+            } else {
+                (false, None)
+            };
+        header_interacted |= todo_toggled;
         if code_frame_rect.is_none() {
             paint_block_decor(
                 ui.painter(),
@@ -4616,6 +4876,7 @@ impl App {
                 folded,
                 &scheme,
                 &spell_issues,
+                hovered_todo_line,
             );
         }
         header_interacted |= toggle_arrow(ui, ctx, id, toggle_id, folded, &out, &buf);
@@ -4624,18 +4885,33 @@ impl App {
             change_callout_kind(ctx, id, &mut buf, k);
             self.focus_editor = true;
         }
-        let mut sel = out.cursor_range.map(|c| c.as_sorted_char_range());
-        let mut primary_cursor = out.cursor_range.map(|c| c.primary);
-        self.apply_pointer_selection(
-            ctx,
-            id,
-            r.start,
-            &buf,
-            pre_click,
-            &out,
-            &mut sel,
-            &mut primary_cursor,
-        );
+        let cr = self
+            .multi_caret(
+                ui,
+                ctx,
+                id,
+                &mut buf,
+                multi_before,
+                caret_before,
+                pre_click.is_some(),
+                &out,
+                header_interacted || picked_callout.is_some(),
+            )
+            .or(out.cursor_range);
+        let mut sel = cr.map(|c| c.as_sorted_char_range());
+        let mut primary_cursor = cr.map(|c| c.primary);
+        if !todo_toggled {
+            self.apply_pointer_selection(
+                ctx,
+                id,
+                r.start,
+                &buf,
+                pre_click,
+                &out,
+                &mut sel,
+                &mut primary_cursor,
+            );
+        }
         fix_edited_buf(
             ctx,
             id,
@@ -4697,22 +4973,24 @@ impl App {
             let mut at_line_start = true;
             for row in &out.galley.rows {
                 if at_line_start {
-                    let y = out.galley_pos.y + row.rect().center().y;
-                    if y >= canvas_area.top() - 24.0 && y <= canvas_area.bottom() + 24.0 {
-                        let color = if cur_line_idx == Some(logical_idx) {
-                            p.accent
-                        } else {
-                            p.faint
-                        };
-                        paint_line_num(
-                            ui.painter(),
-                            &mut self.line_num_buf,
-                            gx,
-                            y,
-                            start_line + logical_idx,
-                            &num_font,
-                            color,
-                        );
+                    if row.rect().height() > 1.0 {
+                        let y = out.galley_pos.y + row.rect().center().y;
+                        if y >= canvas_area.top() - 24.0 && y <= canvas_area.bottom() + 24.0 {
+                            let color = if cur_line_idx == Some(logical_idx) {
+                                p.accent
+                            } else {
+                                p.faint
+                            };
+                            paint_line_num(
+                                ui.painter(),
+                                &mut self.line_num_buf,
+                                gx,
+                                y,
+                                start_line + logical_idx,
+                                &num_font,
+                                color,
+                            );
+                        }
                     }
                     logical_idx += 1;
                 }
@@ -4795,6 +5073,112 @@ impl App {
             deactivate,
             delete_block,
         }
+    }
+
+    // 다중 커서 (Notepad++식): Ctrl+클릭으로 커서 추가(이미 있는 자리면 제거), 활성 블록 안 Alt+드래그로
+    // 지나간 줄마다 같은 x에 커서(열 편집). TextEdit이 주 커서에 한 편집(타이핑·한글 조합·Backspace·Delete·
+    // 붙여넣기)을 모든 추가 커서에 그대로 복제한다. 커서 위치를 바꿨으면 새 커서 범위를 돌려준다.
+    // ponytail: 커서는 활성 블록 안에서만, 커서마다 선택 영역은 없음(Alt+드래그도 커서만) — 필요하면 Vec<Range>로
+    #[allow(clippy::too_many_arguments)]
+    fn multi_caret(
+        &mut self,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+        id: egui::Id,
+        buf: &mut String,
+        before: Option<String>,
+        caret_before: Option<usize>,
+        canvas_click: bool, // 캔버스가 클릭 위치로 커서를 옮긴 프레임
+        out: &egui::text_edit::TextEditOutput,
+        cancel: bool,
+    ) -> Option<CCursorRange> {
+        if cancel || !out.response.has_focus() {
+            self.extra_carets = None;
+            return None;
+        }
+        let (pressed, released, down, cmd, alt, origin, pos) = ctx.input(|i| {
+            let p = &i.pointer;
+            let m = i.modifiers;
+            let (o, at) = (p.press_origin(), p.interact_pos());
+            (
+                p.primary_pressed(),
+                p.primary_released(),
+                p.primary_down(),
+                m.command,
+                m.alt,
+                o,
+                at,
+            )
+        });
+        let g = &out.galley;
+        let gpos = out.galley_pos;
+        let char_at = |p: egui::Pos2| g.cursor_from_pos(p - gpos).index.0;
+        if let (true, Some(o), Some(at)) = (alt && down, origin, pos) {
+            if out.response.rect.contains(o) {
+                let (y0, y1) = (o.y.min(at.y), o.y.max(at.y));
+                let mut cs: Vec<usize> = g
+                    .rows
+                    .iter()
+                    .map(|row| row.rect().translate(gpos.to_vec2()))
+                    .filter(|r| r.bottom() >= y0 && r.top() <= y1)
+                    .map(|r| snap_out_of_prefix(buf, char_at(pos2(at.x, r.center().y))))
+                    .collect();
+                cs.dedup();
+                if cs.is_empty() {
+                    return None;
+                }
+                let primary = if at.y < o.y { cs.remove(0) } else { cs.pop()? };
+                self.extra_carets = (!cs.is_empty()).then_some((id, cs));
+                let cr = CCursorRange::one(CCursor::new(primary));
+                set_cursor_range(ctx, id, cr);
+                return Some(cr);
+            }
+        }
+        // 클릭이 커서를 옮기는 프레임이 누름/뗌/캔버스 처리 중 어디일지 달라서, 지난 프레임 끝의 커서와 비교한다
+        let last_id = id.with("multi-caret-last");
+        let last: Option<usize> = ctx.data(|d| d.get_temp(last_id));
+        let now = out.cursor_range.map(|c| c.primary.index.0);
+        if let Some(c) = now {
+            ctx.data_mut(|d| d.insert_temp(last_id, c));
+        }
+        let on_text = out.response.contains_pointer();
+        if cmd && !alt && (canvas_click || ((pressed || released) && on_text)) {
+            let ex = &mut self.extra_carets.get_or_insert_with(|| (id, Vec::new())).1;
+            if let Some(prev) = last.filter(|&c| Some(c) != now && !ex.contains(&c)) {
+                ex.push(prev);
+            }
+            ex.retain(|&c| Some(c) != now);
+            if ex.is_empty() {
+                self.extra_carets = None;
+            }
+        } else if pressed && on_text && !cmd && !alt {
+            // 일반 클릭은 추가 커서를 끈다 (누를 때만 — Alt를 먼저 떼고 버튼을 떼도 열 커서는 남게)
+            self.extra_carets = None;
+        }
+        let (_, extras) = self.extra_carets.as_mut()?;
+        if let (Some(old), Some(o), Some(cr)) = (before, caret_before, out.cursor_range) {
+            if *buf != old {
+                let (t, ex, sh) = replicate_edit(&old, buf, o, cr.primary.index.0, extras);
+                *buf = t;
+                *extras = ex;
+                if extras.is_empty() {
+                    self.extra_carets = None;
+                }
+                let mv = |c: CCursor| CCursor::new((c.index.0 as isize + sh).max(0) as usize);
+                let cr = CCursorRange::two(mv(cr.secondary), mv(cr.primary));
+                set_cursor_range(ctx, id, cr);
+                ctx.data_mut(|d| d.insert_temp(last_id, cr.primary.index.0));
+                ctx.request_repaint(); // 이번 프레임 galley는 복제 전 텍스트 — 다음 프레임에 커서를 그린다
+                return Some(cr);
+            }
+        }
+        let stroke = ui.visuals().text_cursor.stroke;
+        for &c in extras.iter() {
+            let r = g.pos_from_cursor(CCursor::new(c)).translate(gpos.to_vec2());
+            ui.painter()
+                .line_segment([r.center_top(), r.center_bottom()], stroke);
+        }
+        None
     }
 
     // 슬래시(/) 명령어 메뉴. 고른 항목과, 메뉴 위를 눌렀는지(편집 칸 포커스를 잃지 않게)를 돌려준다.
@@ -5062,7 +5446,7 @@ impl App {
         body: f32,
         mut tbl: MdTable,
         buf: &mut String,
-    ) -> (Rect, bool, bool, bool, bool) {
+    ) -> (Rect, bool, bool, bool, bool, Vec<(usize, f32)>) {
         let cell_id = |r_i: usize, c_i: usize| block_id.with(("tbl-cell", r_i, c_i));
         let cols = tbl.headers.len().max(1);
         let row_count = tbl.rows.len() + 1;
@@ -5138,6 +5522,7 @@ impl App {
             }
         }
 
+        let mut row_line_ys: Vec<(usize, f32)> = Vec::new();
         let wrap_out = ui.vertical(|ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 6.0;
@@ -5289,6 +5674,10 @@ impl App {
                                 ui.end_row();
                             }
                         });
+                    for (idx, &(_, rt, rb)) in row_shapes.iter().enumerate() {
+                        let off = if idx == 0 { 0 } else { idx + 1 };
+                        row_line_ys.push((off, (rt + rb) * 0.5));
+                    }
                     let last_bot = row_shapes
                         .last()
                         .map_or(grid_resp.response.rect.bottom(), |x| x.2);
@@ -5322,6 +5711,7 @@ impl App {
             interacted,
             deactivate,
             delete_table,
+            row_line_ys,
         )
     }
 
@@ -5486,6 +5876,7 @@ impl App {
         body: f32,
         width: f32,
         scheme: &str,
+        line_ys: Option<&mut Vec<(usize, f32)>>,
     ) {
         let cols = tbl.headers.len().max(1);
         let row_count = tbl.rows.len() + 1;
@@ -5569,6 +5960,12 @@ impl App {
                             ui.end_row();
                         }
                     });
+                if let Some(lys) = line_ys {
+                    for (idx, &(_, rt, rb)) in row_shapes.iter().enumerate() {
+                        let off = if idx == 0 { 0 } else { idx + 1 };
+                        lys.push((off, (rt + rb) * 0.5));
+                    }
+                }
                 let last_bot = row_shapes
                     .last()
                     .map_or(grid_resp.response.rect.bottom(), |x| x.2);
@@ -5593,6 +5990,7 @@ impl App {
         width: f32,
         scheme: &str,
         dark: bool,
+        mut line_ys: Option<&mut Vec<(usize, f32)>>,
     ) -> (Option<String>, bool) {
         let mut changed = None;
         let mut consumed = false;
@@ -5613,7 +6011,7 @@ impl App {
             .inner_margin(Margin::symmetric(12, 9))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                let hdr_resp = ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 7.0;
                     let arrow = ui
                         .add(
@@ -5644,15 +6042,34 @@ impl App {
                             .color(p.text),
                     );
                 });
+                if let Some(lys) = line_ys.as_deref_mut() {
+                    lys.push((0, hdr_resp.response.rect.center().y));
+                }
                 if open {
                     ui.add_space(6.0);
+                    let mut inner_ys = Vec::new();
                     let inner_resp = ui.horizontal(|ui| {
                         ui.add_space(22.0);
                         ui.vertical(|ui| {
-                            self.markdown(ui, p, body, inner, width - 64.0, scheme, dark)
+                            self.markdown(
+                                ui,
+                                p,
+                                body,
+                                inner,
+                                width - 64.0,
+                                scheme,
+                                dark,
+                                line_ys.is_some().then_some(&mut inner_ys),
+                            )
                         })
                         .inner
                     });
+                    if let Some(lys) = line_ys {
+                        let base_off = line_offset_at(src, body_start);
+                        for (off, y) in inner_ys {
+                            lys.push((base_off + off, y));
+                        }
+                    }
                     let rr = inner_resp.response.rect;
                     ui.painter().vline(
                         rr.left() + 10.0,
@@ -5672,6 +6089,7 @@ impl App {
         (changed, consumed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_code_card_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -5680,6 +6098,7 @@ impl App {
         body: f32,
         width: f32,
         dark: bool,
+        mut line_ys: Option<&mut Vec<(usize, f32)>>,
     ) -> bool {
         let mut consumed = false;
         let fence = &t[..3];
@@ -5696,6 +6115,7 @@ impl App {
             .unwrap_or(body_part)
             .trim_end_matches(['\n', '\r']);
         if lang.eq_ignore_ascii_case("mermaid") {
+            let m_top = ui.cursor().top() + 6.0;
             if card(ui, p, Some("Mermaid 다이어그램"), true, |ui| {
                 if !crate::mermaid::render(ui, p, code, body, (width - 44.0).max(160.0)) {
                     ui.label(
@@ -5709,6 +6129,10 @@ impl App {
                 ui.ctx().copy_text(code.to_string());
                 self.status = "코드를 복사했습니다".into();
                 consumed = true;
+            }
+            if let Some(lys) = line_ys {
+                let m_bot = ui.cursor().top();
+                lys.push((0, (m_top + m_bot) * 0.5));
             }
             return consumed;
         }
@@ -5809,7 +6233,7 @@ impl App {
                             .get(&c_key)
                             .filter(|(g, _)| g.text() == code)
                             .map(|(g, ys)| (std::sync::Arc::clone(g), ys.clone()));
-                        let (galley, line_ys) = match cached {
+                        let (galley, line_ys_vec) = match cached {
                             Some(hit) => hit,
                             None => {
                                 let job = build_code_layout_job(
@@ -5846,7 +6270,10 @@ impl App {
                         ui.painter()
                             .vline(div_x, rect.y_range(), Stroke::new(1.0, p.border));
                         let num_font = FontId::monospace(code_size * 0.88);
-                        for (idx, &y_off) in line_ys.iter().enumerate() {
+                        for (idx, &y_off) in line_ys_vec.iter().enumerate() {
+                            if let Some(lys) = line_ys.as_deref_mut() {
+                                lys.push((1 + idx, rect.top() + y_off));
+                            }
                             paint_line_num(
                                 ui.painter(),
                                 &mut self.line_num_buf,
@@ -5874,7 +6301,7 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_block(
+    pub(super) fn render_block(
         &mut self,
         ui: &mut egui::Ui,
         p: &Pal,
@@ -5889,6 +6316,8 @@ impl App {
         let t = src.trim_start();
         let mut changed = None;
         let mut consumed = false;
+        let mut line_ys: Vec<(usize, f32)> = Vec::new();
+        let collect_lines = self.line_numbers;
         let dark = self.dark;
         let resp = ui
             .push_id(("blk", block_idx), |ui| {
@@ -5901,7 +6330,7 @@ impl App {
                             .bytes()
                             .any(|b| matches!(b, b'*' | b'_' | b'`' | b'~' | b'='))
                         {
-                            render_inline_md_cached(
+                            let (rect, galley) = render_inline_md_cached(
                                 ui,
                                 &mut self.inline_galley_cache,
                                 title,
@@ -5912,16 +6341,31 @@ impl App {
                                 true,
                                 scheme,
                             );
+                            if collect_lines {
+                                record_galley_lines(&mut line_ys, 0, rect, &galley, false);
+                            }
                         } else {
-                            ui.label(
+                            let lr = ui.label(
                                 RichText::new(title)
                                     .font(FontId::new(h_size, theme::bold()))
                                     .color(p.text),
                             );
+                            if collect_lines {
+                                line_ys.push((0, lr.rect.center().y));
+                            }
                         }
                     } else if let Some(rest) = t.strip_prefix(":::toggle") {
                         let (ch, c) = self.render_toggle_view(
-                            ui, p, src, rest, r.start, body, width, scheme, dark,
+                            ui,
+                            p,
+                            src,
+                            rest,
+                            r.start,
+                            body,
+                            width,
+                            scheme,
+                            dark,
+                            collect_lines.then_some(&mut line_ys),
                         );
                         changed = ch;
                         consumed |= c;
@@ -5931,6 +6375,7 @@ impl App {
                             .trim_end()
                             .trim_end_matches('$')
                             .trim();
+                        let top_y = ui.cursor().top() + 6.0;
                         let _ = card(ui, p, None, false, |ui| {
                             ui.vertical_centered(|ui| {
                                 ui.label(
@@ -5941,10 +6386,31 @@ impl App {
                                 );
                             });
                         });
+                        if collect_lines {
+                            let bot_y = ui.cursor().top();
+                            line_ys.push((0, (top_y + bot_y) * 0.5));
+                        }
                     } else if t.starts_with("```") || t.starts_with("~~~") {
-                        consumed |= self.render_code_card_view(ui, p, t, body, width, dark);
+                        consumed |= self.render_code_card_view(
+                            ui,
+                            p,
+                            t,
+                            body,
+                            width,
+                            dark,
+                            collect_lines.then_some(&mut line_ys),
+                        );
                     } else if let Some(tbl) = parse_md_table_cached(&mut self.table_cache, t) {
-                        self.render_table_view(ui, p, &tbl, block_idx, body, width, scheme);
+                        self.render_table_view(
+                            ui,
+                            p,
+                            &tbl,
+                            block_idx,
+                            body,
+                            width,
+                            scheme,
+                            collect_lines.then_some(&mut line_ys),
+                        );
                     } else {
                         let t_end = t.trim_end();
                         let plain_para = !t_end.is_empty()
@@ -5971,14 +6437,29 @@ impl App {
                             })
                             && !t_end.contains("://");
                         if plain_para {
-                            ui.label(
+                            let lr = ui.label(
                                 RichText::new(src.trim_end())
                                     .size(body)
                                     .line_height(Some(body * 1.6))
                                     .color(p.text),
                             );
+                            if collect_lines {
+                                line_ys.push((
+                                    0,
+                                    lr.rect.top() + lr.rect.height().clamp(0.0, body * 1.6) * 0.5,
+                                ));
+                            }
                         } else {
-                            changed = self.markdown(ui, p, body, src, width, scheme, dark);
+                            changed = self.markdown(
+                                ui,
+                                p,
+                                body,
+                                src,
+                                width,
+                                scheme,
+                                dark,
+                                collect_lines.then_some(&mut line_ys),
+                            );
                         }
                     }
                 })
@@ -5989,6 +6470,7 @@ impl App {
             rect: resp.rect,
             changed,
             consumed,
+            line_ys,
         }
     }
 
@@ -6003,9 +6485,11 @@ impl App {
         width: f32,
         scheme: &str,
         dark: bool,
+        line_ys: Option<&mut Vec<(usize, f32)>>,
     ) -> Option<String> {
         let before = preprocess(src);
         if before.contains("![") {
+            let top_y = ui.cursor().top();
             let math = |ui: &mut egui::Ui, s: &str, _inline: bool| {
                 ui.code(s.trim());
             };
@@ -6020,10 +6504,18 @@ impl App {
                 before.contains("[ ]") || before.contains("[x]") || before.contains("[X]");
             if !has_checkbox {
                 viewer.show(ui, &mut self.md_cache, &before);
+                if let Some(lys) = line_ys {
+                    let bot_y = ui.cursor().top();
+                    lys.push((0, top_y + (bot_y - top_y).clamp(0.0, body * 1.6) * 0.5));
+                }
                 return None;
             }
             let mut shown = before.clone().into_owned();
             viewer.show_mut(ui, &mut self.md_cache, &mut shown);
+            if let Some(lys) = line_ys {
+                let bot_y = ui.cursor().top();
+                lys.push((0, top_y + (bot_y - top_y).clamp(0.0, body * 1.6) * 0.5));
+            }
             if shown == *before {
                 return None;
             }
@@ -6037,6 +6529,7 @@ impl App {
             scheme,
             dark,
             cache: &mut self.inline_galley_cache,
+            line_ys,
         };
         let toggled = render_markdown_native(ui, &mut rctx, &before, width);
         let (span, new_checked) = toggled?;
@@ -7466,7 +7959,7 @@ impl App {
                 Some((r, block_str, rel_b))
             });
             if let Some((r, block_str, rel_b)) = ctx_info {
-                self.active_spell_issues(&block_str)
+                self.active_spell_issues_sync(&block_str, r.start)
                     .into_iter()
                     .find(|i| rel_b >= i.range.start && rel_b <= i.range.end)
                     .map(|mut i| {
@@ -8265,6 +8758,7 @@ struct MdRenderCtx<'a> {
     scheme: &'a str,
     dark: bool,
     cache: &'a mut InlineGalleyCache,
+    line_ys: Option<&'a mut Vec<(usize, f32)>>,
 }
 
 struct MdInlineBuf<'a> {
@@ -8318,6 +8812,11 @@ impl<'a> MdInlineBuf<'a> {
         self
     }
 
+    fn with_strikethrough(mut self) -> Self {
+        self.strike += 1;
+        self
+    }
+
     fn push_styled(&mut self, txt: &str, force_bold: bool) {
         if txt.is_empty() {
             return;
@@ -8330,7 +8829,7 @@ impl<'a> MdInlineBuf<'a> {
         };
         let color = if self.link_url.is_some() {
             self.p.accent
-        } else if is_bold && self.base_color == self.p.muted {
+        } else if is_bold && self.base_color == self.p.muted && self.strike == 0 {
             self.p.text
         } else {
             self.base_color
@@ -8662,10 +9161,10 @@ impl<'a> MdInlineBuf<'a> {
         width: f32,
         dark: bool,
         scheme: &str,
-    ) {
+    ) -> Option<(Rect, std::sync::Arc<egui::Galley>)> {
         self.finalize_job();
         if self.job.text.is_empty() {
-            return;
+            return None;
         }
         let max_w = width.max(40.0);
         self.job.wrap.max_width = max_w;
@@ -8718,7 +9217,14 @@ impl<'a> MdInlineBuf<'a> {
             let (g_ref, l_ref) = &cache[&key];
             (std::sync::Arc::clone(g_ref), l_ref.as_slice())
         };
-        paint_galley_with_links(ui, galley, links, self.p.text, scheme);
+        let rect = paint_galley_with_links(
+            ui,
+            std::sync::Arc::clone(&galley),
+            links,
+            self.p.text,
+            scheme,
+        );
+        Some((rect, galley))
     }
 }
 
@@ -8728,7 +9234,7 @@ fn paint_galley_with_links(
     links: &[(Range<usize>, String)],
     text_color: Color32,
     scheme: &str,
-) {
+) -> Rect {
     let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::hover());
     ui.painter()
         .galley(rect.min, std::sync::Arc::clone(&galley), text_color);
@@ -8738,7 +9244,7 @@ fn paint_galley_with_links(
         egui::WidgetInfo::labeled(egui::Role::Label, enabled, galley_info.text())
     });
     if links.is_empty() {
-        return;
+        return rect;
     }
     let (ptr, clicked) = ui.input(|i| (i.pointer.interact_pos(), i.pointer.primary_clicked()));
     if let Some(pos_ptr) = ptr.filter(|pos_ptr| resp.rect.contains(*pos_ptr)) {
@@ -8760,6 +9266,7 @@ fn paint_galley_with_links(
             }
         }
     }
+    rect
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8773,7 +9280,7 @@ fn render_inline_md_cached(
     dark: bool,
     base_bold: bool,
     scheme: &str,
-) {
+) -> (Rect, std::sync::Arc<egui::Galley>) {
     use pulldown_cmark::{Options, Parser};
     let max_w = width.max(40.0);
     let ppp_bits = ui.ctx().pixels_per_point().to_bits();
@@ -8787,8 +9294,9 @@ fn render_inline_md_cached(
         ppp_bits,
     ));
     if let Some((galley, links)) = cache.get(&key) {
-        paint_galley_with_links(ui, std::sync::Arc::clone(galley), links, p.text, scheme);
-        return;
+        let g = std::sync::Arc::clone(galley);
+        let rect = paint_galley_with_links(ui, std::sync::Arc::clone(&g), links, p.text, scheme);
+        return (rect, g);
     }
     let clean = preprocess(src);
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES | Options::ENABLE_MATH;
@@ -8798,7 +9306,8 @@ fn render_inline_md_cached(
     }
     buf.finalize_job();
     if buf.job.text.is_empty() {
-        return;
+        let empty_g = ui.ctx().fonts_mut(|f| f.layout_job(buf.job));
+        return (Rect::NOTHING, empty_g);
     }
     buf.job.wrap.max_width = max_w;
     let galley = ui.ctx().fonts_mut(|f| f.layout_job(buf.job));
@@ -8807,7 +9316,9 @@ fn render_inline_md_cached(
     }
     cache.insert(key, (std::sync::Arc::clone(&galley), buf.links));
     let (g_ref, l_ref) = &cache[&key];
-    paint_galley_with_links(ui, std::sync::Arc::clone(g_ref), l_ref, p.text, scheme);
+    let g = std::sync::Arc::clone(g_ref);
+    let rect = paint_galley_with_links(ui, std::sync::Arc::clone(&g), l_ref, p.text, scheme);
+    (rect, g)
 }
 
 fn parse_md_table_cached(cache: &mut TableParseCache, t: &str) -> Option<std::sync::Arc<MdTable>> {
@@ -8987,6 +9498,7 @@ fn render_md_stream<'a, I>(
         match ev {
             Event::End(end_tag) if Some(end_tag) == stop_tag => break,
             Event::Start(Tag::Paragraph) => {
+                let base_line = line_offset_at(ctx.raw, span.start);
                 let mut buf = MdInlineBuf::new(p, ctx.body, base_color, false);
                 if list_depth == 0 {
                     buf = buf.with_preserve_indent();
@@ -8997,9 +9509,16 @@ fn render_md_stream<'a, I>(
                     }
                     buf.handle_inline_event(&iev, ctx.raw, ispan);
                 }
-                buf.finish_cached(ui, ctx.cache, width, ctx.dark, ctx.scheme);
+                if let Some((rect, galley)) =
+                    buf.finish_cached(ui, ctx.cache, width, ctx.dark, ctx.scheme)
+                {
+                    if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                        record_galley_lines(lys, base_line, rect, &galley, false);
+                    }
+                }
             }
             Event::Start(Tag::Heading { level, .. }) => {
+                let base_line = line_offset_at(ctx.raw, span.start);
                 let idx = (level as usize)
                     .saturating_sub(1)
                     .min(HEADING_SCALE.len() - 1);
@@ -9012,17 +9531,27 @@ fn render_md_stream<'a, I>(
                     }
                     buf.handle_inline_event(&iev, ctx.raw, ispan);
                 }
-                buf.finish_cached(ui, ctx.cache, width, ctx.dark, ctx.scheme);
+                if let Some((rect, galley)) =
+                    buf.finish_cached(ui, ctx.cache, width, ctx.dark, ctx.scheme)
+                {
+                    if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                        record_galley_lines(lys, base_line, rect, &galley, false);
+                    }
+                }
             }
             Event::Start(Tag::FootnoteDefinition(label)) => {
+                let base_line = line_offset_at(ctx.raw, span.start);
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(
+                    let lr = ui.label(
                         RichText::new(format!("[{label}]:"))
                             .family(FontFamily::Monospace)
                             .size(ctx.body * 0.85)
                             .color(p.accent),
                     );
+                    if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                        lys.push((base_line, lr.rect.center().y));
+                    }
                     ui.vertical(|ui| {
                         let fw = (width - 44.0).max(80.0);
                         ui.set_width(fw);
@@ -9109,6 +9638,7 @@ fn render_md_stream<'a, I>(
                     match lev {
                         Event::End(TagEnd::List(_)) => break,
                         Event::Start(Tag::Item) => {
+                            let item_line = line_offset_at(ctx.raw, lspan.start);
                             let step_info = raw_list_item_step(ctx.raw, lspan.start);
                             let true_depth = step_info.map_or(list_depth, |(d, _)| d);
                             let extra_depth = true_depth.saturating_sub(list_depth);
@@ -9127,6 +9657,8 @@ fn render_md_stream<'a, I>(
                                     iter.next();
                                 }
                             }
+                            let task_checked = task.as_ref().is_some_and(|(_, chk)| *chk);
+                            let item_color = if task_checked { p.muted } else { base_color };
                             // 편집 화면(md_job·paint_list_markers)과 같은 배치 상수를 쓴다
                             let indent = LIST_STEP * extra_depth as f32 + LIST_PAD;
                             let marker_w = LIST_MARKER_W;
@@ -9141,7 +9673,14 @@ fn render_md_stream<'a, I>(
                                         vec2(marker_w, ctx.body * 1.5),
                                         Sense::click(),
                                     );
-                                    paint_checkbox(ui.painter(), rect.center(), val);
+                                    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+                                    paint_checkbox(
+                                        ui.painter(),
+                                        p,
+                                        rect.center(),
+                                        val,
+                                        resp.hovered(),
+                                    );
                                     resp.widget_info(|| {
                                         egui::WidgetInfo::selected(
                                             egui::accesskit::Role::CheckBox,
@@ -9150,7 +9689,10 @@ fn render_md_stream<'a, I>(
                                             "",
                                         )
                                     });
-                                    if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                    if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                                        lys.push((item_line, rect.center().y));
+                                    }
+                                    if resp.clicked() {
                                         val = !val;
                                         *toggled = Some((mspan, val));
                                     }
@@ -9173,19 +9715,25 @@ fn render_md_stream<'a, I>(
                                         }
                                         .to_string()
                                     };
-                                    ui.add_sized(
+                                    let lr = ui.add_sized(
                                         vec2(marker_w, ctx.body * 1.5),
                                         egui::Label::new(
                                             RichText::new(label).size(ctx.body).color(p.muted),
                                         )
                                         .wrap_mode(egui::TextWrapMode::Extend),
                                     );
+                                    if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                                        lys.push((item_line, lr.rect.center().y));
+                                    }
                                 }
                                 ui.vertical(|ui| {
                                     ui.set_width(item_w);
-                                    if leading_para {
+                                    let painted = if leading_para {
                                         let mut buf =
-                                            MdInlineBuf::new(p, ctx.body, base_color, false);
+                                            MdInlineBuf::new(p, ctx.body, item_color, false);
+                                        if task_checked {
+                                            buf = buf.with_strikethrough();
+                                        }
                                         for (iev, ispan) in iter.by_ref() {
                                             if matches!(iev, Event::End(TagEnd::Paragraph)) {
                                                 break;
@@ -9194,10 +9742,13 @@ fn render_md_stream<'a, I>(
                                         }
                                         buf.finish_cached(
                                             ui, ctx.cache, item_w, ctx.dark, ctx.scheme,
-                                        );
+                                        )
                                     } else {
                                         let mut buf =
-                                            MdInlineBuf::new(p, ctx.body, base_color, false);
+                                            MdInlineBuf::new(p, ctx.body, item_color, false);
+                                        if task_checked {
+                                            buf = buf.with_strikethrough();
+                                        }
                                         while let Some((iev, _)) = iter.peek() {
                                             if matches!(
                                                 iev,
@@ -9214,7 +9765,14 @@ fn render_md_stream<'a, I>(
                                         }
                                         buf.finish_cached(
                                             ui, ctx.cache, item_w, ctx.dark, ctx.scheme,
-                                        );
+                                        )
+                                    };
+                                    if let Some((rect, galley)) = painted {
+                                        if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                                            record_galley_lines(
+                                                lys, item_line, rect, &galley, true,
+                                            );
+                                        }
                                     }
                                     render_md_stream(
                                         ui,
@@ -9234,6 +9792,7 @@ fn render_md_stream<'a, I>(
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
+                let code_base = line_offset_at(ctx.raw, span.start) + 1;
                 let mut code = String::new();
                 for (cev, _) in iter.by_ref() {
                     if matches!(cev, Event::End(TagEnd::CodeBlock)) {
@@ -9247,6 +9806,8 @@ fn render_md_stream<'a, I>(
                     pulldown_cmark::CodeBlockKind::Fenced(l) => l.to_string(),
                     pulldown_cmark::CodeBlockKind::Indented => String::new(),
                 };
+                let mut code_rect = None;
+                let mut code_galley = None;
                 Frame::new()
                     .fill(p.code_bg)
                     .stroke(Stroke::new(1.0, p.border))
@@ -9265,8 +9826,23 @@ fn render_md_stream<'a, I>(
                             p,
                             ctx.dark,
                         );
-                        ui.add(egui::Label::new(job));
+                        let g = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                        let (rect, resp) = ui.allocate_exact_size(g.size(), Sense::hover());
+                        ui.painter()
+                            .galley(rect.min, std::sync::Arc::clone(&g), p.text);
+                        let g_info = std::sync::Arc::clone(&g);
+                        let enabled = ui.is_enabled();
+                        resp.widget_info(move || {
+                            egui::WidgetInfo::labeled(egui::Role::Label, enabled, g_info.text())
+                        });
+                        code_rect = Some(rect);
+                        code_galley = Some(g);
                     });
+                if let (Some(rect), Some(galley), Some(lys)) =
+                    (code_rect, code_galley, ctx.line_ys.as_deref_mut())
+                {
+                    record_galley_lines(lys, code_base, rect, &galley, false);
+                }
             }
             Event::Start(Tag::Table(_aligns)) => {
                 let mut headers: Vec<Vec<egui::text::LayoutJob>> = Vec::new();
@@ -9324,6 +9900,8 @@ fn render_md_stream<'a, I>(
                     });
             }
             Event::DisplayMath(t) => {
+                let base_line = line_offset_at(ctx.raw, span.start);
+                let top_y = ui.cursor().top() + 6.0;
                 let _ = card(ui, p, None, false, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -9334,11 +9912,20 @@ fn render_md_stream<'a, I>(
                         );
                     });
                 });
+                if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                    let bot_y = ui.cursor().top();
+                    lys.push((base_line, (top_y + bot_y) * 0.5));
+                }
             }
             Event::Rule => {
+                let base_line = line_offset_at(ctx.raw, span.start);
                 ui.add_space(4.0);
+                let rule_y = ui.cursor().top() + 0.5;
                 hline(ui, p);
                 ui.add_space(4.0);
+                if let Some(lys) = ctx.line_ys.as_deref_mut() {
+                    lys.push((base_line, rule_y));
+                }
             }
             Event::TaskListMarker(chk) => {
                 let mut val = chk;

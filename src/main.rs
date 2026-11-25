@@ -23,6 +23,7 @@ mod theme;
 mod ui;
 
 const AUTO_SAVE_DELAY: Duration = Duration::from_secs(2);
+const LIVE_SPELL_DEBOUNCE: Duration = Duration::from_millis(300);
 const UNDO_LIMIT: usize = 200; // 단계마다 변경 구간(Patch)만 기록해 메모리 점유를 최소화
 const MAX_FILES: usize = 5000; // 거대한 폴더(예: 사용자 홈) 스캔 상한
 const SCRATCH_KEY: &str = ""; // 첫 번째 임시 메모 문서 키 (실제 파일 경로는 비어 있을 수 없다)
@@ -1017,6 +1018,116 @@ enum ContextMenu {
 type CodeGalleyCache = HashMap<u64, (std::sync::Arc<egui::Galley>, Vec<f32>)>;
 type InlineGalleyCache = HashMap<u64, (std::sync::Arc<egui::Galley>, Vec<(Range<usize>, String)>)>;
 type TableParseCache = HashMap<u64, (String, std::sync::Arc<MdTable>)>;
+type HangingLineCache = (u32, HashMap<u64, std::sync::Arc<egui::Galley>>);
+
+struct AutoSaveReq {
+    name: String,
+    root: PathBuf,
+    path: PathBuf,
+    encoded: String,
+    saved_text: String,
+    prev_saved: String,
+    prev_mtime: Option<std::time::SystemTime>,
+    rev: u64,
+}
+
+enum AutoSaveOutcome {
+    Saved {
+        mtime: Option<std::time::SystemTime>,
+    },
+    Conflict,
+    Err(String),
+}
+
+struct AutoSaveRes {
+    name: String,
+    root: PathBuf,
+    rev: u64,
+    saved_text: String,
+    outcome: AutoSaveOutcome,
+}
+
+struct AutoSaveWorker {
+    tx: std::sync::mpsc::Sender<AutoSaveReq>,
+    rx: std::sync::mpsc::Receiver<AutoSaveRes>,
+    pending: std::sync::Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+}
+
+impl AutoSaveWorker {
+    fn new(wake: impl Fn() + Send + 'static) -> Self {
+        let (tx, jobs) = std::sync::mpsc::channel::<AutoSaveReq>();
+        let (done, rx) = std::sync::mpsc::channel::<AutoSaveRes>();
+        let pending =
+            std::sync::Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
+        let pending_bg = std::sync::Arc::clone(&pending);
+        let _ = std::thread::Builder::new()
+            .name("autosave".into())
+            .spawn(move || {
+                while let Ok(req) = jobs.recv() {
+                    let external = req.prev_mtime.is_some()
+                        && req.path.is_file()
+                        && modified(&req.path).is_some_and(|d| Some(d) != req.prev_mtime)
+                        && Doc::load(&req.path).map_or(true, |f| f.text != req.prev_saved);
+                    let outcome = if external {
+                        AutoSaveOutcome::Conflict
+                    } else {
+                        match save_atomic(&req.path, req.encoded.as_bytes()) {
+                            Ok(()) => AutoSaveOutcome::Saved {
+                                mtime: modified(&req.path),
+                            },
+                            Err(e) => AutoSaveOutcome::Err(e.to_string()),
+                        }
+                    };
+                    let res = AutoSaveRes {
+                        name: req.name,
+                        root: req.root,
+                        rev: req.rev,
+                        saved_text: req.saved_text,
+                        outcome,
+                    };
+                    let send_err = done.send(res).is_err();
+                    if let Ok(mut n) = pending_bg.0.lock() {
+                        *n = n.saturating_sub(1);
+                        pending_bg.1.notify_all();
+                    }
+                    if send_err {
+                        break;
+                    }
+                    wake();
+                }
+            });
+        Self { tx, rx, pending }
+    }
+
+    fn submit(&self, req: AutoSaveReq) -> bool {
+        if let Ok(mut n) = self.pending.0.lock() {
+            *n += 1;
+        }
+        if self.tx.send(req).is_err() {
+            if let Ok(mut n) = self.pending.0.lock() {
+                *n = n.saturating_sub(1);
+                self.pending.1.notify_all();
+            }
+            return false;
+        }
+        true
+    }
+
+    fn poll(&self) -> Vec<AutoSaveRes> {
+        self.rx.try_iter().collect()
+    }
+
+    fn wait_idle(&self) {
+        if let Ok(mut n) = self.pending.0.lock() {
+            while *n > 0 {
+                n = match self.pending.1.wait(n) {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+            }
+        }
+    }
+}
 
 struct App {
     root: PathBuf,
@@ -1034,7 +1145,11 @@ struct App {
     spell_worker: Option<spell::Worker>, // 전체 검사 작업 스레드 (처음 쓸 때 만든다)
     spell_ticket: u64,                   // 마지막으로 보낸 전체 검사 번호
     spell_rev: u64,
-    spell_block_cache: Option<(u64, u64, Vec<spell::SpellIssue>)>,
+    spell_block_cache: Option<(u64, u64, usize, Vec<spell::SpellIssue>)>,
+    live_spell_worker: Option<spell::Worker>, // 실시간 블록 검사 작업 스레드 (처음 쓸 때 만든다)
+    live_spell_ticket: u64,
+    live_spell_pending: Option<(u64, u64, Instant)>,
+    live_spell_submitted: Option<(u64, u64, u64, usize)>,
     font_family: String,
     md_cache: CommonMarkCache,
     status: String,
@@ -1058,6 +1173,8 @@ struct App {
     pending_click_pos: Option<(usize, egui::Pos2)>,
     focus_editor: bool,
     ime_composing: bool,
+    // 다중 커서(Ctrl+클릭 / Alt+드래그): 편집 중인 블록 id와 그 안의 추가 커서들(문자 인덱스)
+    extra_carets: Option<(egui::Id, Vec<usize>)>,
     pending_enter: bool,
     raw_table_mode: bool,
     table_focus_cell: Option<(usize, usize)>,
@@ -1076,6 +1193,8 @@ struct App {
     block_heights: HashMap<egui::Id, f32>,
     height_cache_key: (u32, u32),
     active_char_cache: (usize, u64, usize, usize),
+    active_line_cache: Option<(String, usize, u64, usize)>,
+    status_line_cache: Option<(String, u64, usize, usize)>,
     canvas_slots: Vec<Range<usize>>,
     canvas_items: Vec<(Range<usize>, bool, usize)>,
     canvas_rects: Vec<(Range<usize>, egui::Rect)>,
@@ -1084,6 +1203,8 @@ struct App {
     code_galley_cache: CodeGalleyCache,
     inline_galley_cache: InlineGalleyCache,
     table_cache: TableParseCache,
+    hanging_line_cache: HangingLineCache,
+    clear_galleys_next_frame: bool,
     line_num_buf: String,
     cached_scheme: (PathBuf, String),
     cached_root_label: (PathBuf, String),
@@ -1091,6 +1212,9 @@ struct App {
     scan_gen: u64,
     ectx: egui::Context,
     recovery_at: Option<Instant>,
+    recovery_sig: Vec<(String, u64)>,
+    auto_save_worker: Option<AutoSaveWorker>,
+    auto_save_in_flight: HashSet<String>,
     draft_dirty: bool,
     pasted: PastedSlot, // (대상 탭 키, 백그라운드 이미지 저장 결과)
     format_brush: Option<FormatSample>, // 복사해 둔 서식 (서식 복사 / 붙여넣기)
@@ -1184,6 +1308,10 @@ impl App {
             spell_ticket: 0,
             spell_rev: 0,
             spell_block_cache: None,
+            live_spell_worker: None,
+            live_spell_ticket: 0,
+            live_spell_pending: None,
+            live_spell_submitted: None,
             font_family,
             md_cache: CommonMarkCache::default(),
             status: String::new(),
@@ -1207,6 +1335,7 @@ impl App {
             pending_click_pos: None,
             focus_editor: false,
             ime_composing: false,
+            extra_carets: None,
             pending_enter: false,
             raw_table_mode: false,
             table_focus_cell: None,
@@ -1225,6 +1354,8 @@ impl App {
             block_heights: HashMap::new(),
             height_cache_key: (0, 0),
             active_char_cache: (usize::MAX, u64::MAX, 0, 0),
+            active_line_cache: None,
+            status_line_cache: None,
             canvas_slots: Vec::new(),
             canvas_items: Vec::new(),
             canvas_rects: Vec::new(),
@@ -1233,6 +1364,8 @@ impl App {
             code_galley_cache: HashMap::new(),
             inline_galley_cache: HashMap::new(),
             table_cache: HashMap::new(),
+            hanging_line_cache: (0, HashMap::new()),
+            clear_galleys_next_frame: false,
             line_num_buf: String::new(),
             cached_scheme: (PathBuf::new(), String::new()),
             cached_root_label: (PathBuf::new(), String::new()),
@@ -1240,6 +1373,9 @@ impl App {
             scan_gen: 0,
             ectx: cc.egui_ctx.clone(),
             recovery_at: None,
+            recovery_sig: Vec::new(),
+            auto_save_worker: None,
+            auto_save_in_flight: HashSet::new(),
             draft_dirty: false,
             pasted: Default::default(),
             format_brush: None,
@@ -1362,7 +1498,10 @@ impl App {
         self.pending_click_pos = None;
         self.cursor_info = None;
         self.active_char_cache = (usize::MAX, u64::MAX, 0, 0);
+        self.active_line_cache = None;
+        self.status_line_cache = None;
         self.editor_galley_cache = None;
+        self.clear_live_spell();
         if let Some(doc) = self.docs.get(name) {
             if doc.text.is_empty() {
                 self.active = Some(0);
@@ -1563,6 +1702,7 @@ impl App {
     }
 
     fn switch_root(&mut self, root: PathBuf, open: Option<String>) {
+        self.wait_auto_save();
         let keep_scratch = open.is_none()
             && self.current.as_deref().is_some_and(|k| {
                 is_scratch_key(k) && self.docs.get(k).is_some_and(|d| !d.text.is_empty())
@@ -1677,11 +1817,96 @@ impl App {
         ok
     }
 
+    fn poll_auto_save(&mut self) {
+        let results = self
+            .auto_save_worker
+            .as_ref()
+            .map(AutoSaveWorker::poll)
+            .unwrap_or_default();
+        for res in results {
+            self.auto_save_in_flight.remove(&res.name);
+            if res.root != self.root {
+                continue;
+            }
+            let Some(doc) = self.docs.get_mut(&res.name) else {
+                continue;
+            };
+            if doc.scratch {
+                continue;
+            }
+            match res.outcome {
+                AutoSaveOutcome::Saved { mtime } => {
+                    doc.saved = res.saved_text;
+                    doc.mtime = mtime;
+                    if doc.rev == res.rev {
+                        doc.edited_at = None;
+                        doc.dirty_flag = false;
+                    } else {
+                        doc.dirty_flag = doc.text.len() != doc.saved.len() || doc.text != doc.saved;
+                    }
+                }
+                AutoSaveOutcome::Conflict => {
+                    doc.edited_at = None;
+                    self.status = format!("{}: 다른 프로그램이 파일을 바꿨습니다", res.name);
+                    if self.dialog.is_none() {
+                        self.dialog = Some(Dialog::Conflict(res.name));
+                    }
+                }
+                AutoSaveOutcome::Err(e) => {
+                    doc.edited_at = Some(Instant::now());
+                    self.status = format!("저장 실패: {} — {e}", res.name);
+                }
+            }
+        }
+    }
+
+    fn wait_auto_save(&mut self) {
+        if !self.auto_save_in_flight.is_empty() {
+            if let Some(w) = &self.auto_save_worker {
+                w.wait_idle();
+            }
+        }
+        self.poll_auto_save();
+    }
+
+    fn submit_auto_save(&mut self, ctx: &egui::Context, name: &str) {
+        if is_scratch_key(name) || self.auto_save_in_flight.contains(name) {
+            return;
+        }
+        let path = self.root.join(name);
+        let Some(doc) = self.docs.get(name) else {
+            return;
+        };
+        if doc.scratch || !doc.dirty() {
+            return;
+        }
+        let req = AutoSaveReq {
+            name: name.to_string(),
+            root: self.root.clone(),
+            path,
+            encoded: doc.encoded(),
+            saved_text: doc.text.clone(),
+            prev_saved: doc.saved.clone(),
+            prev_mtime: doc.mtime,
+            rev: doc.rev,
+        };
+        let worker = self.auto_save_worker.get_or_insert_with(|| {
+            let ctx = ctx.clone();
+            AutoSaveWorker::new(move || ctx.request_repaint())
+        });
+        if worker.submit(req) {
+            self.auto_save_in_flight.insert(name.to_string());
+        } else {
+            self.save_quiet(name);
+        }
+    }
+
     // 자동 저장·종료 시 저장: 성공은 조용히(상태 알약이 알려 준다), 실패만 알린다
     fn save_quiet(&mut self, name: &str) -> bool {
         if is_scratch_key(name) {
             return false;
         }
+        self.wait_auto_save();
         let path = self.root.join(name);
         let Some(doc) = self.docs.get_mut(name) else {
             return false;
@@ -1722,10 +1947,11 @@ impl App {
 
     // 창으로 돌아왔을 때: 다른 프로그램이 열린 문서를 바꿨으면 다시 읽는다 (편집 중이면 경고만, 저장 때 묻는다)
     fn sync_from_disk(&mut self) {
+        self.poll_auto_save();
         let names: Vec<String> = self
             .docs
             .iter()
-            .filter(|(_, d)| !d.scratch)
+            .filter(|(n, d)| !d.scratch && !self.auto_save_in_flight.contains(*n))
             .map(|(n, _)| n.clone())
             .collect();
         for name in names {
@@ -1756,10 +1982,16 @@ impl App {
         }
     }
 
+    fn clear_live_spell(&mut self) {
+        self.spell_block_cache = None;
+        self.live_spell_pending = None;
+        self.live_spell_submitted = None;
+    }
+
     fn toggle_spellcheck(&mut self) {
         self.spellcheck = !self.spellcheck;
         self.spell_rev = self.spell_rev.wrapping_add(1);
-        self.spell_block_cache = None;
+        self.clear_live_spell();
         self.status = if self.spellcheck {
             "실시간 맞춤법 검사를 켰습니다".into()
         } else {
@@ -1774,11 +2006,101 @@ impl App {
         }
         self.spell_ignore.insert(key.to_string());
         self.spell_rev = self.spell_rev.wrapping_add(1);
-        self.spell_block_cache = None;
+        self.clear_live_spell();
         self.status = format!("사전에 무시 단어 추가: '{key}'");
     }
 
-    fn active_spell_issues(&mut self, block: &str) -> Vec<spell::SpellIssue> {
+    fn submit_live_spell(&mut self, ctx: &egui::Context, block: &str, bh: u64, block_start: usize) {
+        let worker = self.live_spell_worker.get_or_insert_with(|| {
+            let ctx_wake = ctx.clone();
+            spell::Worker::new_block(move || ctx_wake.request_repaint())
+        });
+        self.live_spell_ticket += 1;
+        let ticket = self.live_spell_ticket;
+        worker.submit(ticket, block.to_string(), self.spell_ignore.clone());
+        self.live_spell_submitted = Some((ticket, bh, self.spell_rev, block_start));
+    }
+
+    fn active_spell_issues(
+        &mut self,
+        ctx: &egui::Context,
+        block: &str,
+        block_start: usize,
+        ime_composing: bool,
+    ) -> Vec<spell::SpellIssue> {
+        if !self.spellcheck || block.is_empty() {
+            self.live_spell_pending = None;
+            return Vec::new();
+        }
+        if let Some((ticket, issues)) = self.live_spell_worker.as_ref().and_then(|w| w.poll()) {
+            if let Some((sub_t, sub_bh, sub_rev, sub_bs)) = self.live_spell_submitted {
+                if ticket == sub_t {
+                    self.live_spell_submitted = None;
+                    self.spell_block_cache = Some((sub_bh, sub_rev, sub_bs, issues));
+                }
+            }
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        block.hash(&mut h);
+        let bh = h.finish();
+        if let Some((cbh, crev, _, issues)) = &self.spell_block_cache {
+            if *cbh == bh && *crev == self.spell_rev {
+                self.live_spell_pending = None;
+                return issues.clone();
+            }
+        }
+        if !ime_composing {
+            let already_submitted = self
+                .live_spell_submitted
+                .is_some_and(|(_, sub_bh, sub_rev, _)| sub_bh == bh && sub_rev == self.spell_rev);
+            if !already_submitted {
+                let is_new_focus = self
+                    .spell_block_cache
+                    .as_ref()
+                    .is_none_or(|(_, _, bs, _)| *bs != block_start)
+                    && self
+                        .live_spell_submitted
+                        .is_none_or(|(_, _, _, bs)| bs != block_start)
+                    && self.live_spell_pending.is_none();
+                if is_new_focus {
+                    self.submit_live_spell(ctx, block, bh, block_start);
+                } else {
+                    match self.live_spell_pending {
+                        Some((pbh, prev, since)) if pbh == bh && prev == self.spell_rev => {
+                            let elapsed = since.elapsed();
+                            if elapsed >= LIVE_SPELL_DEBOUNCE {
+                                self.live_spell_pending = None;
+                                self.submit_live_spell(ctx, block, bh, block_start);
+                            } else {
+                                ctx.request_repaint_after(LIVE_SPELL_DEBOUNCE - elapsed);
+                            }
+                        }
+                        _ => {
+                            self.live_spell_pending = Some((bh, self.spell_rev, Instant::now()));
+                            ctx.request_repaint_after(LIVE_SPELL_DEBOUNCE);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, crev, cbs, issues)) = &self.spell_block_cache {
+            if *crev == self.spell_rev && *cbs == block_start {
+                return issues
+                    .iter()
+                    .filter(|i| block.get(i.range.clone()) == Some(i.word.as_str()))
+                    .cloned()
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
+    fn active_spell_issues_sync(
+        &mut self,
+        block: &str,
+        block_start: usize,
+    ) -> Vec<spell::SpellIssue> {
         if !self.spellcheck || block.is_empty() {
             return Vec::new();
         }
@@ -1786,13 +2108,14 @@ impl App {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         block.hash(&mut h);
         let bh = h.finish();
-        if let Some((cbh, crev, issues)) = &self.spell_block_cache {
+        if let Some((cbh, crev, _, issues)) = &self.spell_block_cache {
             if *cbh == bh && *crev == self.spell_rev {
                 return issues.clone();
             }
         }
         let issues = spell::check_block(block, &self.spell_ignore);
-        self.spell_block_cache = Some((bh, self.spell_rev, issues.clone()));
+        self.spell_block_cache = Some((bh, self.spell_rev, block_start, issues.clone()));
+        self.live_spell_pending = None;
         issues
     }
 
@@ -1837,7 +2160,7 @@ impl App {
         next.replace_range(rep_start..rep_end, replacement);
         let caret = char_len(&next[..rep_start]) + char_len(replacement);
         self.set_text(next, (caret, caret));
-        self.spell_block_cache = None;
+        self.clear_live_spell();
     }
 
     // issues: 지금 문서 텍스트로 검사한 결과
@@ -1883,9 +2206,52 @@ impl App {
             }
         }
         self.set_text(next, (0, 0));
-        self.spell_block_cache = None;
+        self.clear_live_spell();
         self.status = format!("맞춤법 {count}건을 교정했습니다");
         count
+    }
+
+    fn current_line_number(&mut self) -> Option<usize> {
+        let name = self.current.as_ref()?;
+        let (_, caret) = self.last_sel?;
+        let doc = self.docs.get(name)?;
+        if let Some((k, rev, c, ln)) = &self.status_line_cache {
+            if k == name && *rev == doc.rev && *c == caret {
+                return Some(*ln);
+            }
+        }
+        if let Some(r) = self.active_block() {
+            if self.active_char_cache.0 == r.start && self.active_char_cache.1 == doc.rev {
+                let base = self.active_char_cache.2;
+                let blen = self.active_char_cache.3;
+                if caret >= base && caret <= base + blen {
+                    let lines_before = self
+                        .active_line_cache
+                        .as_ref()
+                        .filter(|(k, bs, rv, _)| k == name && *bs == r.start && *rv == doc.rev)
+                        .map(|x| x.3)
+                        .unwrap_or_else(|| {
+                            let lb = doc.text[..r.start].bytes().filter(|&x| x == b'\n').count();
+                            self.active_line_cache = Some((name.clone(), r.start, doc.rev, lb));
+                            lb
+                        });
+                    let slice = &doc.text[r];
+                    let local_b = byte_idx(slice, caret - base);
+                    let ln =
+                        1 + lines_before + slice[..local_b].bytes().filter(|&x| x == b'\n').count();
+                    self.status_line_cache = Some((name.clone(), doc.rev, caret, ln));
+                    return Some(ln);
+                }
+            }
+        }
+        let ln = 1 + doc
+            .text
+            .chars()
+            .take(caret.min(doc.chars))
+            .filter(|&c| c == '\n')
+            .count();
+        self.status_line_cache = Some((name.clone(), doc.rev, caret, ln));
+        Some(ln)
     }
 
     // 문서 단위 실행 취소 / 다시 실행 (블록 나누기·합치기·서식·모두 바꾸기 포함)
@@ -1925,6 +2291,7 @@ impl App {
     }
 
     fn save_all(&mut self) -> bool {
+        self.wait_auto_save();
         let dirty: Vec<String> = self
             .docs
             .iter()
@@ -1990,6 +2357,7 @@ impl App {
     }
 
     fn save_as_path(&mut self, dest: &Path) -> Result<String, String> {
+        self.wait_auto_save();
         let Some(cur_key) = self.current.clone() else {
             return Err("열린 문서가 없습니다".into());
         };
@@ -2147,6 +2515,7 @@ impl App {
     }
 
     fn rename(&mut self, from: &str, input: &str) -> Result<(), String> {
+        self.wait_auto_save();
         let to = validate_name(input)?;
         if to == from {
             return Ok(());
@@ -2178,6 +2547,7 @@ impl App {
         if is_scratch_key(name) {
             return;
         }
+        self.wait_auto_save();
         match std::fs::remove_file(self.root.join(name)) {
             Ok(()) => {
                 if let Some(idx) = self.tabs.iter().position(|t| t == name) {
@@ -2323,16 +2693,26 @@ impl App {
         0
     }
 
+    fn clear_all_galley_caches(&mut self) {
+        self.editor_galley_cache = None;
+        self.code_galley_cache.clear();
+        self.inline_galley_cache.clear();
+        self.hanging_line_cache.1.clear();
+        self.block_heights.clear();
+        self.md_cache = CommonMarkCache::default();
+    }
+
     fn apply_font(&mut self, ctx: &egui::Context, font: String) {
         if self.font_family == font {
             return;
         }
         theme::install_fonts_with(ctx, &font);
         self.font_family = font;
-        self.editor_galley_cache = None;
-        self.code_galley_cache.clear();
-        self.inline_galley_cache.clear();
-        self.block_heights.clear();
+        // egui::Context::set_fonts takes effect in begin_pass of the NEXT frame.
+        // Defer clearing cached Galleys until the top of App::ui on the next frame
+        // so canvas in the current frame does not repopulate caches with old-atlas UVs.
+        self.clear_galleys_next_frame = true;
+        ctx.request_repaint();
     }
 
     fn is_visual_table_active(&self) -> bool {
@@ -4463,41 +4843,68 @@ impl App {
         ctx: &egui::Context,
         storage: Option<&mut (dyn eframe::Storage + 'static)>,
     ) {
+        self.poll_auto_save();
         let now = Instant::now();
-        // 저장 안 된 문서가 있으면 1초마다 복구용 스냅샷을 갱신한다 (없으면 비운다)
-        if self.any_dirty_incl_scratch() {
-            if self
-                .recovery_at
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1))
-            {
-                self.recovery_at = Some(now);
-                let snap: Vec<(PathBuf, String)> = self
-                    .docs
-                    .iter()
-                    .filter(|(_, d)| d.dirty())
-                    .map(|(n, d)| {
-                        let path = if is_scratch_key(n) {
-                            let tag = n.replace(':', "");
-                            home()
-                                .join("Documents")
-                                .join("MDEditor")
-                                .join(format!("recovered-scratch{tag}.md"))
-                        } else {
-                            let mut p = self.root.join(n).into_os_string();
-                            p.push(".recovered.md");
-                            PathBuf::from(p)
-                        };
-                        (path, d.text.clone())
-                    })
-                    .collect();
+        // 저장 안 된 문서가 있으면 변경이 있고 입력이 잠깐 멈춘 뒤 복구용 스냅샷을 갱신한다
+        if !self.any_dirty_incl_scratch() {
+            if !self.recovery_sig.is_empty() || self.recovery_at.take().is_some() {
+                self.recovery_sig.clear();
                 if let Ok(mut r) = RECOVERY.lock() {
-                    *r = snap;
+                    r.clear();
                 }
             }
-            ctx.request_repaint_after(Duration::from_secs(1));
-        } else if self.recovery_at.take().is_some() {
-            if let Ok(mut r) = RECOVERY.lock() {
-                r.clear();
+        } else {
+            let mut sig: Vec<(String, u64)> = self
+                .docs
+                .iter()
+                .filter(|(_, d)| d.dirty())
+                .map(|(n, d)| (n.clone(), d.rev))
+                .collect();
+            sig.sort_by(|a, b| a.0.cmp(&b.0));
+            if sig != self.recovery_sig {
+                let mut wait = Duration::ZERO;
+                for d in self.docs.values().filter(|d| d.dirty()) {
+                    if let Some(t) = d.edited_at {
+                        let e = now.duration_since(t);
+                        if e < Duration::from_millis(500) {
+                            wait = wait.max(Duration::from_millis(500) - e);
+                        }
+                    }
+                }
+                if let Some(t) = self.recovery_at {
+                    let e = now.duration_since(t);
+                    if e < Duration::from_secs(2) {
+                        wait = wait.max(Duration::from_secs(2) - e);
+                    }
+                }
+                if wait.is_zero() {
+                    self.recovery_at = Some(now);
+                    self.recovery_sig = sig;
+                    let snap: Vec<(PathBuf, String)> = self
+                        .docs
+                        .iter()
+                        .filter(|(_, d)| d.dirty())
+                        .map(|(n, d)| {
+                            let path = if is_scratch_key(n) {
+                                let tag = n.replace(':', "");
+                                home()
+                                    .join("Documents")
+                                    .join("MDEditor")
+                                    .join(format!("recovered-scratch{tag}.md"))
+                            } else {
+                                let mut p = self.root.join(n).into_os_string();
+                                p.push(".recovered.md");
+                                PathBuf::from(p)
+                            };
+                            (path, d.text.clone())
+                        })
+                        .collect();
+                    if let Ok(mut r) = RECOVERY.lock() {
+                        *r = snap;
+                    }
+                } else {
+                    ctx.request_repaint_after(wait.max(Duration::from_millis(50)));
+                }
             }
         }
         let mut due = Vec::new();
@@ -4508,7 +4915,7 @@ impl App {
                 if elapsed >= AUTO_SAVE_DELAY {
                     if doc.scratch {
                         flush_draft = true;
-                    } else {
+                    } else if !self.auto_save_in_flight.contains(name) {
                         due.push(name.clone());
                     }
                 } else {
@@ -4534,7 +4941,7 @@ impl App {
             }
         }
         for name in due {
-            self.save_quiet(&name);
+            self.submit_auto_save(ctx, &name);
         }
     }
 
@@ -4992,6 +5399,9 @@ impl App {
         if self.dialog.is_some() {
             return;
         }
+        if self.extra_carets.is_some() && self.multi_caret_keys(ctx) {
+            return;
+        }
         let has_block_sel = self.block_sel.is_some();
         let (
             any_key,
@@ -5363,6 +5773,55 @@ impl App {
                 k(Modifiers::NONE, Key::ArrowRight);
             }
         }
+    }
+
+    // 다중 커서 중 키 처리. Esc는 추가 커서만 끈다. Backspace/Delete는 블록 병합 같은 특수 처리를 건너뛰고
+    // TextEdit에 맡긴다(편집은 block_editor가 모든 커서에 복제). 이동·Enter·Tab·단축키는 추가 커서를 끄고 평소대로.
+    // 반환값이 true면 나머지 단축키 처리를 건너뛴다.
+    fn multi_caret_keys(&mut self, ctx: &egui::Context) -> bool {
+        let (mut esc, mut clear, mut plain_edit) = (false, false, false);
+        ctx.input(|i| {
+            for e in &i.events {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = e
+                else {
+                    continue;
+                };
+                match key {
+                    Key::Escape => esc = true,
+                    Key::Backspace | Key::Delete if modifiers.is_none() => plain_edit = true,
+                    Key::V | Key::C if modifiers.command_only() => {}
+                    Key::Enter
+                    | Key::Tab
+                    | Key::ArrowUp
+                    | Key::ArrowDown
+                    | Key::ArrowLeft
+                    | Key::ArrowRight
+                    | Key::Home
+                    | Key::End
+                    | Key::PageUp
+                    | Key::PageDown
+                    | Key::Backspace
+                    | Key::Delete => clear = true,
+                    _ if modifiers.command || modifiers.alt => clear = true,
+                    _ => {}
+                }
+            }
+        });
+        if esc {
+            ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+            self.extra_carets = None;
+            return true;
+        }
+        if clear {
+            self.extra_carets = None;
+            return false;
+        }
+        plain_edit
     }
 
     fn open_find(&mut self, ctx: &egui::Context, replace: bool) {
@@ -6829,6 +7288,122 @@ mod tests {
         h.run_steps(2);
         assert_eq!(h.state().doc().unwrap().text, " 연속타이핑 테스트!123");
         check_sync(h.state().doc().unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_click_multi_caret_and_alt_drag_column_edit() {
+        use egui_kittest::kittest::Queryable;
+        let dir = std::env::temp_dir().join("mdeditor_multi_caret_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "- 하나\n- 둘\n- 셋";
+        let file = dir.join("multi.md");
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+        h.state_mut().go(0, 0);
+        h.run_steps(3);
+        let text = |h: &egui_kittest::Harness<'_, App>| h.state().doc().unwrap().text.clone();
+        let rect = h
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .rect();
+        // 각 줄 끝(오른쪽 끝)을 누른다
+        let line_end = |i: usize| {
+            let row_h = rect.height() / 3.0;
+            egui::pos2(rect.right() - 4.0, rect.top() + row_h * (i as f32 + 0.5))
+        };
+        let press = |h: &mut egui_kittest::Harness<'_, App>, pos, pressed, m: egui::Modifiers| {
+            h.input_mut().events.push(egui::Event::ModifiersChanged(m));
+            h.input_mut().events.push(egui::Event::PointerMoved(pos));
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: m,
+            });
+            h.step();
+        };
+        let click = |h: &mut egui_kittest::Harness<'_, App>, pos, m: egui::Modifiers| {
+            press(h, pos, true, m);
+            press(h, pos, false, m);
+            h.input_mut()
+                .events
+                .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            h.run_steps(2);
+        };
+
+        // 1. 클릭 + Ctrl+클릭 두 번 → 세 줄 끝에 커서, 타이핑·Backspace가 모든 줄에 들어간다
+        click(&mut h, line_end(0), egui::Modifiers::NONE);
+        click(&mut h, line_end(1), egui::Modifiers::COMMAND);
+        click(&mut h, line_end(2), egui::Modifiers::COMMAND);
+        assert_eq!(h.state().extra_carets.as_ref().map(|e| e.1.len()), Some(2));
+        h.event(egui::Event::Text("X".into()));
+        h.run_steps(2);
+        assert_eq!(text(&h), "- 하나X\n- 둘X\n- 셋X");
+        h.event(egui::Event::Text("Y".into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(2);
+        assert_eq!(text(&h), "- 하나X\n- 둘X\n- 셋X");
+        // 한글 조합도 모든 커서에 (Preedit → Commit)
+        for ime in [
+            egui::ImeEvent::Preedit {
+                text: "ㄱ".into(),
+                active_range_chars: None,
+            },
+            egui::ImeEvent::Preedit {
+                text: "가".into(),
+                active_range_chars: None,
+            },
+            egui::ImeEvent::Commit("가".into()),
+        ] {
+            h.event(egui::Event::Ime(ime));
+            h.run_steps(2);
+        }
+        assert_eq!(text(&h), "- 하나X가\n- 둘X가\n- 셋X가");
+        // Esc는 추가 커서만 끄고 편집은 계속
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().extra_carets.is_none());
+        assert!(h.state().active.is_some());
+        h.event(egui::Event::Text("!".into()));
+        h.run_steps(2);
+        assert_eq!(text(&h), "- 하나X가\n- 둘X가\n- 셋X가!");
+
+        // 2. Alt+드래그(첫 줄 → 셋째 줄)로 세로 열 커서
+        let rect = h
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .rect();
+        let x = rect.left() + 400.0; // 모든 줄보다 오른쪽 → 각 줄 끝
+        let row_h = rect.height() / 3.0;
+        let (a, b) = (
+            egui::pos2(x.min(rect.right() - 4.0), rect.top() + row_h * 0.5),
+            egui::pos2(x.min(rect.right() - 4.0), rect.top() + row_h * 2.5),
+        );
+        press(&mut h, a, true, egui::Modifiers::ALT);
+        for k in 1..=4 {
+            let pos = a + (b - a) * (k as f32 / 4.0);
+            h.input_mut().events.push(egui::Event::PointerMoved(pos));
+            h.step();
+        }
+        press(&mut h, b, false, egui::Modifiers::ALT);
+        h.input_mut()
+            .events
+            .push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run_steps(2);
+        assert_eq!(h.state().extra_carets.as_ref().map(|e| e.1.len()), Some(2));
+        h.event(egui::Event::Text("#".into()));
+        h.run_steps(2);
+        assert_eq!(text(&h), "- 하나X가#\n- 둘X가#\n- 셋X가!#");
+        // 일반 클릭은 추가 커서를 끈다
+        click(&mut h, line_end(0), egui::Modifiers::NONE);
+        assert!(h.state().extra_carets.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9005,6 +9580,457 @@ Hello teh world.
                 );
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_spellcheck_is_async_debounced_and_deferred_during_ime() {
+        let dir = std::env::temp_dir().join("mdeditor_live_spell_async");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("doc.md");
+        std::fs::write(&file, "첫 줄\n").unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.state_mut().go(0, 3);
+        h.run_steps(3);
+        // 초기 포커스 검사 완료 대기
+        for _ in 0..40 {
+            if h.state().spell_block_cache.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            h.step();
+        }
+        assert!(h.state().spell_block_cache.is_some());
+        let initial_tickets = h.state().live_spell_ticket;
+
+        // 1. IME 조합 중(Preedit)에는 동기/비동기 검사 모두 보류된다
+        h.event(egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: "됬".into(),
+            active_range_chars: Some(0..1),
+        }));
+        h.step();
+        assert!(h.state().ime_composing);
+        assert_eq!(h.state().live_spell_ticket, initial_tickets);
+        assert!(h.state().live_spell_pending.is_none());
+
+        // 2. Commit 직후에는 디바운스 대기 중이라 아직 워커로 제출되지 않지만,
+        //    우클릭 메뉴용 active_spell_issues_sync는 즉시 결과를 돌려준다.
+        h.event(egui::Event::Ime(egui::ImeEvent::Commit("됬습니다".into())));
+        h.step();
+        assert!(!h.state().ime_composing);
+        assert!(h.state().live_spell_pending.is_some());
+        assert_eq!(h.state().live_spell_ticket, initial_tickets);
+
+        let block_text = h.state().doc().unwrap().text.clone();
+        let sync_issues = h
+            .state_mut()
+            .active_spell_issues_sync(block_text.trim_end(), 0);
+        assert!(sync_issues.iter().any(|i| i.word == "됬"));
+
+        // 3. 다시 오타가 있는 새 내용 입력 후 디바운스를 넘기면 비동기 워커가 캐시를 채운다
+        h.event(egui::Event::Text(" 몇일".into()));
+        h.step();
+        assert!(h.state().live_spell_pending.is_some());
+        assert_eq!(h.state().live_spell_ticket, initial_tickets);
+        std::thread::sleep(LIVE_SPELL_DEBOUNCE + Duration::from_millis(40));
+        for _ in 0..60 {
+            h.step();
+            if h.state()
+                .spell_block_cache
+                .as_ref()
+                .is_some_and(|(_, _, _, v)| v.iter().any(|i| i.word == "몇일"))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(h.state().live_spell_ticket > initial_tickets);
+        assert!(h
+            .state()
+            .spell_block_cache
+            .as_ref()
+            .is_some_and(|(_, _, _, v)| v.iter().any(|i| i.word == "몇일")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_bar_current_line_cache_matches_exact_line() {
+        let dir = std::env::temp_dir().join("mdeditor_line_cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "첫째 블록\n둘째 줄\n\n셋째 블록 첫줄\n셋째 블록 둘째줄\n\n마지막 블록\n";
+        let file = dir.join("doc.md");
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(2);
+
+        let expected = |state: &App| {
+            let d = state.doc().unwrap();
+            let (_, caret) = state.last_sel.unwrap();
+            let b = byte_idx(&d.text, caret.min(d.chars));
+            1 + d.text[..b].bytes().filter(|&x| x == b'\n').count()
+        };
+
+        for pos in [
+            0,
+            src.find("둘째 줄").unwrap() + 3,
+            src.find("셋째 블록 둘째줄").unwrap() + 3,
+            src.find("마지막 블록").unwrap() + 3,
+        ] {
+            h.state_mut().go(pos, pos);
+            h.run_steps(2);
+            let got = h.state_mut().current_line_number();
+            assert_eq!(got, Some(expected(h.state())), "pos={pos}");
+            // 2차 호출은 O(1) status_line_cache 적중
+            assert_eq!(h.state_mut().current_line_number(), got);
+        }
+
+        // 활성 블록 안 타이핑 및 줄바꿈 후에도 캐시가 정확한 줄 번호를 낸다
+        h.event(egui::Event::Text("\n새 줄 한글".into()));
+        h.run_steps(2);
+        let got = h.state_mut().current_line_number();
+        assert_eq!(got, Some(expected(h.state())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_auto_save_writes_handles_concurrent_edits_and_conflicts() {
+        let dir = std::env::temp_dir().join("mdeditor_bg_autosave");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.md");
+        std::fs::write(&file, "초기\n").unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(2);
+
+        // 1. 일반 백그라운드 저장: 완료 후 dirty 해제
+        {
+            let doc = h.state_mut().docs.get_mut("note.md").unwrap();
+            doc.text = "백그라운드 저장\n".into();
+            doc.refresh_meta();
+        }
+        let ctx = h.ctx.clone();
+        h.state_mut().submit_auto_save(&ctx, "note.md");
+        assert!(h.state().auto_save_in_flight.contains("note.md"));
+        h.state_mut().wait_auto_save();
+        assert!(!h.state().auto_save_in_flight.contains("note.md"));
+        assert!(!h.state().docs.get("note.md").unwrap().dirty());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "백그라운드 저장\n");
+
+        // 2. 저장 진행 중 추가 편집이 있으면 dirty 상태를 유지한다
+        {
+            let doc = h.state_mut().docs.get_mut("note.md").unwrap();
+            doc.text = "저장 1단계\n".into();
+            doc.refresh_meta();
+        }
+        h.state_mut().submit_auto_save(&ctx, "note.md");
+        {
+            let doc = h.state_mut().docs.get_mut("note.md").unwrap();
+            doc.text = "저장 2단계\n".into();
+            doc.edited_at = Some(Instant::now());
+            doc.refresh_meta();
+        }
+        h.state_mut().wait_auto_save();
+        assert!(h.state().docs.get("note.md").unwrap().dirty());
+
+        // 3. 외부 변경 시 Conflict 대화상자를 띄우고 파일을 덮어쓰지 않는다
+        assert!(h.state_mut().save_quiet("note.md"));
+        std::fs::write(&file, "외부 수정\n").unwrap();
+        let fh = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+        fh.set_modified(std::time::SystemTime::now() + Duration::from_secs(30))
+            .unwrap();
+        drop(fh);
+        {
+            let doc = h.state_mut().docs.get_mut("note.md").unwrap();
+            doc.text = "내 미저장 수정\n".into();
+            doc.refresh_meta();
+        }
+        h.state_mut().submit_auto_save(&ctx, "note.md");
+        h.state_mut().wait_auto_save();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "외부 수정\n");
+        assert!(matches!(h.state().dialog, Some(Dialog::Conflict(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hanging_line_cache_reuses_unchanged_list_lines() {
+        let dir = std::env::temp_dir().join("mdeditor_hanging_cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "- 첫째 항목입니다\n- 둘째 항목입니다\n- 셋째 항목입니다\n";
+        let file = dir.join("list.md");
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 700.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.state_mut().go(0, src.find("둘째").unwrap());
+        h.run_steps(3);
+        let entries_before = h.state().hanging_line_cache.1.len();
+        assert!(entries_before >= 3, "entries={entries_before}");
+
+        // 둘째 줄만 고쳤을 때 기존 첫째/셋째 줄 캐시는 유지되고 새 줄만 1개 추가된다
+        h.event(egui::Event::Text("가".into()));
+        h.run_steps(2);
+        let entries_after = h.state().hanging_line_cache.1.len();
+        assert_eq!(entries_after, entries_before + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn todo_checklist_toggles_in_edit_and_view_modes_and_supports_typing_shortcuts() {
+        use egui_kittest::kittest::Queryable;
+
+        // 1. 타이핑 단축 입력([], [ ], [x], - [], * [], + []) 및 블록 유형 변환 검증
+        for (input, expect_prefix) in [
+            ("[] 할 일", "- [ ] 할 일"),
+            ("[ ] 할 일", "- [ ] 할 일"),
+            ("[x] 완료", "- [x] 완료"),
+            ("[X] 완료", "- [x] 완료"),
+            ("- [] 할 일", "- [ ] 할 일"),
+            ("* [] 할 일", "* [ ] 할 일"),
+            ("+ [] 할 일", "+ [ ] 할 일"),
+        ] {
+            let caret = input.find(']').unwrap() + 2;
+            let (out, _) = textops::normalize_typed_line_marker(input, caret)
+                .unwrap_or_else(|| panic!("단축 입력이 정규화되어야 함: {input:?}"));
+            assert_eq!(out, expect_prefix);
+        }
+        assert_eq!(
+            textops::detect_line_kind("* [X] 완료됨").1,
+            Some(textops::BlockKind::Todo)
+        );
+        assert_eq!(
+            textops::toggle_todo_lines("일반 줄", (0, 0)).0,
+            "- [ ] 일반 줄"
+        );
+        assert_eq!(
+            textops::toggle_todo_lines("* [x] 끝남", (0, 0)).0,
+            "- [ ] 끝남"
+        );
+        assert_eq!(
+            textops::convert_lines_kind("* [x] 끝남", (0, 0), textops::BlockKind::Todo).0,
+            "끝남"
+        );
+
+        // 2. 보기 모드와 편집 모드 양쪽에서 체크박스 클릭으로 [ ] <-> [x] 전환
+        let dir = std::env::temp_dir().join("mdeditor_todo_checklist_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "- [ ] 첫 번째 할 일\n- [x] 두 번째 완료";
+        let file = dir.join("todo.md");
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(960.0, 680.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+
+        // 보기 모드: 첫 번째 체크박스([ ]) 클릭 -> [x]
+        {
+            let boxes = h.get_all_by_role(egui::accesskit::Role::CheckBox);
+            assert_eq!(boxes.count(), 2);
+        }
+        h.get_all_by_role(egui::accesskit::Role::CheckBox)
+            .next()
+            .unwrap()
+            .click();
+        h.run_steps(3);
+        assert_eq!(
+            h.state().doc().unwrap().text,
+            "- [x] 첫 번째 할 일\n- [x] 두 번째 완료"
+        );
+
+        // 편집 모드로 진입 후 두 번째 체크박스([x]) 클릭 -> [ ]
+        h.state_mut().go(0, src.len());
+        h.run_steps(3);
+        assert!(h.state().active.is_some());
+        h.get_all_by_role(egui::accesskit::Role::CheckBox)
+            .nth(1)
+            .unwrap()
+            .click();
+        h.run_steps(3);
+        assert_eq!(
+            h.state().doc().unwrap().text,
+            "- [x] 첫 번째 할 일\n- [ ] 두 번째 완료"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn line_numbers_show_every_line_of_lists_and_multiline_blocks() {
+        let dir = std::env::temp_dir().join("mdeditor_multiline_linenum_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d2 = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(960.0, 680.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| {
+                let mut app = App::new(cc, None, &d2);
+                app.line_numbers = true;
+                app
+            });
+        h.run_steps(2);
+
+        let check_offsets =
+            |h: &mut egui_kittest::Harness<App>, block: &str, expected: &[usize]| {
+                let p = theme::pal(false);
+                let test_ctx = egui::Context::default();
+                theme::install_fonts(&test_ctx);
+                let mut offsets = Vec::new();
+                let mut out_frame = test_ctx.run_ui(egui::RawInput::default(), |ui| {
+                    ui.allocate_ui(egui::vec2(640.0, 600.0), |ui| {
+                        let out = h.state_mut().render_block(
+                            ui,
+                            &p,
+                            block,
+                            0..block.len(),
+                            0,
+                            15.0,
+                            640.0,
+                            "file:///",
+                        );
+                        offsets = out.line_ys;
+                    });
+                });
+                out_frame.textures_delta.clear();
+                offsets.sort_by_key(|&(off, _)| off);
+                offsets.dedup_by_key(|x| x.0);
+                let got: Vec<usize> = offsets.iter().map(|&(off, _)| off).collect();
+                assert_eq!(got, expected, "block={block:?}, offsets={offsets:?}");
+                for w in offsets.windows(2) {
+                    assert!(
+                        w[1].1 > w[0].1,
+                        "줄 번호 Y 좌표는 증가해야 함: {:?} in {block:?}",
+                        offsets
+                    );
+                }
+            };
+
+        check_offsets(&mut h, "- 첫째\n  - 중첩\n- 둘째\n- 셋째", &[0, 1, 2, 3]);
+        check_offsets(&mut h, "1. 하나\n2. 둘\n3. 셋", &[0, 1, 2]);
+        check_offsets(&mut h, "- [ ] 할 일\n* [x] 완료", &[0, 1]);
+        check_offsets(&mut h, "첫 줄\n둘째 줄\n셋째 줄", &[0, 1, 2]);
+
+        // 실제 App 캔버스에서 편집 모드 + 보기 모드 양쪽 렌더링도 패닉 없이 완료된다
+        let doc_text = "- 첫째\n  - 중첩\n- 둘째\n\n1. 번호1\n2. 번호2";
+        h.state_mut().set_text(doc_text.into(), (0, 0));
+        h.state_mut().pending_sel = None;
+        h.state_mut().go(0, 2);
+        h.run_steps(3);
+        assert!(h.state().line_numbers);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn font_switch_clears_view_galley_caches_on_next_frame_after_atlas_reload() {
+        use egui_kittest::kittest::Queryable;
+
+        let dir = std::env::temp_dir().join("mdeditor_font_switch_galley_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "# **제목**\n\n본문 **강조** 문단입니다.\n\n```rust\nlet x = 1;\n```\n";
+        let file = dir.join("font.md");
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1024.0, 720.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+
+        assert!(h.state().active.is_none());
+        let inline_before: Vec<usize> = h
+            .state()
+            .inline_galley_cache
+            .values()
+            .map(|(g, _)| std::sync::Arc::as_ptr(g) as usize)
+            .collect();
+        let code_before: Vec<usize> = h
+            .state()
+            .code_galley_cache
+            .values()
+            .map(|(g, _)| std::sync::Arc::as_ptr(g) as usize)
+            .collect();
+        assert!(!inline_before.is_empty());
+        assert!(!code_before.is_empty());
+
+        let (target_id, target_label) = theme::available_fonts()
+            .iter()
+            .find(|(id, _)| id != "auto")
+            .expect("기본 이외의 글꼴 프리셋이 있어야 함")
+            .clone();
+
+        // Frame N: 상태바 글꼴 메뉴(canvas 이전 실행)로 글꼴을 바꾸고, 다음 프레임 아틀라스 로드 후 캐시가 비워진다
+        h.get_by_label("글꼴: 기본").click();
+        h.run_steps(2);
+        h.get_by_label(target_label.as_str()).click();
+        h.run_steps(2);
+        if h.state().clear_galleys_next_frame {
+            h.step();
+        }
+        assert!(!h.state().clear_galleys_next_frame);
+        assert_eq!(h.state().font_family, target_id);
+        let inline_after: Vec<usize> = h
+            .state()
+            .inline_galley_cache
+            .values()
+            .map(|(g, _)| std::sync::Arc::as_ptr(g) as usize)
+            .collect();
+        let code_after: Vec<usize> = h
+            .state()
+            .code_galley_cache
+            .values()
+            .map(|(g, _)| std::sync::Arc::as_ptr(g) as usize)
+            .collect();
+        assert!(!inline_after.is_empty());
+        assert!(!code_after.is_empty());
+        assert!(
+            inline_after.iter().all(|p| !inline_before.contains(p)),
+            "이전 아틀라스 기준 인라인 Galley가 남아 있으면 안 됨"
+        );
+        assert!(
+            code_after.iter().all(|p| !code_before.contains(p)),
+            "이전 아틀라스 기준 코드 Galley가 남아 있으면 안 됨"
+        );
+
+        // 가운데 맞춤 <-> 전체 너비 전환 후에도 이전 아틀라스 Galley가 재사용되지 않는다
+        h.state_mut().full_width = true;
+        h.run_steps(2);
+        h.state_mut().full_width = false;
+        h.run_steps(2);
+        assert!(
+            h.state()
+                .inline_galley_cache
+                .values()
+                .all(|(g, _)| !inline_before.contains(&(std::sync::Arc::as_ptr(g) as usize))),
+            "가운데 맞춤 복귀 후에도 이전 아틀라스 인라인 Galley가 남아 있으면 안 됨"
+        );
+        assert!(
+            h.state()
+                .code_galley_cache
+                .values()
+                .all(|(g, _)| !code_before.contains(&(std::sync::Arc::as_ptr(g) as usize))),
+            "가운데 맞춤 복귀 후에도 이전 아틀라스 코드 Galley가 남아 있으면 안 됨"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
