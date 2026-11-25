@@ -9419,9 +9419,11 @@ fn render_markdown_native(
     // 항상 번호 목록으로 서식화되도록 정규화하고 바이트 위치를 매핑한다.
     let mut norm = String::new();
     let mut line_map: Vec<(usize, usize)> = Vec::new();
-    let needs_norm = src
-        .lines()
-        .any(|l| l.starts_with(' ') || list_cols(l).is_some_and(|(ind, col)| col > ind + 2));
+    let needs_norm = src.lines().any(|l| {
+        l.starts_with(' ')
+            || plus_line_start(l).is_some()
+            || list_cols(l).is_some_and(|(ind, col)| col > ind + 2)
+    });
     if needs_norm {
         norm.reserve(src.len());
         let mut in_fence = false;
@@ -9437,6 +9439,10 @@ fn render_markdown_native(
             let strip = if in_fence { 0 } else { line.len() - t.len() };
             let rest = &line[strip..];
             line_map.push((norm.len(), cur_r + strip));
+            if !in_fence && rest.starts_with("+ ") {
+                norm.push('\\'); // "+ "는 목록이 아닌 글자 (escape_plus_lines와 같은 규칙)
+                line_map.push((norm.len(), cur_r + strip));
+            }
             if !in_fence {
                 if let Some((0, col)) = list_cols(rest) {
                     if col > 2 {

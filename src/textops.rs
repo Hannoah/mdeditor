@@ -577,7 +577,7 @@ pub(crate) fn indent_lines(s: &str, (a, b): Sel, outdent: bool) -> (String, Sel)
 pub(crate) fn list_cols(line: &str) -> Option<(usize, usize)> {
     let ind = line.len() - line.trim_start_matches(' ').len();
     let rest = &line[ind..];
-    if ["- ", "* ", "+ "].iter().any(|b| rest.starts_with(b)) {
+    if ["- ", "* "].iter().any(|b| rest.starts_with(b)) {
         return Some((ind, ind + 2));
     }
     let d = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -982,7 +982,7 @@ fn is_bare_empty_marker_line(line: &str) -> bool {
     let t = line.trim();
     if matches!(
         t,
-        "-" | "*" | "+" | ">" | "- [ ]" | "- [x]" | "- [X]" | "* [ ]" | "* [x]" | "* [X]"
+        "-" | "*" | ">" | "- [ ]" | "- [x]" | "- [X]" | "* [ ]" | "* [x]" | "* [X]"
     ) {
         return true;
     }
@@ -1258,7 +1258,7 @@ pub(crate) fn normalize_typed_line_marker(s: &str, caret: usize) -> Option<(Stri
     let rest = &line[ind..];
 
     // 1) 할 일 체크리스트 입력 단축키: "[] ", "[ ] ", "[x] ", "- [] " 등 입력 시 즉시 체크리스트로 변환
-    for bullet in ["-", "*", "+"] {
+    for bullet in ["-", "*"] {
         let short_task = format!("{bullet} [] ");
         if rest.starts_with(&short_task) && caret == ls + ind + 5 {
             let rep = format!("{bullet} [ ] ");
@@ -1737,9 +1737,7 @@ pub(crate) fn indent_list(s: &str, (a, b): Sel, outdent: bool) -> Option<(String
     Some((lines.join("\n"), sel))
 }
 
-const TASK_MARKERS: [&str; 9] = [
-    "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ", "+ [X] ",
-];
+const TASK_MARKERS: [&str; 6] = ["- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] "];
 
 // 목록 줄 분석: (들여쓰기, 다음 줄에 쓸 기호, 현재 기호 길이(문자), 내용이 비었는지)
 pub(crate) fn list_marker(line: &str) -> Option<(String, String, usize, bool)> {
@@ -1751,7 +1749,7 @@ pub(crate) fn list_marker(line: &str) -> Option<(String, String, usize, bool)> {
             return Some((indent.into(), next, char_len(task), body.trim().is_empty()));
         }
     }
-    for bullet in ["- ", "* ", "+ "] {
+    for bullet in ["- ", "* "] {
         if let Some(body) = rest.strip_prefix(bullet) {
             return Some((indent.into(), bullet.into(), 2, body.trim().is_empty()));
         }
@@ -1779,7 +1777,7 @@ pub(crate) fn list_marker_bytes(line: &str) -> Option<usize> {
             return Some(indent + task.len());
         }
     }
-    for bullet in ["- ", "* ", "+ "] {
+    for bullet in ["- ", "* "] {
         if rest.starts_with(bullet) {
             return Some(indent + bullet.len());
         }
@@ -1872,7 +1870,7 @@ pub(crate) fn detect_line_kind(line: &str) -> (usize, Option<BlockKind>, usize) 
             return (indent, Some(BlockKind::Todo), task.len());
         }
     }
-    for bullet in ["- ", "* ", "+ "] {
+    for bullet in ["- ", "* "] {
         if rest.starts_with(bullet) {
             return (indent, Some(BlockKind::Bullet), bullet.len());
         }
@@ -1973,7 +1971,6 @@ pub(crate) fn toggle_todo_lines(s: &str, (a, b): Sel) -> (String, Sel) {
             let new_line = if let Some(body) = rest
                 .strip_prefix("- [ ] ")
                 .or_else(|| rest.strip_prefix("* [ ] "))
-                .or_else(|| rest.strip_prefix("+ [ ] "))
             {
                 format!("{ind}- [x] {body}")
             } else if let Some(body) = rest
@@ -1981,8 +1978,6 @@ pub(crate) fn toggle_todo_lines(s: &str, (a, b): Sel) -> (String, Sel) {
                 .or_else(|| rest.strip_prefix("- [X] "))
                 .or_else(|| rest.strip_prefix("* [x] "))
                 .or_else(|| rest.strip_prefix("* [X] "))
-                .or_else(|| rest.strip_prefix("+ [x] "))
-                .or_else(|| rest.strip_prefix("+ [X] "))
             {
                 format!("{ind}- [ ] {body}")
             } else {
@@ -2204,6 +2199,35 @@ pub(crate) fn outline(s: &str) -> Vec<(usize, String, usize, usize)> {
 // 미리보기 전용 변환. 바이트 길이를 보존해서 체크박스 위치가 원문과 1:1로 대응한다.
 //   :::toggle 제목 → ##### ▸ 제목,  ::: → 공백,  ==형광펜== → **형광펜**,  [[Ctrl]] → ``Ctrl``
 // 확장 문법이 없는 일반 블록은 힙 할당 없이 원본 슬라이스(Cow::Borrowed)를 그대로 돌려준다.
+// 이 앱에서 줄머리 "+ "는 목록 기호가 아니라 글자 "+" (CommonMark와 다름). 파서에 넘기기 전 "\+"로 바꾼다.
+pub(crate) fn plus_line_start(line: &str) -> Option<usize> {
+    let ind = line.len() - line.trim_start_matches(' ').len();
+    (ind < 4 && line[ind..].starts_with("+ ")).then_some(ind)
+}
+
+pub(crate) fn escape_plus_lines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut fence = false;
+    for (i, line) in s.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fence = !fence;
+        }
+        match plus_line_start(line).filter(|_| !fence) {
+            Some(ind) => {
+                out.push_str(&line[..ind]);
+                out.push('\\');
+                out.push_str(&line[ind..]);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
 pub(crate) fn preprocess(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains(":::") && !s.contains("==") && !s.contains("[[") {
         return std::borrow::Cow::Borrowed(s);
@@ -2309,7 +2333,7 @@ pub(crate) fn md_to_html(md: &str) -> String {
         | Options::ENABLE_DEFINITION_LIST
         | Options::ENABLE_MATH
         | Options::ENABLE_GFM;
-    let src = preprocess(md);
+    let src = escape_plus_lines(&preprocess(md));
     let is_dangerous_url = |url: &str| {
         let cleaned: String = url
             .chars()
@@ -2843,5 +2867,30 @@ mod multi_caret_tests {
         assert_eq!((t.as_str(), ex, sh), ("- a1\n- 2", vec![2], 0));
         let (t, ex, _) = replicate_edit("ab\ncd", "abcd", 2, 2, &[5]);
         assert_eq!((t.as_str(), ex), ("ab\ncd", vec![5]));
+    }
+}
+
+#[cfg(test)]
+mod plus_tests {
+    use super::*;
+
+    #[test]
+    fn plus_is_plain_text_not_a_bullet() {
+        assert_eq!(
+            escape_plus_lines("+ a\n  + b\n```\n+ c\n```"),
+            r"\+ a
+  \+ b
+```
++ c
+```"
+        );
+        assert_eq!(list_marker_bytes("+ a"), None);
+        assert_eq!(detect_line_kind("+ a").1, None);
+        assert!(normalize_typed_line_marker("+ [] a", 5).is_none());
+        let html = export_html("t", "+ 하나\n+ 둘\n\n- 진짜 목록");
+        assert!(
+            html.contains("+ 하나") && html.matches("<li>").count() == 1,
+            "{html}"
+        );
     }
 }

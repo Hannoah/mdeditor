@@ -1,5 +1,13 @@
 # MDEditor 작업 기록
 
+## 2026-11-25 — v0.15.1: 줄머리 `+ `를 목록 기호가 아닌 글자 `+`로
+
+- **`+ `는 글자 그대로 (`src/textops.rs`, `src/ui.rs`)**: CommonMark에서는 `+ `도 `- `·`* `와 같은 목록 기호라 처음 버전부터 불릿으로 보였고, v0.15.0에서 `+ [ ]` 할 일까지 넓혔다. 사용자 요청으로 이 앱에서는 `+`를 그냥 글자로 보인다: 편집기의 목록·할 일 인식(`list_cols`, `list_marker`, `list_marker_bytes`, `detect_line_kind`, `TASK_MARKERS`, 단축 입력)에서 `+`를 빼고, 보기 화면 정규화와 HTML 내보내기에서 파서에 넘기기 전 줄머리 `+ `를 `\+ `로 바꾼다(`escape_plus_lines`, 코드 펜스 안은 그대로). 파일 내용은 바뀌지 않는다. 다른 마크다운 뷰어(GitHub 등)에서는 여전히 불릿으로 보인다.
+- **키 스윕**: `+ ab
++ cd`, `+ ab`, `  + ab`, `- x
++ ab`, 문단 뒤 `+ ab` × 모든 커서 위치 × 입력/Space/Backspace/Delete/Enter — 모두 일반 글자 편집처럼 동작, 목록 이어 붙이기·숨김 없음.
+- **검증**: `plus_is_plain_text_not_a_bullet`, `plus_lines_render_as_plain_plus_in_view_and_edit` 추가. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`(82개 통과).
+
 ## 2026-11-25 — v0.15.0: 다중 커서·열 편집(Ctrl+클릭 / Alt+드래그), 편집 중 체크박스·할 일 단축 입력, 자동 저장·실시간 맞춤법 백그라운드화
 
 - **다중 커서 / 열 편집 (`src/ui.rs`, `src/main.rs`, `src/textops.rs`)**: 요청했던 Notepad++식 기능이 구현돼 있지 않았다. 편집 중인 블록 안에서 `Ctrl+클릭`으로 커서 추가(같은 자리를 다시 누르면 제거), `Alt+드래그`로 지나간 줄마다 같은 x에 커서. TextEdit이 주 커서에 한 편집(타이핑·한글 조합·Backspace·Delete·붙여넣기)을 앞뒤 차이로 찾아 모든 커서에 복제한다(`replicate_edit`). 지울 구간이 숨긴 마크다운 기호(목록·인용 기호, `**` 등)나 줄바꿈에 걸리는 커서는 그 커서만 건너뛴다. `Esc`는 추가 커서만 끄고, 이동 키·Enter·Tab·단축키·일반 클릭은 추가 커서를 끄고 평소대로 동작. 커서는 블록 하나 안에서만, 커서별 선택 영역은 없음.

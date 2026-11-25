@@ -7293,6 +7293,34 @@ mod tests {
     }
 
     #[test]
+    fn plus_lines_render_as_plain_plus_in_view_and_edit() {
+        use egui_kittest::kittest::Queryable;
+        let dir = std::env::temp_dir().join("mdeditor_plus_text_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("plus.md");
+        std::fs::write(&file, "+ 하나\n+ 둘").unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+        // 보기 화면: "+"가 글자로 보인다 (불릿 아님)
+        assert!(h.query_by_label_contains("+ 하나").is_some());
+        // 편집: 줄 끝 Enter가 "+ " 목록을 잇지 않고 일반 문단처럼 새 블록을 만든다
+        let len = h.state().doc().unwrap().text.len();
+        h.state_mut().go(0, len);
+        h.run_steps(3);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        h.event(egui::Event::Text("셋".into()));
+        h.run_steps(2);
+        assert_eq!(h.state().doc().unwrap().text, "+ 하나\n+ 둘\n\n셋");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ctrl_click_multi_caret_and_alt_drag_column_edit() {
         use egui_kittest::kittest::Queryable;
         let dir = std::env::temp_dir().join("mdeditor_multi_caret_test");
@@ -9803,7 +9831,6 @@ Hello teh world.
             ("[X] 완료", "- [x] 완료"),
             ("- [] 할 일", "- [ ] 할 일"),
             ("* [] 할 일", "* [ ] 할 일"),
-            ("+ [] 할 일", "+ [ ] 할 일"),
         ] {
             let caret = input.find(']').unwrap() + 2;
             let (out, _) = textops::normalize_typed_line_marker(input, caret)
