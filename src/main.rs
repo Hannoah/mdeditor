@@ -1173,8 +1173,9 @@ struct App {
     pending_click_pos: Option<(usize, egui::Pos2)>,
     focus_editor: bool,
     ime_composing: bool,
-    // 다중 커서(Ctrl+클릭 / Alt+드래그): 편집 중인 블록 id와 그 안의 추가 커서들(문자 인덱스)
-    extra_carets: Option<(egui::Id, Vec<usize>)>,
+    // 다중 커서(Ctrl+클릭 / Alt+드래그 사각형 선택): 편집 중인 블록 id와 그 안의 추가 커서들
+    // (선택 시작, 커서) 문자 인덱스. 선택이 없으면 두 값이 같다
+    extra_carets: Option<(egui::Id, Vec<(usize, usize)>)>,
     pending_enter: bool,
     raw_table_mode: bool,
     table_focus_cell: Option<(usize, usize)>,
@@ -5794,7 +5795,7 @@ impl App {
                 match key {
                     Key::Escape => esc = true,
                     Key::Backspace | Key::Delete if modifiers.is_none() => plain_edit = true,
-                    Key::V | Key::C if modifiers.command_only() => {}
+                    Key::V | Key::C | Key::X if modifiers.command_only() => {}
                     Key::Enter
                     | Key::Tab
                     | Key::ArrowUp
@@ -7321,6 +7322,125 @@ mod tests {
     }
 
     #[test]
+    fn alt_drag_rectangle_select_copy_type_and_paste() {
+        use egui_kittest::kittest::Queryable;
+        let dir = std::env::temp_dir().join("mdeditor_rect_sel_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rect.md");
+        std::fs::write(&file, "- abc\n- def\n- ghi").unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(3);
+        h.state_mut().go(0, 0);
+        h.run_steps(3);
+        let text = |h: &egui_kittest::Harness<'_, App>| h.state().doc().unwrap().text.clone();
+        let rect = h
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .rect();
+        let row_h = rect.height() / 3.0;
+        // 첫 줄 오른쪽 끝 → 셋째 줄 왼쪽 끝으로 Alt+드래그: 줄마다 내용 전체가 선택된다
+        let a = egui::pos2(rect.right() - 4.0, rect.top() + row_h * 0.5);
+        let b = egui::pos2(rect.left() + 1.0, rect.top() + row_h * 2.5);
+        let push =
+            |h: &mut egui_kittest::Harness<'_, App>, e: egui::Event| h.input_mut().events.push(e);
+        push(&mut h, egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+        push(&mut h, egui::Event::PointerMoved(a));
+        push(
+            &mut h,
+            egui::Event::PointerButton {
+                pos: a,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::ALT,
+            },
+        );
+        h.step();
+        for k in 1..=4 {
+            push(
+                &mut h,
+                egui::Event::PointerMoved(a + (b - a) * (k as f32 / 4.0)),
+            );
+            h.step();
+        }
+        push(
+            &mut h,
+            egui::Event::PointerButton {
+                pos: b,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::ALT,
+            },
+        );
+        push(&mut h, egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run_steps(2);
+        let ex = h
+            .state()
+            .extra_carets
+            .clone()
+            .map(|e| e.1)
+            .unwrap_or_default();
+        assert_eq!(ex, vec![(5, 2), (11, 8)], "줄마다 (선택 시작, 커서)");
+
+        // 복사: 줄마다 선택한 글을 줄바꿈으로 잇는다
+        h.event(egui::Event::Copy);
+        h.step();
+        let copied = h
+            .output()
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            });
+        assert_eq!(copied.as_deref(), Some("abc\ndef\nghi"));
+        assert_eq!(text(&h), "- abc\n- def\n- ghi");
+
+        // 입력(한글 조합 포함)은 모든 선택을 바꾼다
+        for ime in [
+            egui::ImeEvent::Preedit {
+                text: "ㄱ".into(),
+                active_range_chars: None,
+            },
+            egui::ImeEvent::Preedit {
+                text: "가".into(),
+                active_range_chars: None,
+            },
+            egui::ImeEvent::Commit("가".into()),
+        ] {
+            h.event(egui::Event::Ime(ime));
+            h.run_steps(2);
+        }
+        assert_eq!(
+            text(&h),
+            "- 가
+- 가
+- 가"
+        );
+        h.event(egui::Event::Text("X".into()));
+        h.run_steps(2);
+        assert_eq!(
+            text(&h),
+            "- 가X
+- 가X
+- 가X"
+        );
+        // 커서 수와 줄 수가 같은 붙여넣기는 한 줄씩 나눠 넣는다
+        h.event(egui::Event::Paste("1\n2\n3".into()));
+        h.run_steps(2);
+        assert_eq!(text(&h), "- 가X1\n- 가X2\n- 가X3");
+        // 줄 수가 다르면 모든 커서에 통째로
+        h.event(egui::Event::Paste("y".into()));
+        h.run_steps(2);
+        assert_eq!(text(&h), "- 가X1y\n- 가X2y\n- 가X3y");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ctrl_click_multi_caret_and_alt_drag_column_edit() {
         use egui_kittest::kittest::Queryable;
         let dir = std::env::temp_dir().join("mdeditor_multi_caret_test");
@@ -7728,6 +7848,38 @@ mod tests {
     }
 
     #[test]
+    fn ordered_list_markers_follow_depth_hierarchy() {
+        use egui_kittest::kittest::Queryable;
+        assert_eq!(ui::num_label(3, 0), "3.");
+        assert_eq!(ui::num_label(3, 1), "3)");
+        assert_eq!(ui::num_label(3, 2), "(3)");
+        assert_eq!(ui::num_label(3, 3), "3.");
+
+        let dir = std::env::temp_dir().join("mdeditor_ui_test_num_hier");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("n.md");
+        let src = "1. 하나
+   1. 둘
+      1. 셋
+      2. 넷
+2. 다섯
+";
+        std::fs::write(&file, src).unwrap();
+        let (f2, d2) = (file.clone(), dir.clone());
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .with_accessibility_check(false)
+            .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+        h.run_steps(5);
+        for label in ["1.", "1)", "(1)", "(2)", "2."] {
+            assert!(h.query_by_label(label).is_some(), "missing {label}");
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), src); // 원문은 그대로
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn bold_text_uses_bold_font_in_view_edit_and_tables() {
         use egui_kittest::kittest::Queryable;
         let p = theme::pal(false);
@@ -7770,6 +7922,18 @@ mod tests {
                     )
                 })
         };
+        // 문장부호 뒤 조사로 CommonMark 짝이 안 맞아도 보기 화면에 형광 배경 (굵게만 되던 버그)
+        for (src, needle) in [("==형광!==입니다", "형광!"), ("==(A)==는", "(A)")] {
+            let v = ui::inline_md_view_job(src, 15.0, &p, false);
+            assert_ne!(
+                bg_of(&v, needle).map(|b| b.0),
+                Some(egui::Color32::TRANSPARENT),
+                "{src}"
+            );
+            assert!(bg_of(&v, needle).is_some(), "{src}: {:?}", v.sections);
+        }
+        let v = ui::inline_md_view_job("**굵게!**입니다", 15.0, &p, false);
+        assert_eq!(bg_of(&v, "굵게!"), Some((egui::Color32::TRANSPARENT, true)));
         let src = "가 ==강조== 나 **굵게** 다";
         let view = ui::inline_md_view_job(src, 15.0, &p, false);
         let edit = ui::md_job(&ctx, src, 15.0, &p, false);

@@ -1130,6 +1130,15 @@ const LIST_STEP: f32 = LIST_PAD + LIST_MARKER_W + LIST_GAP;
 const LIST_ROW_GAP: f32 = 6.0; // 렌더링 화면의 항목 사이 간격(item_spacing.y)
 const BULLETS: [&str; 3] = ["•", "◦", "▪"];
 
+// 번호 목록 표시: 깊이마다 1. → 1) → (1) 반복. 원문은 "1." 그대로 (화면 표시만)
+pub(crate) fn num_label(n: u64, depth: usize) -> String {
+    match depth % 3 {
+        0 => format!("{n}."),
+        1 => format!("{n})"),
+        _ => format!("({n})"),
+    }
+}
+
 // 할 일 체크박스 그리기 (편집·보기 화면 공용)
 fn paint_checkbox(painter: &egui::Painter, p: &Pal, c: egui::Pos2, checked: bool, hovered: bool) {
     let r = Rect::from_center_size(c, egui::Vec2::splat(15.0));
@@ -1372,7 +1381,7 @@ fn paint_block_decor(
                     );
                 } else {
                     let label =
-                        num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| format!("{n}."));
+                        num.map_or_else(|| BULLETS[depth % 3].to_string(), |n| num_label(n, depth));
                     painter.text(
                         c,
                         Align2::CENTER_CENTER,
@@ -4620,6 +4629,14 @@ impl App {
         if math {
             ui.add_space(6.0); // 보기 화면 card()와 같은 위 여백
         }
+        if self
+            .extra_carets
+            .as_ref()
+            .is_some_and(|(cid, _)| *cid != id)
+        {
+            self.extra_carets = None;
+        }
+        self.rect_sel_pre_edit(ctx, id, &mut buf);
         // 다중 커서용: 클릭으로 커서가 옮겨지기 전 위치
         let caret_before = egui::TextEdit::load_state(ctx, id)
             .and_then(|s| s.cursor.char_range())
@@ -4676,13 +4693,6 @@ impl App {
         let mut picked_callout: Option<&'static str> = None;
         let mut copy_inner_code: Option<String> = None;
 
-        if self
-            .extra_carets
-            .as_ref()
-            .is_some_and(|(cid, _)| *cid != id)
-        {
-            self.extra_carets = None;
-        }
         let multi_before = self.extra_carets.is_some().then(|| buf.clone());
 
         let take_focus = std::mem::take(&mut self.focus_editor);
@@ -5039,6 +5049,7 @@ impl App {
             s.start.0 != s.end.0
                 && !self.ime_composing
                 && self.context_menu.is_none()
+                && self.extra_carets.is_none()
                 && !ctx.input(|i| i.pointer.primary_down())
         }) {
             let (f, hit) = self.show_format_bar(ctx, p, cursor_of(s.start.0), canvas_area);
@@ -5075,10 +5086,127 @@ impl App {
         }
     }
 
+    // 사각형 선택 중 편집 (TextEdit보다 먼저): 복사·잘라내기는 줄마다 선택한 글을 줄바꿈으로 이어 클립보드로.
+    // 지우기·잘라내기·입력·붙여넣기면 모든 선택 구간을 먼저 지워 커서만 남긴다. 그 뒤 입력·한글 조합·붙여넣기는
+    // 평소 다중 커서 흐름(TextEdit + replicate_edit)이 모든 커서에 넣는다. 붙여넣는 글의 줄 수가 커서 수와
+    // 같으면 (선택이 없어도) 줄마다 한 줄씩 나눠 넣는다 (Notepad++처럼).
+    fn rect_sel_pre_edit(&mut self, ctx: &egui::Context, id: egui::Id, buf: &mut String) {
+        let Some((_, extras)) = self.extra_carets.as_mut() else {
+            return;
+        };
+        let Some(pr) = egui::TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range())
+        else {
+            return;
+        };
+        let sorted = |(a, b): (usize, usize)| (a.min(b), a.max(b));
+        // 주 커서 선택은 한글 조합 중인 글자일 수도 있어서, Alt+드래그로 만든 사각형일 때만 선택으로 본다
+        let rect_id = id.with("rect-sel");
+        let rect = ctx.data(|d| d.get_temp::<bool>(rect_id)).unwrap_or(false);
+        let prim = if rect {
+            sorted((pr.secondary.index.0, pr.primary.index.0))
+        } else {
+            (pr.primary.index.0, pr.primary.index.0)
+        };
+        let n = extras.len() + 1;
+        let split_paste = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Paste(s) if s.lines().count() == n && n > 1))
+        });
+        if !rect && !split_paste {
+            return; // 선택 없는 커서들만 — 평소 흐름
+        }
+        let mut all: Vec<((usize, usize), bool)> =
+            extras.iter().map(|&e| (sorted(e), false)).collect();
+        all.push((prim, true));
+        all.sort_unstable();
+        let (mut copy, mut cut, mut del, mut typed, mut paste) = (false, false, false, false, None);
+        ctx.input_mut(|i| {
+            i.events.retain(|e| match e {
+                egui::Event::Copy => {
+                    copy = true;
+                    false
+                }
+                egui::Event::Cut => {
+                    cut = true;
+                    false
+                }
+                egui::Event::Key {
+                    key: Key::Backspace | Key::Delete,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.is_none() => {
+                    del = true;
+                    false
+                }
+                egui::Event::Paste(s) => {
+                    paste = Some(s.clone());
+                    false
+                }
+                egui::Event::Text(t) => {
+                    typed |= !t.is_empty();
+                    true
+                }
+                egui::Event::Ime(
+                    egui::ImeEvent::Preedit { text: t, .. } | egui::ImeEvent::Commit(t),
+                ) => {
+                    typed |= !t.is_empty();
+                    true
+                }
+                _ => true,
+            });
+        });
+        if copy || cut {
+            // 숨긴 마크다운 기호는 화면에 없으니 빼고 보이는 글만 (잘라내기도 그 글자만 지운다)
+            let hidden = hidden_runs(buf);
+            let visible = |i: usize| !hidden.iter().any(|&(ha, he, _)| ha <= i && i < he);
+            let parts: Vec<String> = all
+                .iter()
+                .map(|&((a, b), _)| {
+                    let chars = buf.chars().enumerate().skip(a).take(b - a);
+                    chars.filter(|&(i, _)| visible(i)).map(|(_, c)| c).collect()
+                })
+                .collect();
+            ctx.copy_text(parts.join("\n"));
+        }
+        let split: Vec<&str> = paste
+            .as_deref()
+            .map(|s| s.lines().collect())
+            .filter(|l: &Vec<&str>| l.len() == all.len() && l.len() > 1)
+            .unwrap_or_default();
+        if let (Some(s), true) = (&paste, split.is_empty()) {
+            let s = s.clone();
+            ctx.input_mut(|i| i.events.push(egui::Event::Paste(s))); // 지운 뒤 TextEdit이 붙여넣게 돌려놓는다
+        }
+        if !(cut || del || typed || paste.is_some()) {
+            return;
+        }
+        let ranges: Vec<(usize, usize)> = all.iter().map(|x| x.0).collect();
+        let (t, carets) =
+            replace_ranges(buf, &ranges, if split.is_empty() { &[""] } else { &split });
+        *buf = t;
+        let mut primary = 0;
+        extras.clear();
+        for (c, &(_, is_primary)) in carets.into_iter().zip(&all) {
+            if is_primary {
+                primary = c;
+            } else {
+                extras.push((c, c));
+            }
+        }
+        set_cursor_range(ctx, id, CCursorRange::one(CCursor::new(primary)));
+        ctx.data_mut(|d| {
+            d.insert_temp(id.with("multi-caret-last"), primary);
+            d.insert_temp(rect_id, false);
+        });
+        ctx.request_repaint();
+    }
+
     // 다중 커서 (Notepad++식): Ctrl+클릭으로 커서 추가(이미 있는 자리면 제거), 활성 블록 안 Alt+드래그로
-    // 지나간 줄마다 같은 x에 커서(열 편집). TextEdit이 주 커서에 한 편집(타이핑·한글 조합·Backspace·Delete·
-    // 붙여넣기)을 모든 추가 커서에 그대로 복제한다. 커서 위치를 바꿨으면 새 커서 범위를 돌려준다.
-    // ponytail: 커서는 활성 블록 안에서만, 커서마다 선택 영역은 없음(Alt+드래그도 커서만) — 필요하면 Vec<Range>로
+    // 사각형 선택(폭이 0이면 줄마다 같은 x에 커서 = 열 편집). TextEdit이 주 커서에 한 편집(타이핑·한글 조합·
+    // Backspace·Delete·붙여넣기)을 모든 추가 커서에 그대로 복제한다. 커서 위치를 바꿨으면 새 커서 범위를 돌려준다.
+    // ponytail: 커서는 활성 블록 안에서만, 줄 끝 너머 가상 공간은 없음(짧은 줄은 줄 끝까지만 선택)
     #[allow(clippy::too_many_arguments)]
     fn multi_caret(
         &mut self,
@@ -5116,20 +5244,23 @@ impl App {
         if let (true, Some(o), Some(at)) = (alt && down, origin, pos) {
             if out.response.rect.contains(o) {
                 let (y0, y1) = (o.y.min(at.y), o.y.max(at.y));
-                let mut cs: Vec<usize> = g
+                let at_x = |x: f32, y: f32| snap_out_of_prefix(buf, char_at(pos2(x, y)));
+                let mut cs: Vec<(usize, usize)> = g
                     .rows
                     .iter()
                     .map(|row| row.rect().translate(gpos.to_vec2()))
                     .filter(|r| r.bottom() >= y0 && r.top() <= y1)
-                    .map(|r| snap_out_of_prefix(buf, char_at(pos2(at.x, r.center().y))))
+                    .map(|r| (at_x(o.x, r.center().y), at_x(at.x, r.center().y)))
                     .collect();
                 cs.dedup();
                 if cs.is_empty() {
                     return None;
                 }
-                let primary = if at.y < o.y { cs.remove(0) } else { cs.pop()? };
+                let (a, h) = if at.y < o.y { cs.remove(0) } else { cs.pop()? };
+                let wide = a != h || cs.iter().any(|e| e.0 != e.1);
+                ctx.data_mut(|d| d.insert_temp(id.with("rect-sel"), wide));
                 self.extra_carets = (!cs.is_empty()).then_some((id, cs));
-                let cr = CCursorRange::one(CCursor::new(primary));
+                let cr = CCursorRange::two(CCursor::new(a), CCursor::new(h));
                 set_cursor_range(ctx, id, cr);
                 return Some(cr);
             }
@@ -5143,11 +5274,12 @@ impl App {
         }
         let on_text = out.response.contains_pointer();
         if cmd && !alt && (canvas_click || ((pressed || released) && on_text)) {
+            ctx.data_mut(|d| d.insert_temp(id.with("rect-sel"), false));
             let ex = &mut self.extra_carets.get_or_insert_with(|| (id, Vec::new())).1;
-            if let Some(prev) = last.filter(|&c| Some(c) != now && !ex.contains(&c)) {
-                ex.push(prev);
+            if let Some(prev) = last.filter(|&c| Some(c) != now && !ex.iter().any(|e| e.1 == c)) {
+                ex.push((prev, prev));
             }
-            ex.retain(|&c| Some(c) != now);
+            ex.retain(|e| Some(e.1) != now);
             if ex.is_empty() {
                 self.extra_carets = None;
             }
@@ -5158,9 +5290,10 @@ impl App {
         let (_, extras) = self.extra_carets.as_mut()?;
         if let (Some(old), Some(o), Some(cr)) = (before, caret_before, out.cursor_range) {
             if *buf != old {
-                let (t, ex, sh) = replicate_edit(&old, buf, o, cr.primary.index.0, extras);
+                let heads: Vec<usize> = extras.iter().map(|e| e.1).collect();
+                let (t, ex, sh) = replicate_edit(&old, buf, o, cr.primary.index.0, &heads);
                 *buf = t;
-                *extras = ex;
+                *extras = ex.into_iter().map(|c| (c, c)).collect();
                 if extras.is_empty() {
                     self.extra_carets = None;
                 }
@@ -5173,10 +5306,16 @@ impl App {
             }
         }
         let stroke = ui.visuals().text_cursor.stroke;
-        for &c in extras.iter() {
-            let r = g.pos_from_cursor(CCursor::new(c)).translate(gpos.to_vec2());
+        let sel_fill = ui.visuals().selection.bg_fill.gamma_multiply(0.6);
+        for &(a, h) in extras.iter() {
+            let ra = g.pos_from_cursor(CCursor::new(a)).translate(gpos.to_vec2());
+            let rh = g.pos_from_cursor(CCursor::new(h)).translate(gpos.to_vec2());
+            if a != h {
+                // 사각형 선택은 줄(행)마다 한 구간이라 같은 행 안의 두 x 사이를 칠한다
+                ui.painter().rect_filled(ra.union(rh), 0.0, sel_fill);
+            }
             ui.painter()
-                .line_segment([r.center_top(), r.center_bottom()], stroke);
+                .line_segment([rh.center_top(), rh.center_bottom()], stroke);
         }
         None
     }
@@ -8780,6 +8919,8 @@ struct MdInlineBuf<'a> {
     strike: u16,
     link_url: Option<String>,
     pending: String,
+    pending_marks: Vec<usize>, // pending 안에서 원문이 =였던 "*" 위치
+    unclosed_mark: bool,
 }
 
 impl<'a> MdInlineBuf<'a> {
@@ -8803,6 +8944,8 @@ impl<'a> MdInlineBuf<'a> {
             strike: 0,
             link_url: None,
             pending: String::new(),
+            pending_marks: Vec::new(),
+            unclosed_mark: false,
         }
     }
 
@@ -8905,12 +9048,14 @@ impl<'a> MdInlineBuf<'a> {
             return;
         }
         let full_text = std::mem::take(&mut self.pending);
+        let marks = std::mem::take(&mut self.pending_marks);
         let mut text = full_text.as_str();
+        let mut base = 0usize; // text가 full_text에서 시작하는 위치
         if self.unclosed_bold {
             if let Some(close) = text.find("**") {
                 self.push_styled_with_footnotes(&text[..close], true);
-                self.unclosed_bold = false;
-                self.strong = self.strong.saturating_sub(1);
+                self.end_unclosed_bold();
+                base = close + 2;
                 text = &text[close + 2..];
                 if text.is_empty() {
                     return;
@@ -8935,7 +9080,10 @@ impl<'a> MdInlineBuf<'a> {
                             || !body.ends_with(char::is_whitespace))
                     {
                         self.push_styled_with_footnotes(&text[cur..open], false);
+                        let m = u16::from(marks.contains(&(base + open)));
+                        self.mark += m;
                         self.push_styled_with_footnotes(body, true);
+                        self.mark -= m;
                         cur = open + 2 + rel_close + 2;
                         continue;
                     }
@@ -8943,6 +9091,8 @@ impl<'a> MdInlineBuf<'a> {
                     self.push_styled_with_footnotes(&text[cur..open], false);
                     self.unclosed_bold = true;
                     self.strong += 1;
+                    self.unclosed_mark = marks.contains(&(base + open));
+                    self.mark += u16::from(self.unclosed_mark);
                     self.push_styled_with_footnotes(inner, true);
                     cur = text.len();
                     break;
@@ -8955,6 +9105,14 @@ impl<'a> MdInlineBuf<'a> {
             }
         } else {
             self.push_styled_with_footnotes(text, false);
+        }
+    }
+
+    fn end_unclosed_bold(&mut self) {
+        self.unclosed_bold = false;
+        self.strong = self.strong.saturating_sub(1);
+        if std::mem::take(&mut self.unclosed_mark) {
+            self.mark = self.mark.saturating_sub(1);
         }
     }
 
@@ -9040,9 +9198,18 @@ impl<'a> MdInlineBuf<'a> {
                 let escaped = raw.starts_with('\\')
                     || (span.start > 0 && src.as_bytes()[span.start - 1] == b'\\');
                 self.push_text(t, escaped);
+                if !escaped && raw.len() == t.len() {
+                    // 전처리로 ==가 **가 된 자리 기억 (원문과 바이트 길이가 같다)
+                    let at = self.pending.len() - t.len();
+                    self.pending_marks.extend(
+                        t.match_indices('*') // 파서가 "*"를 한 글자씩 따로 보낼 때가 있다
+                            .filter(|&(i, _)| raw.as_bytes()[i] == b'=')
+                            .map(|(i, _)| at + i),
+                    );
+                }
                 if !escaped && self.pending.contains("**") && span.end <= src.len() {
                     let rest_line = src[span.end..].split('\n').next().unwrap_or("");
-                    self.future_bold_closer = rest_line.contains("**");
+                    self.future_bold_closer = rest_line.contains("**") || rest_line.contains("==");
                 }
                 true
             }
@@ -9064,8 +9231,7 @@ impl<'a> MdInlineBuf<'a> {
                 self.repaired_strong = 0;
                 self.flush_pending();
                 if self.unclosed_bold {
-                    self.unclosed_bold = false;
-                    self.strong = self.strong.saturating_sub(1);
+                    self.end_unclosed_bold();
                 }
                 self.push_styled("\n", false);
                 self.at_line_start = true;
@@ -9076,8 +9242,7 @@ impl<'a> MdInlineBuf<'a> {
                 self.repaired_strong = 0;
                 self.flush_pending();
                 if self.unclosed_bold {
-                    self.unclosed_bold = false;
-                    self.strong = self.strong.saturating_sub(1);
+                    self.end_unclosed_bold();
                 }
                 self.push_styled("\n", false);
                 self.at_line_start = true;
@@ -9708,9 +9873,9 @@ fn render_md_stream<'a, I>(
                                         if let Some(cur) = &mut num {
                                             *cur = n + 1;
                                         }
-                                        format!("{n}.")
+                                        num_label(n, eff_depth)
                                     } else if let Some(n) = &mut num {
-                                        let s = format!("{n}.");
+                                        let s = num_label(*n, eff_depth);
                                         *n += 1;
                                         s
                                     } else {

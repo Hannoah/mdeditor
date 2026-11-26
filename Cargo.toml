@@ -1,6 +1,6 @@
 [package]
 name = "mdeditor"
-version = "0.15.1"
+version = "0.16.0"
 edition = "2021"
 description = "A native Markdown editor & previewer desktop app in Rust (eframe/egui)"
 

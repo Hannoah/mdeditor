@@ -2831,9 +2831,64 @@ pub(crate) fn replicate_edit(
     (out, new_extras, shift)
 }
 
+/// 여러 구간(문자 인덱스, 문서 순서·겹침 없음)의 글자를 지우고 각 구간에 ins[i]를 넣는다 (ins가 하나면 모두에 같은 것).
+/// 숨긴 마크다운 기호와 줄바꿈은 지우지 않고 남긴다. 결과: (새 텍스트, 각 구간에 넣은 글 바로 뒤 커서)
+pub(crate) fn replace_ranges(
+    s: &str,
+    ranges: &[(usize, usize)],
+    ins: &[&str],
+) -> (String, Vec<usize>) {
+    let hidden = hidden_runs(s);
+    let keep = |i: usize, c: char| c == '\n' || hidden.iter().any(|&(a, e, _)| a <= i && i < e);
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let (mut prev, mut out_len, mut carets) = (0usize, 0usize, Vec::with_capacity(ranges.len()));
+    for (k, &(a, b)) in ranges.iter().enumerate() {
+        let txt = ins.get(k).or(ins.last()).copied().unwrap_or("");
+        let a = a.clamp(prev, chars.len());
+        let b = b.clamp(a, chars.len());
+        out.extend(&chars[prev..a]);
+        out_len += a - prev;
+        let mut put = |out: &mut String, out_len: &mut usize| {
+            out.push_str(txt);
+            *out_len += txt.chars().count();
+            carets.push(*out_len);
+        };
+        let mut done = false;
+        for (i, &c) in chars.iter().enumerate().take(b).skip(a) {
+            if keep(i, c) {
+                out.push(c);
+                out_len += 1;
+            } else if !done {
+                put(&mut out, &mut out_len);
+                done = true;
+            }
+        }
+        if !done {
+            put(&mut out, &mut out_len);
+        }
+        prev = b;
+    }
+    out.extend(&chars[prev..]);
+    (out, carets)
+}
+
 #[cfg(test)]
 mod multi_caret_tests {
     use super::*;
+
+    #[test]
+    fn replace_ranges_deletes_visible_text_and_inserts_per_range() {
+        // 사각형 선택 지우기: 각 줄 1~3열
+        let (t, cs) = replace_ranges("abcd\nefgh\nij", &[(1, 3), (6, 8), (11, 12)], &[""]);
+        assert_eq!((t.as_str(), cs), ("ad\neh\ni", vec![1, 4, 7]));
+        // 줄마다 다른 글 넣기 (여러 줄 붙여넣기 나눠 넣기)
+        let (t, cs) = replace_ranges("ab\ncd", &[(1, 1), (4, 4)], &["X", "YY"]);
+        assert_eq!((t.as_str(), cs), ("aXb\ncYYd", vec![2, 7]));
+        // 숨긴 기호(목록 기호, **)는 남는다
+        let (t, _) = replace_ranges("- ab\n**cd**", &[(0, 4), (5, 11)], &["Z"]);
+        assert_eq!(t, "- Z\n**Z**");
+    }
 
     #[test]
     fn replicate_edit_applies_primary_edit_at_every_caret() {
