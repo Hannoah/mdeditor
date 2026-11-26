@@ -15,6 +15,7 @@ use textops::*;
 
 mod math;
 mod mermaid;
+#[cfg_attr(not(windows), allow(dead_code))] // macOS·Linux는 브라우저 인쇄 (배치·테스트는 공용)
 mod print;
 mod sas;
 #[cfg(windows)] // 설치·제거 마법사는 Windows 전용 (PowerShell 엔진)

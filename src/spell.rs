@@ -81,11 +81,9 @@ pub fn check_block(block: &str, ignore: &HashSet<String>) -> Vec<SpellIssue> {
 // 검사 결과에는 OS 맞춤법 검사기의 제안이 비어 있다 (느려서). 화면에 보여 줄 때만 채운다.
 // ponytail: 단어별 캐시는 세션 동안 계속 커진다 — 오타 단어 수만큼이라 작다
 pub fn fill_suggestions(issue: &mut SpellIssue) {
-    if issue.kind != IssueKind::Spelling || !issue.suggestions.is_empty() {
-        return;
-    }
+    // Windows 밖에서는 제안 기능이 없다 (return만 남으면 macOS clippy가 needless_return으로 막는다)
     #[cfg(windows)]
-    {
+    if issue.kind == IssueKind::Spelling && issue.suggestions.is_empty() {
         use std::cell::RefCell;
         use std::collections::HashMap;
         thread_local! {

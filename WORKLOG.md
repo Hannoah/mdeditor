@@ -1,5 +1,11 @@
 # MDEditor 작업 기록
 
+## 2026-11-26 — v0.18.2: 목록·인용 속 표의 수식, macOS CI 복구
+
+- **목록·인용 속 표 (`src/ui.rs`)**: 목록이나 인용 안에 든 표(`render_md_stream`의 표 경로)는 egui Label로 칸을 그려 줄 안 수식이 코드 글자였다. 문단과 같은 그리기(`prepare_inline_maths` + `paint_galley_with_links`)로 바꿔 수식이 조판되고 칸 안 링크도 눌린다. 일반 표 블록은 v0.18.1부터 이미 조판.
+- **macOS CI 실패 (`src/main.rs`, `src/spell.rs`)**: 11-24부터 push마다 macOS 검사가 실패해 알림 메일이 왔다. ① Windows 전용으로만 쓰는 `print` 모듈이 macOS에서 dead_code(-D warnings) → `#[cfg_attr(not(windows), allow(dead_code))]`. ② `fill_suggestions`의 `return;` 뒤 `#[cfg(windows)]` 블록이 macOS에서 사라져 needless_return → 조건을 `#[cfg(windows)] if`로. Windows clippy에서는 안 보여서 놓쳤다.
+- **검증**: `cargo clippy --all-targets -- -D warnings`, `cargo test`(91개 통과), push 후 GitHub CI(Windows·macOS).
+
 ## 2026-11-26 — v0.18.1: 화면의 줄 안 수식도 조판
 
 - **줄 안 수식 (`src/ui.rs`)**: 보기 화면 문단·목록·제목의 `$…$`가 코드 글자 대신 조판된 수식으로 보인다. 글줄은 LayoutJob 하나로 배치되므로 수식 자리에 줄바꿈 안 되는 공백(NBSP) 한 글자를 넣고(`push_math`), 배치 직전에 그 글자 크기를 키워 폭을 수식 폭과 같게, 줄 높이는 수식이 넘치는 만큼 위아래로 늘린다(`prepare_inline_maths`). 그린 뒤 그 글자 자리·같은 줄 글자 기준선에 수식을 덧그린다(`glyph_baseline`). 수식이 있는 글줄은 세로 가운데 정렬. 자간(extra_letter_spacing)으로 자리를 잡으면 egui가 구간 첫 글자 앞에도 자간을 넣어 빈자리가 두 번 생겨서 글자 크기 방식으로 바꿨다. 같은 서식의 앞 구간과 합쳐지지 않게 자리 글자는 서식을 다르게 둔다. 캐시(`InlineGalleyCache`)에 수식 목록을 함께 두고 키에도 넣는다. 화면 낭독·검색용 글에는 수식 원문을 넣는다. 표 칸(Label로 그림)은 예전처럼 코드 글자.

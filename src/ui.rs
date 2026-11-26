@@ -10175,9 +10175,16 @@ fn render_md_stream<'a, I>(
                 }
             }
             Event::Start(Tag::Table(_aligns)) => {
-                let mut headers: Vec<Vec<egui::text::LayoutJob>> = Vec::new();
-                let mut rows: Vec<Vec<egui::text::LayoutJob>> = Vec::new();
-                let mut cur_row: Vec<egui::text::LayoutJob> = Vec::new();
+                // 칸: (글, 링크, 줄 안 수식, 글자 크기)
+                type Cell = (
+                    egui::text::LayoutJob,
+                    Vec<(Range<usize>, String)>,
+                    Vec<(usize, String)>,
+                    f32,
+                );
+                let mut headers: Vec<Vec<Cell>> = Vec::new();
+                let mut rows: Vec<Vec<Cell>> = Vec::new();
+                let mut cur_row: Vec<Cell> = Vec::new();
                 let mut in_head = false;
                 while let Some((tev, tspan)) = iter.next() {
                     match tev {
@@ -10196,16 +10203,16 @@ fn render_md_stream<'a, I>(
                             }
                         }
                         Event::Start(Tag::TableCell) => {
-                            let mut buf = MdInlineBuf::new(p, ctx.body * 0.92, p.text, in_head);
-                            buf.math_as_code = true;
+                            let size = ctx.body * 0.92;
+                            let mut buf = MdInlineBuf::new(p, size, p.text, in_head);
                             for (cev, cspan) in iter.by_ref() {
                                 if matches!(cev, Event::End(TagEnd::TableCell)) {
                                     break;
                                 }
                                 buf.handle_inline_event(&cev, ctx.raw, cspan);
                             }
-                            buf.flush_pending();
-                            cur_row.push(buf.job);
+                            buf.finalize_job();
+                            cur_row.push((buf.job, buf.links, buf.maths, size));
                         }
                         _ => {
                             let _ = tspan;
@@ -10216,15 +10223,22 @@ fn render_md_stream<'a, I>(
                     .striped(true)
                     .spacing(vec2(12.0, 6.0))
                     .show(ui, |ui| {
-                        for h_row in headers {
-                            for job in h_row {
-                                ui.add(egui::Label::new(job).wrap());
+                        // 문단과 같은 그리기(줄 안 수식 덧그리기·링크 클릭)
+                        let cell = |ui: &mut egui::Ui, (mut job, links, maths, size): Cell| {
+                            if job.text.is_empty() {
+                                ui.label("");
+                                return;
                             }
-                            ui.end_row();
-                        }
-                        for r in rows {
-                            for job in r {
-                                ui.add(egui::Label::new(job).wrap());
+                            job.wrap.max_width = ui.available_width().max(40.0);
+                            prepare_inline_maths(ui.ctx(), &mut job, &maths, size, p.text);
+                            let g = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                            paint_galley_with_links(
+                                ui, g, &links, &maths, size, p.text, ctx.scheme,
+                            );
+                        };
+                        for r in headers.into_iter().chain(rows) {
+                            for c in r {
+                                cell(ui, c);
                             }
                             ui.end_row();
                         }
