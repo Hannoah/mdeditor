@@ -9415,6 +9415,10 @@ mod tests {
             .with_size(egui::vec2(900.0, 600.0))
             .with_accessibility_check(false)
             .build_eframe(move |cc| {
+                // macOS CI에서 이 테스트 화면에 이모지(🔥, 출처는 저장소 밖)가 그려지는데 이 앱이 쓰는 macOS 글꼴에는
+                // 이모지가 없어 kittest 기본값(글리프 없으면 패닉)으로 실패했다. 실제 앱은 egui 기본값대로 네모로 그린다
+                cc.egui_ctx
+                    .set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
                 let mut app = App::new(cc, None, &d2);
                 app.set_text(initial.into(), (0, 0));
                 app.pending_sel = None;
