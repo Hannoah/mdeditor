@@ -14,6 +14,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use textops::*;
 
 mod mermaid;
+mod print;
 mod sas;
 #[cfg(windows)] // 설치·제거 마법사는 Windows 전용 (PowerShell 엔진)
 mod setup;
@@ -5934,7 +5935,24 @@ impl App {
         };
     }
 
-    // 인쇄: 임시 HTML을 기본 브라우저로 열어 인쇄 대화상자를 띄운다 (웹 버전의 Ctrl+P와 같은 결과)
+    // 인쇄: Windows는 인쇄 대화상자 + 직접 그리기(src/print.rs), 그 밖은 임시 HTML을 브라우저로 연다
+    #[cfg(windows)]
+    fn print(&mut self, _ctx: &egui::Context) {
+        let (Some(name), Some(doc)) = (self.current.clone(), self.doc()) else {
+            return;
+        };
+        let stem = Path::new(&name)
+            .file_stem()
+            .map_or("document".into(), |s| s.to_string_lossy().into_owned());
+        let text = doc.text.clone();
+        self.status = match print::print_markdown(&stem, &text, &self.doc_dir()) {
+            Ok(true) => format!("인쇄 보냄: {stem}"),
+            Ok(false) => "인쇄 취소".into(),
+            Err(e) => format!("인쇄 실패: {e}"),
+        };
+    }
+
+    #[cfg(not(windows))]
     fn print(&mut self, ctx: &egui::Context) {
         let (Some(name), Some(doc)) = (self.current.clone(), self.doc()) else {
             return;
