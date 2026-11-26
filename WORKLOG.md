@@ -3,7 +3,7 @@
 ## 2026-11-26 — v0.18.2: 목록·인용 속 표의 수식, macOS CI 복구
 
 - **목록·인용 속 표 (`src/ui.rs`)**: 목록이나 인용 안에 든 표(`render_md_stream`의 표 경로)는 egui Label로 칸을 그려 줄 안 수식이 코드 글자였다. 문단과 같은 그리기(`prepare_inline_maths` + `paint_galley_with_links`)로 바꿔 수식이 조판되고 칸 안 링크도 눌린다. 일반 표 블록은 v0.18.1부터 이미 조판.
-- **macOS CI 실패 (`src/main.rs`, `src/spell.rs`)**: 11-24부터 push마다 macOS 검사가 실패해 알림 메일이 왔다. ① Windows 전용으로만 쓰는 `print` 모듈이 macOS에서 dead_code(-D warnings) → `#[cfg_attr(not(windows), allow(dead_code))]`. ② `fill_suggestions`의 `return;` 뒤 `#[cfg(windows)]` 블록이 macOS에서 사라져 needless_return → 조건을 `#[cfg(windows)] if`로. Windows clippy에서는 안 보여서 놓쳤다.
+- **macOS CI 실패 (`src/main.rs`, `src/spell.rs`)**: 11-24부터 push마다 macOS 검사가 실패해 알림 메일이 왔다. ① Windows 전용으로만 쓰는 `print` 모듈이 macOS에서 dead_code(-D warnings) → `#[cfg_attr(not(windows), allow(dead_code))]`. ② `fill_suggestions`의 `return;` 뒤 `#[cfg(windows)]` 블록이 macOS에서 사라져 needless_return → 조건을 `#[cfg(windows)] if`로, 다른 OS에서는 `let _ = issue;`. Windows clippy에서는 안 보여서 놓쳤다.
 - **검증**: `cargo clippy --all-targets -- -D warnings`, `cargo test`(91개 통과), push 후 GitHub CI(Windows·macOS).
 
 ## 2026-11-26 — v0.18.1: 화면의 줄 안 수식도 조판
