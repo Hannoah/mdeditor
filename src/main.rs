@@ -13,6 +13,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 use textops::*;
 
+mod math;
 mod mermaid;
 mod print;
 mod sas;

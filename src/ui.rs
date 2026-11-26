@@ -6629,8 +6629,11 @@ impl App {
         let before = preprocess(src);
         if before.contains("![") {
             let top_y = ui.cursor().top();
-            let math = |ui: &mut egui::Ui, s: &str, _inline: bool| {
-                ui.code(s.trim());
+            let (pal, msize) = (*p, body * 1.05);
+            let math = move |ui: &mut egui::Ui, s: &str, inline: bool| {
+                if crate::math::render(ui, &pal, s, msize, !inline).is_none() {
+                    ui.code(s.trim());
+                }
             };
             let mut viewer = CommonMarkViewer::new()
                 .default_implicit_uri_scheme(scheme)
@@ -10074,14 +10077,16 @@ fn render_md_stream<'a, I>(
                 let base_line = line_offset_at(ctx.raw, span.start);
                 let top_y = ui.cursor().top() + 6.0;
                 let _ = card(ui, p, None, false, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new(t.trim())
-                                .family(FontFamily::Monospace)
-                                .size(ctx.body)
-                                .color(p.text),
-                        );
-                    });
+                    if crate::math::render(ui, p, &t, ctx.body * 1.15, true).is_none() {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                RichText::new(t.trim())
+                                    .family(FontFamily::Monospace)
+                                    .size(ctx.body)
+                                    .color(p.text),
+                            );
+                        });
+                    }
                 });
                 if let Some(lys) = ctx.line_ys.as_deref_mut() {
                     let bot_y = ui.cursor().top();

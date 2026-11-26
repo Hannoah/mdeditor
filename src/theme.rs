@@ -156,6 +156,12 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     });
 }
 
+// 수식 글꼴 (Cambria Math / STIX Two Math). 없으면 본문 글꼴로 대신한다
+pub fn math() -> FontFamily {
+    static MATH: std::sync::OnceLock<FontFamily> = std::sync::OnceLock::new();
+    MATH.get_or_init(|| FontFamily::Name("math".into())).clone()
+}
+
 pub fn bold() -> FontFamily {
     static BOLD: std::sync::OnceLock<FontFamily> = std::sync::OnceLock::new();
     BOLD.get_or_init(|| FontFamily::Name("bold".into())).clone()
@@ -628,6 +634,15 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
     };
     let sym = add("symbol", find(&["seguisym.ttf", "Apple Symbols.ttf"])).map(|(_, k)| k);
     let emoji = add("emoji", find(&["seguiemj.ttf"])).map(|(_, k)| k);
+    let math_f = add(
+        "math",
+        find(&[
+            "cambria.ttc#1",
+            "STIXTwoMath-Regular.otf",
+            "STIXTwoMath.otf",
+        ]),
+    )
+    .map(|(_, k)| k);
     let chain = |list: &[&Option<String>]| -> Vec<String> {
         list.iter().filter_map(|o| (*o).clone()).collect()
     };
@@ -643,6 +658,9 @@ fn build_fonts(choice: &str) -> egui::FontDefinitions {
         bold(),
         chain(&[&bold_f, &ko_bold, &regular, &ko, &sym, &emoji]),
     );
+    fonts
+        .families
+        .insert(math(), chain(&[&math_f, &regular, &ko, &sym, &emoji]));
     fonts
 }
 

@@ -1,5 +1,13 @@
 # MDEditor 작업 기록
 
+## 2026-11-26 — v0.18.0: 수식을 조판해 보여 주고 그림으로 인쇄
+
+- **LaTeX 수식 조판기 (`src/math.rs`)**: 외부 의존성 없는 egui Painter 기반 조판. 분수(`\frac`·`\binom`), 첨자, 루트(`\sqrt[n]`), 그리스 문자, 연산·관계 기호, 큰 연산자(`\sum`·`\int`·`\lim` — 블록 수식에서는 위아래 첨자), `\left( \right)`·`\big` 늘어나는 괄호(선으로 그림), 행렬(`matrix`/`pmatrix`/`bmatrix`/`vmatrix`), `cases`, `aligned`, 최상위 `\\` 여러 줄, 악센트(`\hat \bar \vec \dot \tilde \overline \underline`), `\text`, `\mathbf`/`\mathbb`/`\mathcal`, 간격(`\, \quad` 등), TeX 원자 간격 근사. 변수는 유니코드 수학 이탤릭 글자. 모르는 명령은 이름을 글자로 보여 준다. 글자 높이는 em 비율 근사.
+- **수식 글꼴 (`src/theme.rs`)**: `theme::math()` 글꼴 묶음 = Cambria Math(`cambria.ttc#1`, macOS는 STIX Two Math) → 본문 → 맑은 고딕. 없으면 본문 글꼴로.
+- **보기 화면 (`src/ui.rs`)**: `$$` 블록 수식이 고정폭 원문 대신 조판된 수식으로 보인다(넓으면 폭에 맞춰 줄임). 그림이 든 문서(egui_commonmark 경로)의 수식도 같은 조판기. 편집할 때는 원문.
+- **인쇄 (`src/print.rs`)**: Mermaid용 화면 밖 렌더러를 `Offscreen`으로 일반화해 인쇄 한 번 동안 재사용. 블록 수식은 가운데 정렬 그림, 줄 안 `$…$` 수식은 글줄 기준선에 맞춘 줄 안 그림(`Style::img`, 줄 높이는 그림 높이를 반영).
+- **검증**: `parses_and_lays_out_common_latex`(분수·첨자·∑ 위아래 첨자·행렬·여러 줄·깨진 입력 패닉 없음), `math_prints_as_pictures_inline_and_block` 추가. 근의 공식·∑/∫·lim·행렬·cases·aligned·코시-슈바르츠·악센트를 "Microsoft Print to PDF"로 인쇄해 눈으로 확인(aligned `&=` 앞 간격 누락 수정). `cargo clippy --all-targets -- -D warnings`, `cargo test`(90개 통과).
+
 ## 2026-11-26 — v0.17.2: 순서도 긴 화살표가 중간 노드와 겹치지 않게
 
 - **긴 간선 경유점 (`src/mermaid.rs`)**: `B -->|아니오| D`처럼 2계층 이상 건너뛰는 간선이 중간 계층 노드(C)를 그대로 관통하는 직선이라 `B→C→D` 선과 겹쳐 보이지 않았다. 배치 단계에서 사이 계층마다 작은 가짜 노드(경유점)를 넣어 교차 최소화(barycenter)와 계층 폭 계산에 자리를 잡게 하고, 배치가 끝나면 가짜 노드는 지우고 위치만 `Edge::via`로 남긴다. 그릴 때는 시작 노드 → 경유점들 → 끝 노드를 계층 방향 접선의 곡선으로 잇고, 라벨은 가운데 경유점에 둔다. 보기 화면과 인쇄 모두 적용.

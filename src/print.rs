@@ -1,7 +1,6 @@
 // 네이티브 인쇄: 마크다운 → 페이지별 그리기 명령(배치) → Windows 인쇄 대화상자 + GDI.
 // 배치는 측정기(Measure)만 바꾸면 프린터 없이 테스트할 수 있다. 단위는 pt(1/72인치).
-// Mermaid는 화면과 같은 렌더러로 그림을 떠서 인쇄한다(mermaid_image).
-// ponytail: 수식은 코드 글자 그대로 인쇄한다. 그림으로 필요하면 그때 렌더러를 붙인다.
+// Mermaid·수식은 보기 화면과 같은 렌더러로 그림을 떠서 인쇄한다(Offscreen). 줄 안 수식은 글줄 기준선에 맞춘 그림.
 use std::rc::Rc;
 
 use eframe::egui;
@@ -34,6 +33,15 @@ pub(crate) struct Style {
     pub strike: bool,
     pub color: u32, // 0xRRGGBB
     pub bg: Option<u32>,
+    pub img: Option<InlineImg>, // 줄 안 그림(인라인 수식). 글자 대신 "\u{FFFC}" 한 글자로 자리를 잡는다
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct InlineImg {
+    idx: usize, // Layout::inline_imgs
+    w: f32,
+    asc: f32,
+    desc: f32,
 }
 
 impl Style {
@@ -47,6 +55,7 @@ impl Style {
             strike: false,
             color: TEXT,
             bg: None,
+            img: None,
         }
     }
 }
@@ -100,12 +109,37 @@ struct Line {
     pieces: Vec<Piece>,
     w: f32,
     size: f32, // 줄에서 가장 큰 글자 크기
+    asc: f32,  // 줄 안 그림의 기준선 위·아래 (없으면 0)
+    desc: f32,
 }
 
 impl Line {
     fn h(&self) -> f32 {
-        self.size * LH
+        if self.asc + self.desc > 0.0 {
+            (self.size * LH).max(
+                self.asc.max(self.size * 0.8) + self.desc.max(self.size * 0.3) + self.size * 0.3,
+            )
+        } else {
+            self.size * LH
+        }
     }
+
+    fn baseline(&self) -> f32 {
+        let h = self.h();
+        if self.asc + self.desc > 0.0 {
+            let (a, d) = (
+                self.asc.max(self.size * 0.8),
+                self.desc.max(self.size * 0.3),
+            );
+            (h - a - d) / 2.0 + a
+        } else {
+            h / 2.0 + self.size * 0.35
+        }
+    }
+}
+
+fn run_width(m: &dyn Measure, text: &str, st: &Style) -> f32 {
+    st.img.map_or_else(|| m.width(text, st), |i| i.w)
 }
 
 type Runs = Vec<(String, Style)>;
@@ -132,10 +166,14 @@ fn tokens(s: &str) -> Vec<&str> {
 fn break_lines(m: &dyn Measure, runs: &[(String, Style)], width: f32) -> Vec<Line> {
     fn add(m: &dyn Measure, cur: &mut Line, text: &str, st: &Style, w: f32) {
         cur.size = cur.size.max(st.size);
+        if let Some(i) = st.img {
+            cur.asc = cur.asc.max(i.asc);
+            cur.desc = cur.desc.max(i.desc);
+        }
         if let Some(last) = cur.pieces.last_mut() {
             if last.style.as_ref() == Some(st) {
                 last.text.push_str(text);
-                last.w = m.width(&last.text, st);
+                last.w = run_width(m, &last.text, st);
                 cur.w = last.x + last.w;
                 return;
             }
@@ -152,7 +190,7 @@ fn break_lines(m: &dyn Measure, runs: &[(String, Style)], width: f32) -> Vec<Lin
         let mut l = std::mem::take(cur);
         if let Some(last) = l.pieces.last_mut() {
             let t = last.text.trim_end().len();
-            if t < last.text.len() {
+            if t < last.text.len() && last.style.as_ref().is_some_and(|s| s.img.is_none()) {
                 last.text.truncate(t);
                 last.w = m.width(&last.text, last.style.as_ref().unwrap());
                 l.w = last.x + last.w;
@@ -173,11 +211,11 @@ fn break_lines(m: &dyn Measure, runs: &[(String, Style)], width: f32) -> Vec<Lin
                 push(m, &mut lines, &mut cur, st.size);
             }
             for tok in tokens(seg) {
-                let tw = m.width(tok, st);
+                let tw = run_width(m, tok, st);
                 if cur.w > 0.0 && cur.w + tw > width && !tok.trim().is_empty() {
                     push(m, &mut lines, &mut cur, st.size);
                 }
-                if tw <= width {
+                if tw <= width || st.img.is_some() {
                     add(m, &mut cur, tok, st, tw);
                     continue;
                 }
@@ -232,9 +270,15 @@ pub(crate) struct Layout<'a> {
     in_image: u16,
     prefix: Option<(String, Style)>,
     mermaid: bool,
+    off: Option<Offscreen>, // 다이어그램·수식 그림용 화면 밖 egui (처음 쓸 때 만든다)
+    inline_imgs: Vec<Rc<image::RgbaImage>>,
 }
 
 impl<'a> Layout<'a> {
+    fn offscreen(&mut self) -> &mut Offscreen {
+        self.off.get_or_insert_with(Offscreen::new)
+    }
+
     fn page(&mut self) -> &mut Vec<Op> {
         self.pages.last_mut().unwrap()
     }
@@ -273,10 +317,21 @@ impl<'a> Layout<'a> {
 
     fn line_ops(&mut self, line: &Line, x: f32) {
         let h = line.h();
-        let base = self.y + h / 2.0 + line.size * 0.35;
+        let base = self.y + line.baseline();
         let y = self.y;
         for p in &line.pieces {
             let st = p.style.clone().unwrap();
+            if let Some(i) = st.img {
+                let img = Rc::clone(&self.inline_imgs[i.idx]);
+                self.page().push(Op::Image {
+                    x: x + p.x,
+                    y: base - i.asc,
+                    w: i.w,
+                    h: i.asc + i.desc,
+                    img,
+                });
+                continue;
+            }
             if let Some(bg) = st.bg {
                 let bh = st.size * 1.3;
                 self.page().push(Op::Rect {
@@ -412,11 +467,11 @@ impl<'a> Layout<'a> {
 
     fn image(&mut self, url: &str) {
         if let Some(img) = (self.load)(url) {
-            self.place(img, 0.75); // 96dpi 픽셀 → pt
+            self.place(img, 0.75, false); // 96dpi 픽셀 → pt
         }
     }
 
-    fn place(&mut self, img: image::RgbaImage, pt_per_px: f32) {
+    fn place(&mut self, img: image::RgbaImage, pt_per_px: f32, center: bool) {
         let avail = self.w - self.x;
         let (pw, ph) = (
             img.width() as f32 * pt_per_px,
@@ -425,7 +480,12 @@ impl<'a> Layout<'a> {
         let s = (avail / pw).min(self.h / ph).min(1.0);
         let (w, h) = (pw * s, ph * s);
         self.ensure(h);
-        let (x, y) = (self.x, self.y);
+        let x = if center {
+            self.x + (avail - w) / 2.0
+        } else {
+            self.x
+        };
+        let y = self.y;
         self.page().push(Op::Image {
             x,
             y,
@@ -451,7 +511,7 @@ impl<'a> Layout<'a> {
                     .map(|(s, st)| {
                         let mut st = st.clone();
                         st.bold |= *head;
-                        self.m.width(s, &st)
+                        run_width(self.m, s, &st)
                     })
                     .sum();
                 nat[i] = nat[i].max(w + 2.0 * pad);
@@ -548,7 +608,29 @@ impl<'a> Layout<'a> {
                     self.runs.push((t.into_string(), self.style()));
                 }
             }
-            Event::Code(t) | Event::InlineMath(t) => {
+            Event::InlineMath(t) => {
+                let size = self.style().size;
+                match self.offscreen().math(&t, size, false) {
+                    Some((img, asc)) => {
+                        let (w, h) = (
+                            img.width() as f32 / DIAGRAM_PX,
+                            img.height() as f32 / DIAGRAM_PX,
+                        );
+                        let idx = self.inline_imgs.len();
+                        self.inline_imgs.push(Rc::new(img));
+                        let mut st = self.style();
+                        st.img = Some(InlineImg {
+                            idx,
+                            w,
+                            asc,
+                            desc: h - asc,
+                        });
+                        self.runs.push(("\u{FFFC}".into(), st));
+                    }
+                    None => self.runs.push((t.into_string(), self.style())),
+                }
+            }
+            Event::Code(t) => {
                 let mut st = self.style();
                 st.mono = true;
                 st.size *= 0.9;
@@ -557,7 +639,14 @@ impl<'a> Layout<'a> {
             }
             Event::DisplayMath(t) => {
                 self.flush(0.0);
-                self.code_block(t.trim());
+                match self.offscreen().math(&t, BODY * 1.15, true) {
+                    Some((img, _)) => {
+                        self.gap(4.0);
+                        self.place(img, 1.0 / DIAGRAM_PX, true);
+                        self.y += 4.0;
+                    }
+                    None => self.code_block(t.trim()),
+                }
             }
             Event::InlineHtml(t) if self.inline_tag(&t) => {}
             Event::Html(t) | Event::InlineHtml(t) => {
@@ -716,12 +805,12 @@ impl<'a> Layout<'a> {
                 if let Some(c) = self.code.take() {
                     let avail = self.w - self.x;
                     match std::mem::take(&mut self.mermaid)
-                        .then(|| mermaid_image(&c, avail))
+                        .then(|| self.offscreen().mermaid(&c, avail))
                         .flatten()
                     {
                         Some(img) => {
                             self.gap(4.0);
-                            self.place(img, 1.0 / DIAGRAM_PX);
+                            self.place(img, 1.0 / DIAGRAM_PX, false);
                             self.y += 4.0;
                         }
                         None => self.code_block(&c), // 그릴 수 없는 다이어그램은 코드 그대로
@@ -784,77 +873,112 @@ impl<'a> Layout<'a> {
 // Mermaid 그림 해상도: egui 1pt(=인쇄 1pt)당 픽셀 (≈216dpi)
 const DIAGRAM_PX: f32 = 3.0;
 
-// Mermaid를 화면 밖 egui에서 보기 화면과 같은 렌더러(밝은 테마)로 그린 뒤,
-// 나온 삼각형 메시를 소프트웨어로 래스터화해 흰 바탕 이미지로 만든다. 그릴 수 없으면 None.
-fn mermaid_image(code: &str, width_pt: f32) -> Option<image::RgbaImage> {
-    use egui::epaint::Primitive;
-    let ctx = egui::Context::default();
-    crate::theme::install_fonts(&ctx);
-    let mut pal = crate::theme::pal(false);
-    (pal.bg, pal.surface) = (egui::Color32::WHITE, egui::Color32::WHITE); // 종이 바탕 (파이 가운데 구멍 등)
-    let mut input = egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(width_pt, 20_000.0),
-        )),
-        ..Default::default()
-    };
-    input
-        .viewports
-        .entry(egui::ViewportId::ROOT)
-        .or_default()
-        .native_pixels_per_point = Some(DIAGRAM_PX);
-    let mut used = egui::Rect::NOTHING;
-    let mut ok = false;
-    let mut frame = |ui: &mut egui::Ui| {
-        ok = crate::mermaid::render(ui, &pal, code, 11.0, width_pt);
-        used = ui.min_rect();
-    };
-    // 글꼴은 첫 프레임이 시작될 때 적용되므로 두 번 그린다
-    let mut textures: std::collections::HashMap<egui::TextureId, egui::ColorImage> =
-        std::collections::HashMap::new();
-    let mut out = ctx.run_ui(input.clone(), &mut frame);
-    for (id, ds) in out.textures_delta.set.drain() {
-        ds.into_iter()
-            .for_each(|d| apply_delta(&mut textures, id, d));
-    }
-    out.textures_delta.clear(); // 처리 안 한 변경이 남은 채 버리면 egui가 패닉한다
-    let mut out = ctx.run_ui(input, &mut frame);
-    for (id, ds) in out.textures_delta.set.drain() {
-        ds.into_iter()
-            .for_each(|d| apply_delta(&mut textures, id, d));
-    }
-    out.textures_delta.clear();
-    if !ok || !used.is_positive() {
-        return None;
-    }
-    let ppp = out.pixels_per_point;
-    let (w, h) = (
-        (used.width() * ppp).ceil() as u32,
-        (used.height() * ppp).ceil() as u32,
-    );
-    let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
-    for prim in ctx.tessellate(std::mem::take(&mut out.shapes), ppp) {
-        let Primitive::Mesh(mesh) = prim.primitive else {
-            continue;
-        };
-        let Some(tex) = textures.get(&mesh.texture_id) else {
-            continue;
-        };
-        let clip = prim.clip_rect.intersect(used);
-        let to_px = |p: egui::Pos2| (p - used.min) * ppp;
-        let (cx0, cy0) = (to_px(clip.min).x.max(0.0), to_px(clip.min).y.max(0.0));
-        let (cx1, cy1) = (
-            to_px(clip.max).x.min(w as f32),
-            to_px(clip.max).y.min(h as f32),
-        );
-        for t in mesh.indices.as_chunks::<3>().0 {
-            let v = [0, 1, 2].map(|k| &mesh.vertices[t[k] as usize]);
-            let p = v.map(|v| to_px(v.pos));
-            fill_triangle(&mut img, tex, p, v, (cx0, cy0, cx1, cy1));
+// 화면 밖 egui: 보기 화면과 같은 렌더러(밝은 테마, 종이색 바탕)로 그린 도형을 tessellate한 뒤
+// 삼각형 메시를 소프트웨어로 래스터화해 흰 바탕 이미지로 만든다. 인쇄 한 번 동안 재사용한다.
+struct Offscreen {
+    ctx: egui::Context,
+    pal: crate::theme::Pal,
+    textures: std::collections::HashMap<egui::TextureId, egui::ColorImage>,
+}
+
+impl Offscreen {
+    fn new() -> Self {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let mut pal = crate::theme::pal(false);
+        (pal.bg, pal.surface) = (egui::Color32::WHITE, egui::Color32::WHITE); // 파이 가운데 구멍 등
+        Self {
+            ctx,
+            pal,
+            textures: std::collections::HashMap::new(),
         }
     }
-    Some(img)
+
+    fn mermaid(&mut self, code: &str, width_pt: f32) -> Option<image::RgbaImage> {
+        let pal = self.pal;
+        self.render(width_pt, |ui| {
+            crate::mermaid::render(ui, &pal, code, 11.0, width_pt).then(|| {
+                let r = ui.min_rect();
+                (r, r.bottom())
+            })
+        })
+        .map(|(img, _)| img)
+    }
+
+    // 수식 그림과 기준선 위 높이(pt)
+    fn math(&mut self, src: &str, size: f32, display: bool) -> Option<(image::RgbaImage, f32)> {
+        let pal = self.pal;
+        self.render(4000.0, |ui| {
+            crate::math::render(ui, &pal, src, size, display)
+        })
+    }
+
+    // draw가 돌려준 영역만 잘라 그림으로. 두 번째 값은 영역 위에서 기준선까지(pt)
+    fn render(
+        &mut self,
+        width_pt: f32,
+        mut draw: impl FnMut(&mut egui::Ui) -> Option<(egui::Rect, f32)>,
+    ) -> Option<(image::RgbaImage, f32)> {
+        use egui::epaint::Primitive;
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width_pt, 20_000.0),
+            )),
+            ..Default::default()
+        };
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(DIAGRAM_PX);
+        let mut got = None;
+        let mut frame = |ui: &mut egui::Ui| got = draw(ui);
+        // 글꼴은 첫 프레임이 시작될 때 적용되고, 처음 보는 위젯은 크기 재기 프레임이 있어 두 번 그린다
+        let mut out = self.ctx.run_ui(input.clone(), &mut frame);
+        for (id, ds) in out.textures_delta.set.drain() {
+            ds.into_iter()
+                .for_each(|d| apply_delta(&mut self.textures, id, d));
+        }
+        out.textures_delta.clear(); // 처리 안 한 변경이 남은 채 버리면 egui가 패닉한다
+        let mut out = self.ctx.run_ui(input, &mut frame);
+        for (id, ds) in out.textures_delta.set.drain() {
+            ds.into_iter()
+                .for_each(|d| apply_delta(&mut self.textures, id, d));
+        }
+        out.textures_delta.clear();
+        let (used, base) = got?;
+        if !used.is_positive() {
+            return None;
+        }
+        let ppp = out.pixels_per_point;
+        let (w, h) = (
+            (used.width() * ppp).ceil() as u32,
+            (used.height() * ppp).ceil() as u32,
+        );
+        let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+        for prim in self.ctx.tessellate(std::mem::take(&mut out.shapes), ppp) {
+            let Primitive::Mesh(mesh) = prim.primitive else {
+                continue;
+            };
+            let Some(tex) = self.textures.get(&mesh.texture_id) else {
+                continue;
+            };
+            let clip = prim.clip_rect.intersect(used);
+            let to_px = |p: egui::Pos2| (p - used.min) * ppp;
+            let (cx0, cy0) = (to_px(clip.min).x.max(0.0), to_px(clip.min).y.max(0.0));
+            let (cx1, cy1) = (
+                to_px(clip.max).x.min(w as f32),
+                to_px(clip.max).y.min(h as f32),
+            );
+            for t in mesh.indices.as_chunks::<3>().0 {
+                let v = [0, 1, 2].map(|k| &mesh.vertices[t[k] as usize]);
+                let p = v.map(|v| to_px(v.pos));
+                fill_triangle(&mut img, tex, p, v, (cx0, cy0, cx1, cy1));
+            }
+        }
+        Some((img, (base - used.top()).max(0.0)))
+    }
 }
 
 fn apply_delta(
@@ -1025,6 +1149,8 @@ pub(crate) fn layout(
         in_image: 0,
         prefix: None,
         mermaid: false,
+        off: None,
+        inline_imgs: Vec::new(),
     };
     for ev in Parser::new_ext(&clean, opts) {
         l.event(ev);
@@ -1393,6 +1519,35 @@ mod tests {
         let n = pages.len();
         assert!(n >= 2, "{n}");
         assert!(t.iter().any(|x| x.1 == format!("{n} / {n}")));
+    }
+
+    #[test]
+    fn math_prints_as_pictures_inline_and_block() {
+        let no_img = |_: &str| None;
+        let md = "앞 $x^2$ 뒤\n\n$$\n\\frac{a}{b}\n$$\n";
+        let pages = layout(md, &Fake, &no_img, 500.0, 700.0);
+        let imgs: Vec<(f32, f32, f32)> = pages[0]
+            .iter()
+            .filter_map(|op| match op {
+                Op::Image { x, y, h, .. } => Some((*x, *y, *h)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(imgs.len(), 2, "{imgs:?}");
+        let t = texts(&pages);
+        assert!(!t
+            .iter()
+            .any(|x| x.1.contains("x^2") || x.1.contains("frac")));
+        // 줄 안 수식은 "앞" 뒤에 같은 줄로, 블록 수식은 가운데로
+        let (ax, _) = pages[0]
+            .iter()
+            .find_map(|op| match op {
+                Op::Text { x, y, text, .. } if text.contains('앞') => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(imgs[0].0 > ax && imgs[0].1 < 30.0, "{imgs:?}");
+        assert!(imgs[1].0 > 100.0, "display math centered: {imgs:?}");
     }
 
     #[test]
