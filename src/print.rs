@@ -1,9 +1,14 @@
 // 네이티브 인쇄: 마크다운 → 페이지별 그리기 명령(배치) → Windows 인쇄 대화상자 + GDI.
 // 배치는 측정기(Measure)만 바꾸면 프린터 없이 테스트할 수 있다. 단위는 pt(1/72인치).
-// ponytail: Mermaid·수식은 코드 글자 그대로 인쇄한다. 그림으로 필요하면 그때 렌더러를 붙인다.
+// Mermaid는 화면과 같은 렌더러로 그림을 떠서 인쇄한다(mermaid_image).
+// ponytail: 수식은 코드 글자 그대로 인쇄한다. 그림으로 필요하면 그때 렌더러를 붙인다.
 use std::rc::Rc;
 
-use pulldown_cmark::{Alignment, BlockQuoteKind, Event, Options, Parser, Tag, TagEnd};
+use eframe::egui;
+
+use pulldown_cmark::{
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd,
+};
 
 use crate::textops::{escape_plus_lines, inline_spans, preprocess, Inline};
 
@@ -226,6 +231,7 @@ pub(crate) struct Layout<'a> {
     table: Option<Table>,
     in_image: u16,
     prefix: Option<(String, Style)>,
+    mermaid: bool,
 }
 
 impl<'a> Layout<'a> {
@@ -405,11 +411,17 @@ impl<'a> Layout<'a> {
     }
 
     fn image(&mut self, url: &str) {
-        let Some(img) = (self.load)(url) else {
-            return;
-        };
+        if let Some(img) = (self.load)(url) {
+            self.place(img, 0.75); // 96dpi 픽셀 → pt
+        }
+    }
+
+    fn place(&mut self, img: image::RgbaImage, pt_per_px: f32) {
         let avail = self.w - self.x;
-        let (pw, ph) = (img.width() as f32 * 0.75, img.height() as f32 * 0.75); // 96dpi 픽셀 → pt
+        let (pw, ph) = (
+            img.width() as f32 * pt_per_px,
+            img.height() as f32 * pt_per_px,
+        );
         let s = (avail / pw).min(self.h / ph).min(1.0);
         let (w, h) = (pw * s, ph * s);
         self.ensure(h);
@@ -617,9 +629,10 @@ impl<'a> Layout<'a> {
                 self.gap(8.0);
                 self.heading = Some(level as usize);
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.flush(0.0);
                 self.code = Some(String::new());
+                self.mermaid = matches!(&kind, CodeBlockKind::Fenced(l) if l.trim().eq_ignore_ascii_case("mermaid"));
             }
             Tag::List(first) => {
                 self.flush(0.0);
@@ -701,7 +714,18 @@ impl<'a> Layout<'a> {
             }
             TagEnd::CodeBlock => {
                 if let Some(c) = self.code.take() {
-                    self.code_block(&c);
+                    let avail = self.w - self.x;
+                    match std::mem::take(&mut self.mermaid)
+                        .then(|| mermaid_image(&c, avail))
+                        .flatten()
+                    {
+                        Some(img) => {
+                            self.gap(4.0);
+                            self.place(img, 1.0 / DIAGRAM_PX);
+                            self.y += 4.0;
+                        }
+                        None => self.code_block(&c), // 그릴 수 없는 다이어그램은 코드 그대로
+                    }
                 }
             }
             TagEnd::List(_) => {
@@ -753,6 +777,173 @@ impl<'a> Layout<'a> {
             }
             TagEnd::TableHead | TagEnd::TableRow => {}
             _ => self.flush(4.0),
+        }
+    }
+}
+
+// Mermaid 그림 해상도: egui 1pt(=인쇄 1pt)당 픽셀 (≈216dpi)
+const DIAGRAM_PX: f32 = 3.0;
+
+// Mermaid를 화면 밖 egui에서 보기 화면과 같은 렌더러(밝은 테마)로 그린 뒤,
+// 나온 삼각형 메시를 소프트웨어로 래스터화해 흰 바탕 이미지로 만든다. 그릴 수 없으면 None.
+fn mermaid_image(code: &str, width_pt: f32) -> Option<image::RgbaImage> {
+    use egui::epaint::Primitive;
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx);
+    let mut pal = crate::theme::pal(false);
+    (pal.bg, pal.surface) = (egui::Color32::WHITE, egui::Color32::WHITE); // 종이 바탕 (파이 가운데 구멍 등)
+    let mut input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width_pt, 20_000.0),
+        )),
+        ..Default::default()
+    };
+    input
+        .viewports
+        .entry(egui::ViewportId::ROOT)
+        .or_default()
+        .native_pixels_per_point = Some(DIAGRAM_PX);
+    let mut used = egui::Rect::NOTHING;
+    let mut ok = false;
+    let mut frame = |ui: &mut egui::Ui| {
+        ok = crate::mermaid::render(ui, &pal, code, 11.0, width_pt);
+        used = ui.min_rect();
+    };
+    // 글꼴은 첫 프레임이 시작될 때 적용되므로 두 번 그린다
+    let mut textures: std::collections::HashMap<egui::TextureId, egui::ColorImage> =
+        std::collections::HashMap::new();
+    let mut out = ctx.run_ui(input.clone(), &mut frame);
+    for (id, ds) in out.textures_delta.set.drain() {
+        ds.into_iter()
+            .for_each(|d| apply_delta(&mut textures, id, d));
+    }
+    let mut out = ctx.run_ui(input, &mut frame);
+    if !ok || !used.is_positive() {
+        return None;
+    }
+    for (id, ds) in out.textures_delta.set.drain() {
+        ds.into_iter()
+            .for_each(|d| apply_delta(&mut textures, id, d));
+    }
+    let ppp = out.pixels_per_point;
+    let (w, h) = (
+        (used.width() * ppp).ceil() as u32,
+        (used.height() * ppp).ceil() as u32,
+    );
+    let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([255, 255, 255, 255]));
+    for prim in ctx.tessellate(std::mem::take(&mut out.shapes), ppp) {
+        let Primitive::Mesh(mesh) = prim.primitive else {
+            continue;
+        };
+        let Some(tex) = textures.get(&mesh.texture_id) else {
+            continue;
+        };
+        let clip = prim.clip_rect.intersect(used);
+        let to_px = |p: egui::Pos2| (p - used.min) * ppp;
+        let (cx0, cy0) = (to_px(clip.min).x.max(0.0), to_px(clip.min).y.max(0.0));
+        let (cx1, cy1) = (
+            to_px(clip.max).x.min(w as f32),
+            to_px(clip.max).y.min(h as f32),
+        );
+        for t in mesh.indices.as_chunks::<3>().0 {
+            let v = [0, 1, 2].map(|k| &mesh.vertices[t[k] as usize]);
+            let p = v.map(|v| to_px(v.pos));
+            fill_triangle(&mut img, tex, p, v, (cx0, cy0, cx1, cy1));
+        }
+    }
+    Some(img)
+}
+
+fn apply_delta(
+    textures: &mut std::collections::HashMap<egui::TextureId, egui::ColorImage>,
+    id: egui::TextureId,
+    d: egui::epaint::ImageDelta,
+) {
+    let egui::epaint::ImageData::Color(src) = d.image;
+    match d.pos {
+        None => {
+            textures.insert(id, (*src).clone());
+        }
+        Some([x0, y0]) => {
+            if let Some(dst) = textures.get_mut(&id) {
+                for y in 0..src.size[1] {
+                    for x in 0..src.size[0] {
+                        dst.pixels[(y0 + y) * dst.size[0] + x0 + x] =
+                            src.pixels[y * src.size[0] + x];
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 픽셀 중심이 삼각형 안이면 (꼭짓점 색 × 텍스처)를 premultiplied "over"로 합성
+fn fill_triangle(
+    img: &mut image::RgbaImage,
+    tex: &egui::ColorImage,
+    p: [egui::Vec2; 3],
+    v: [&egui::epaint::Vertex; 3],
+    (cx0, cy0, cx1, cy1): (f32, f32, f32, f32),
+) {
+    let area = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[2].x - p[0].x) * (p[1].y - p[0].y);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    let x0 = p
+        .iter()
+        .map(|q| q.x)
+        .fold(f32::MAX, f32::min)
+        .max(cx0)
+        .floor() as i32;
+    let x1 = p
+        .iter()
+        .map(|q| q.x)
+        .fold(f32::MIN, f32::max)
+        .min(cx1)
+        .ceil() as i32;
+    let y0 = p
+        .iter()
+        .map(|q| q.y)
+        .fold(f32::MAX, f32::min)
+        .max(cy0)
+        .floor() as i32;
+    let y1 = p
+        .iter()
+        .map(|q| q.y)
+        .fold(f32::MIN, f32::max)
+        .min(cy1)
+        .ceil() as i32;
+    let edge = |a: egui::Vec2, b: egui::Vec2, x: f32, y: f32| {
+        (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x)
+    };
+    let [tw, th] = tex.size;
+    for py in y0.max(0)..y1.min(img.height() as i32) {
+        for px in x0.max(0)..x1.min(img.width() as i32) {
+            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
+            let w0 = edge(p[1], p[2], x, y) / area;
+            let w1 = edge(p[2], p[0], x, y) / area;
+            let w2 = 1.0 - w0 - w1;
+            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                continue;
+            }
+            let uv = v[0].uv.to_vec2() * w0 + v[1].uv.to_vec2() * w1 + v[2].uv.to_vec2() * w2;
+            let tx = ((uv.x * tw as f32) as usize).min(tw - 1);
+            let ty = ((uv.y * th as f32) as usize).min(th - 1);
+            let t = tex.pixels[ty * tw + tx].to_array();
+            let c = [0, 1, 2, 3].map(|k| {
+                let vc = f32::from(v[0].color.to_array()[k]) * w0
+                    + f32::from(v[1].color.to_array()[k]) * w1
+                    + f32::from(v[2].color.to_array()[k]) * w2;
+                vc * f32::from(t[k]) / 255.0
+            });
+            let a = c[3] / 255.0;
+            let d = img.get_pixel_mut(px as u32, py as u32);
+            for k in 0..3 {
+                d[k] = (c[k] + f32::from(d[k]) * (1.0 - a))
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
         }
     }
 }
@@ -831,6 +1022,7 @@ pub(crate) fn layout(
         table: None,
         in_image: 0,
         prefix: None,
+        mermaid: false,
     };
     for ev in Parser::new_ext(&clean, opts) {
         l.event(ev);
@@ -1199,6 +1391,24 @@ mod tests {
         let n = pages.len();
         assert!(n >= 2, "{n}");
         assert!(t.iter().any(|x| x.1 == format!("{n} / {n}")));
+    }
+
+    #[test]
+    fn mermaid_prints_as_picture() {
+        let no_img = |_: &str| None;
+        let md = "```mermaid\nflowchart LR\n  A[시작] --> B[끝]\n```\n";
+        let pages = layout(md, &Fake, &no_img, 500.0, 700.0);
+        let img = pages[0]
+            .iter()
+            .find_map(|op| match op {
+                Op::Image { img, w, .. } => Some((img.clone(), *w)),
+                _ => None,
+            })
+            .expect("mermaid → image");
+        // 흰 바탕 위에 무언가 그려졌고, 코드 글자는 인쇄하지 않는다
+        assert!(img.0.pixels().any(|p| p[0] < 200), "blank diagram");
+        assert!(img.1 <= 500.0);
+        assert!(!texts(&pages).iter().any(|t| t.1.contains("flowchart")));
     }
 
     // 실제 GDI로 "Microsoft Print to PDF"에 인쇄해 PDF를 만든다 (눈으로 확인용)
