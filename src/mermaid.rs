@@ -110,6 +110,7 @@ struct Edge {
     style: LineStyle,
     arrow_end: bool,
     arrow_start: bool,
+    via: Vec<Pos2>, // 2계층 이상 건너뛰는 간선의 경유점 (중간 노드를 관통하지 않게)
 }
 
 struct Subgraph {
@@ -629,6 +630,7 @@ fn parse_graph(code: &str) -> Graph {
                                 style,
                                 arrow_start: a_start,
                                 arrow_end: a_end,
+                                via: Vec::new(),
                             });
                         }
                     }
@@ -670,6 +672,7 @@ fn parse_graph(code: &str) -> Graph {
                             style,
                             arrow_start: a_start,
                             arrow_end: a_end,
+                            via: Vec::new(),
                         });
                     }
                 }
@@ -848,6 +851,59 @@ fn layout_flowchart_graph(
         }
     }
 
+    // 긴 간선은 사이 계층마다 경유점(크기 작은 가짜 노드)을 넣어 자리를 잡는다.
+    // 가짜 노드는 배치가 끝나면 지우고 위치만 간선의 via로 남긴다.
+    let is_horizontal = matches!(g.dir, Dir::LR | Dir::RL);
+    let dummy_size = if is_horizontal {
+        vec2(0.0, 14.0)
+    } else {
+        vec2(14.0, 0.0)
+    };
+    let mut order_edges: Vec<Edge> = Vec::new(); // 교차 최소화용 (경유점 사슬 포함)
+    let mut chains: Vec<(usize, Vec<usize>)> = Vec::new();
+    for ei in 0..g.edges.len() {
+        let e = g.edges[ei].clone();
+        let (a, b) = if rank[e.from] <= rank[e.to] {
+            (e.from, e.to)
+        } else {
+            (e.to, e.from)
+        };
+        if e.from == e.to || rank[b] - rank[a] < 2 {
+            order_edges.push(e);
+            continue;
+        }
+        let mut prev = a;
+        let mut ds = Vec::new();
+        for r in rank[a] + 1..rank[b] {
+            let d = g.nodes.len();
+            g.nodes.push(Node {
+                label: String::new(),
+                shape: NodeShape::Rect,
+                fill: None,
+                stroke: None,
+                size: dummy_size,
+                pos: Pos2::ZERO,
+            });
+            rank.push(r);
+            ds.push(d);
+            order_edges.push(Edge {
+                from: prev,
+                to: d,
+                ..e.clone()
+            });
+            prev = d;
+        }
+        order_edges.push(Edge {
+            from: prev,
+            to: b,
+            ..e.clone()
+        });
+        if e.from != a {
+            ds.reverse();
+        }
+        chains.push((ei, ds));
+    }
+
     let max_rank = rank.iter().copied().max().unwrap_or(0);
     let mut layers: Vec<Vec<usize>> = vec![Vec::new(); max_rank + 1];
     for (i, &r) in rank.iter().enumerate() {
@@ -863,8 +919,8 @@ fn layout_flowchart_graph(
             for l in 1..layers.len() {
                 let prev = layers[l - 1].clone();
                 layers[l].sort_by(|&a, &b| {
-                    let ba = barycenter(a, &prev, &g.edges);
-                    let bb = barycenter(b, &prev, &g.edges);
+                    let ba = barycenter(a, &prev, &order_edges);
+                    let bb = barycenter(b, &prev, &order_edges);
                     ba.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
@@ -872,8 +928,8 @@ fn layout_flowchart_graph(
             for l in (0..layers.len().saturating_sub(1)).rev() {
                 let next = layers[l + 1].clone();
                 layers[l].sort_by(|&a, &b| {
-                    let ba = barycenter(a, &next, &g.edges);
-                    let bb = barycenter(b, &next, &g.edges);
+                    let ba = barycenter(a, &next, &order_edges);
+                    let bb = barycenter(b, &next, &order_edges);
                     ba.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
@@ -882,7 +938,6 @@ fn layout_flowchart_graph(
 
     // 4. 계층별 좌표 배치
     let has_labels = g.edges.iter().any(|e| !e.label.is_empty());
-    let is_horizontal = matches!(g.dir, Dir::LR | Dir::RL);
     let pad = 24.0;
     let sg_extra = if g.subgraphs.is_empty() { 0.0 } else { 22.0 };
 
@@ -945,6 +1000,10 @@ fn layout_flowchart_graph(
         let total_w = (x - layer_gap + pad + sg_extra).max(200.0);
         (total_w, total_h)
     };
+    for (ei, ds) in chains {
+        g.edges[ei].via = ds.iter().map(|&d| g.nodes[d].pos).collect();
+    }
+    g.nodes.truncate(n);
     Some((g, total_w, total_h))
 }
 
@@ -1095,6 +1154,48 @@ fn render_flowchart(
                 let nv = &g.nodes[e.to];
                 let cu = nu.pos + offset;
                 let cv = nv.pos + offset;
+
+                if !e.via.is_empty() {
+                    // 경유점을 지나는 곡선: 구간마다 계층 방향 접선으로 부드럽게 잇는다
+                    let mid: Vec<Pos2> = e.via.iter().map(|&v| v + offset).collect();
+                    let mut pts = vec![border_point(cu, nu.size, nu.shape, mid[0] - cu)];
+                    pts.extend(&mid);
+                    pts.push(border_point(cv, nv.size, nv.shape, mid[mid.len() - 1] - cv));
+                    let seg = |a: Pos2, b: Pos2| -> [Pos2; 4] {
+                        if is_horizontal {
+                            let dx = (b.x - a.x) * 0.45;
+                            [a, pos2(a.x + dx, a.y), pos2(b.x - dx, b.y), b]
+                        } else {
+                            let dy = (b.y - a.y) * 0.45;
+                            [a, pos2(a.x, a.y + dy), pos2(b.x, b.y - dy), b]
+                        }
+                    };
+                    let k = pts.len();
+                    let first = seg(pts[0], pts[1]);
+                    let last = seg(pts[k - 2], pts[k - 1]);
+                    let start_tangent = (first[0] - first[1]).normalized();
+                    let end_tangent = (last[3] - last[2]).normalized();
+                    for i in 0..k - 1 {
+                        let mut s = seg(pts[i], pts[i + 1]);
+                        if i == 0 && e.arrow_start {
+                            s[0] -= start_tangent * 4.0;
+                        }
+                        if i == k - 2 && e.arrow_end {
+                            s[3] -= end_tangent * 4.0;
+                        }
+                        draw_cubic(&painter, s, stroke, e.style == LineStyle::Dotted);
+                    }
+                    if e.arrow_end {
+                        draw_arrow(&painter, pts[k - 1], end_tangent, edge_color);
+                    }
+                    if e.arrow_start {
+                        draw_arrow(&painter, pts[0], start_tangent, edge_color);
+                    }
+                    if !e.label.is_empty() {
+                        draw_edge_label(&painter, p, pts[k / 2], &e.label);
+                    }
+                    continue;
+                }
 
                 // 양방향으로 별도 간선이 있거나 중복 간선이면 곡선 제어점을 옆으로 벌린다
                 let has_reverse = g
@@ -1934,6 +2035,37 @@ graph LR
         let pie = parse_pie("pie   title İstanbul İ\n  \"İ\" : 40\n  \"B\" : 60");
         assert_eq!(pie.title, "İstanbul İ");
         assert_eq!(pie.slices.len(), 2);
+    }
+
+    #[test]
+    fn long_edge_routes_around_middle_node() {
+        let ctx = egui::Context::default();
+        let p = theme::pal(false);
+        let mut out = None;
+        let mut full = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let src =
+                "flowchart TD\n  A --> B{ok}\n  B -->|yes| C[do]\n  B -->|no| D((end))\n  C --> D";
+            out = layout_flowchart_graph(ui, &p, src, &FontId::proportional(13.0), 600.0);
+        });
+        full.textures_delta.clear();
+        let (g, w, _) = out.unwrap();
+        assert_eq!(g.nodes.len(), 4); // 경유점용 가짜 노드는 남지 않는다
+        let c = &g.nodes[g.node_map["C"]];
+        let bd = g.edges.iter().find(|e| e.label == "no").unwrap();
+        assert_eq!(bd.via.len(), 1);
+        // 경유점은 C 상자 밖, 그림 안에 있다
+        let v = bd.via[0];
+        assert!(
+            (v.x - c.pos.x).abs() > c.size.x * 0.5,
+            "{v:?} vs {:?}",
+            c.pos
+        );
+        assert!(v.x > 0.0 && v.x < w);
+        assert!(g
+            .edges
+            .iter()
+            .filter(|e| e.label != "no")
+            .all(|e| e.via.is_empty()));
     }
 
     #[test]

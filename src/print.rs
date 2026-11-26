@@ -818,13 +818,15 @@ fn mermaid_image(code: &str, width_pt: f32) -> Option<image::RgbaImage> {
         ds.into_iter()
             .for_each(|d| apply_delta(&mut textures, id, d));
     }
+    out.textures_delta.clear(); // 처리 안 한 변경이 남은 채 버리면 egui가 패닉한다
     let mut out = ctx.run_ui(input, &mut frame);
-    if !ok || !used.is_positive() {
-        return None;
-    }
     for (id, ds) in out.textures_delta.set.drain() {
         ds.into_iter()
             .for_each(|d| apply_delta(&mut textures, id, d));
+    }
+    out.textures_delta.clear();
+    if !ok || !used.is_positive() {
+        return None;
     }
     let ppp = out.pixels_per_point;
     let (w, h) = (
