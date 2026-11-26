@@ -1018,7 +1018,15 @@ enum ContextMenu {
 }
 
 type CodeGalleyCache = HashMap<u64, (std::sync::Arc<egui::Galley>, Vec<f32>)>;
-type InlineGalleyCache = HashMap<u64, (std::sync::Arc<egui::Galley>, Vec<(Range<usize>, String)>)>;
+// (galley, 링크 글자 범위·주소, 줄 안 수식 자리·LaTeX)
+type InlineGalleyCache = HashMap<
+    u64,
+    (
+        std::sync::Arc<egui::Galley>,
+        Vec<(Range<usize>, String)>,
+        Vec<(usize, String)>,
+    ),
+>;
 type TableParseCache = HashMap<u64, (String, std::sync::Arc<MdTable>)>;
 type HangingLineCache = (u32, HashMap<u64, std::sync::Arc<egui::Galley>>);
 
@@ -10171,7 +10179,7 @@ Hello teh world.
             .state()
             .inline_galley_cache
             .values()
-            .map(|(g, _)| std::sync::Arc::as_ptr(g) as usize)
+            .map(|(g, _, _)| std::sync::Arc::as_ptr(g) as usize)
             .collect();
         let code_before: Vec<usize> = h
             .state()
@@ -10202,7 +10210,7 @@ Hello teh world.
             .state()
             .inline_galley_cache
             .values()
-            .map(|(g, _)| std::sync::Arc::as_ptr(g) as usize)
+            .map(|(g, _, _)| std::sync::Arc::as_ptr(g) as usize)
             .collect();
         let code_after: Vec<usize> = h
             .state()
@@ -10230,7 +10238,7 @@ Hello teh world.
             h.state()
                 .inline_galley_cache
                 .values()
-                .all(|(g, _)| !inline_before.contains(&(std::sync::Arc::as_ptr(g) as usize))),
+                .all(|(g, _, _)| !inline_before.contains(&(std::sync::Arc::as_ptr(g) as usize))),
             "가운데 맞춤 복귀 후에도 이전 아틀라스 인라인 Galley가 남아 있으면 안 됨"
         );
         assert!(

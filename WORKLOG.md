@@ -1,5 +1,10 @@
 # MDEditor 작업 기록
 
+## 2026-11-26 — v0.18.1: 화면의 줄 안 수식도 조판
+
+- **줄 안 수식 (`src/ui.rs`)**: 보기 화면 문단·목록·제목의 `$…$`가 코드 글자 대신 조판된 수식으로 보인다. 글줄은 LayoutJob 하나로 배치되므로 수식 자리에 줄바꿈 안 되는 공백(NBSP) 한 글자를 넣고(`push_math`), 배치 직전에 그 글자 크기를 키워 폭을 수식 폭과 같게, 줄 높이는 수식이 넘치는 만큼 위아래로 늘린다(`prepare_inline_maths`). 그린 뒤 그 글자 자리·같은 줄 글자 기준선에 수식을 덧그린다(`glyph_baseline`). 수식이 있는 글줄은 세로 가운데 정렬. 자간(extra_letter_spacing)으로 자리를 잡으면 egui가 구간 첫 글자 앞에도 자간을 넣어 빈자리가 두 번 생겨서 글자 크기 방식으로 바꿨다. 같은 서식의 앞 구간과 합쳐지지 않게 자리 글자는 서식을 다르게 둔다. 캐시(`InlineGalleyCache`)에 수식 목록을 함께 두고 키에도 넣는다. 화면 낭독·검색용 글에는 수식 원문을 넣는다. 표 칸(Label로 그림)은 예전처럼 코드 글자.
+- **검증**: `view_inline_math_is_typeset`(인쇄용 화면 밖 렌더러로 보기 화면 문단을 그려 분수 높이만큼 줄이 높아지고 자리에 잉크가 있는지) 추가, 여러 수식이 섞여 줄이 바뀌는 문단을 그림으로 떠서 눈으로 확인. `cargo clippy --all-targets -- -D warnings`, `cargo test`(91개 통과).
+
 ## 2026-11-26 — v0.18.0: 수식을 조판해 보여 주고 그림으로 인쇄
 
 - **LaTeX 수식 조판기 (`src/math.rs`)**: 외부 의존성 없는 egui Painter 기반 조판. 분수(`\frac`·`\binom`), 첨자, 루트(`\sqrt[n]`), 그리스 문자, 연산·관계 기호, 큰 연산자(`\sum`·`\int`·`\lim` — 블록 수식에서는 위아래 첨자), `\left( \right)`·`\big` 늘어나는 괄호(선으로 그림), 행렬(`matrix`/`pmatrix`/`bmatrix`/`vmatrix`), `cases`, `aligned`, 최상위 `\\` 여러 줄, 악센트(`\hat \bar \vec \dot \tilde \overline \underline`), `\text`, `\mathbf`/`\mathbb`/`\mathcal`, 간격(`\, \quad` 등), TeX 원자 간격 근사. 변수는 유니코드 수학 이탤릭 글자. 모르는 명령은 이름을 글자로 보여 준다. 글자 높이는 em 비율 근사.

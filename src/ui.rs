@@ -8922,7 +8922,9 @@ struct MdInlineBuf<'a> {
     strike: u16,
     link_url: Option<String>,
     pending: String,
-    pending_marks: Vec<usize>, // pending 안에서 원문이 =였던 "*" 위치
+    maths: Vec<(usize, String)>, // 줄 안 수식: (자리 글자 NBSP의 글자 위치, LaTeX)
+    math_as_code: bool,          // 덧그릴 수 없는 곳(표 칸 Label)에서는 코드 글자로
+    pending_marks: Vec<usize>,   // pending 안에서 원문이 =였던 "*" 위치
     unclosed_mark: bool,
 }
 
@@ -8947,6 +8949,8 @@ impl<'a> MdInlineBuf<'a> {
             strike: 0,
             link_url: None,
             pending: String::new(),
+            maths: Vec::new(),
+            math_as_code: false,
             pending_marks: Vec::new(),
             unclosed_mark: false,
         }
@@ -9167,6 +9171,26 @@ impl<'a> MdInlineBuf<'a> {
         }
     }
 
+    // 줄 안 수식: 줄바꿈 안 되는 공백(NBSP) 한 글자로 자리를 잡고, 배치 직전에 그 글자 크기를 키워
+    // 폭이 수식 폭과 같게 한다(prepare_inline_maths). 그린 뒤 그 자리, 같은 줄 글자 기준선에 수식을 덧그린다.
+    fn push_math(&mut self, txt: &str) {
+        if self.math_as_code || txt.trim().is_empty() {
+            self.push_code(txt);
+            return;
+        }
+        self.flush_pending();
+        self.maths.push((self.char_count, txt.to_string()));
+        let fmt = egui::text::TextFormat {
+            font_id: FontId::new(self.size, FontFamily::Proportional),
+            color: self.p.text,
+            line_height: Some(self.size * 1.6),
+            valign: Align::Center, // 앞 글과 서식이 같으면 egui가 구간을 합쳐 버려 자리를 못 찾는다
+            ..Default::default()
+        };
+        self.char_count += 1;
+        self.job.append("\u{A0}", 0.0, fmt);
+    }
+
     fn push_footnote_ref(&mut self, name: &str) {
         self.flush_pending();
         self.append_footnote_badge(name);
@@ -9216,8 +9240,12 @@ impl<'a> MdInlineBuf<'a> {
                 }
                 true
             }
-            Event::Code(t) | Event::InlineMath(t) => {
+            Event::Code(t) => {
                 self.push_code(t);
+                true
+            }
+            Event::InlineMath(t) => {
+                self.push_math(t);
                 true
             }
             Event::DisplayMath(t) => {
@@ -9369,26 +9397,34 @@ impl<'a> MdInlineBuf<'a> {
                 lr.end.hash(&mut h);
                 lu.hash(&mut h);
             }
+            self.maths.hash(&mut h);
             h.finish()
         };
-        let (galley, links) = if let Some((g, l)) = cache
+        let (galley, links, maths) = if let Some((g, l, m)) = cache
             .get(&key)
-            .filter(|(g, l)| g.text() == self.job.text && *l == self.links)
+            .filter(|(g, l, m)| g.text() == self.job.text && *l == self.links && *m == self.maths)
         {
-            (std::sync::Arc::clone(g), l.as_slice())
+            (std::sync::Arc::clone(g), l.as_slice(), m.as_slice())
         } else {
+            prepare_inline_maths(ui.ctx(), &mut self.job, &self.maths, self.size, self.p.text);
             let g = ui.ctx().fonts_mut(|f| f.layout_job(self.job));
             if cache.len() >= 256 {
                 cache.clear();
             }
-            cache.insert(key, (std::sync::Arc::clone(&g), self.links));
-            let (g_ref, l_ref) = &cache[&key];
-            (std::sync::Arc::clone(g_ref), l_ref.as_slice())
+            cache.insert(key, (std::sync::Arc::clone(&g), self.links, self.maths));
+            let (g_ref, l_ref, m_ref) = &cache[&key];
+            (
+                std::sync::Arc::clone(g_ref),
+                l_ref.as_slice(),
+                m_ref.as_slice(),
+            )
         };
         let rect = paint_galley_with_links(
             ui,
             std::sync::Arc::clone(&galley),
             links,
+            maths,
+            self.size,
             self.p.text,
             scheme,
         );
@@ -9396,21 +9432,116 @@ impl<'a> MdInlineBuf<'a> {
     }
 }
 
+// 줄 안 수식 자리(NBSP)의 자간을 수식 폭만큼, 줄 높이를 수식 높이만큼 넓힌다 (배치 전)
+fn prepare_inline_maths(
+    ctx: &egui::Context,
+    job: &mut egui::text::LayoutJob,
+    maths: &[(usize, String)],
+    size: f32,
+    color: Color32,
+) {
+    if maths.is_empty() {
+        return;
+    }
+    let font = FontId::new(size, FontFamily::Proportional);
+    let nbsp_w = ctx.fonts_mut(|f| f.glyph_width(&font, '\u{A0}'));
+    for (ci, src) in maths {
+        let Some((byte, _)) = job.text.char_indices().nth(*ci) else {
+            continue;
+        };
+        let b = crate::math::layout(ctx, src, size, false, color);
+        if let Some(sec) = job
+            .sections
+            .iter_mut()
+            .find(|s| s.byte_range.start == egui::text::ByteIndex(byte))
+        {
+            if nbsp_w > 0.1 {
+                sec.format.font_id.size = size * (b.w + 2.0) / nbsp_w;
+            }
+            // 보통 글줄(1.6em)에서 기준선 위 ≈0.85em·아래 ≈0.45em. 넘치는 만큼 위아래 똑같이 늘린다
+            let over = (b.asc - size * 0.85).max(b.desc - size * 0.45).max(0.0);
+            sec.format.line_height = Some(size * 1.6 + 2.0 * over);
+        }
+    }
+    // 줄이 높아질 때 글자들이 아래에 붙지 않고 가운데에 오게 (각주 배지처럼 따로 정한 것은 그대로)
+    for sec in &mut job.sections {
+        if sec.format.valign == egui::Align::BOTTOM {
+            sec.format.valign = egui::Align::Center;
+        }
+    }
+}
+
+// 글자 위치 ci 글리프의 (왼쪽 x, 기준선 y) — galley 기준
+// 수식 자리 글자 ci의 (왼쪽 x, 기준선 y) — galley 기준. 자리 글자는 크게 키워져 있으므로
+// 기준선은 같은 줄의 다른 글자에서 가져온다(없으면 줄 가운데에서 어림).
+fn glyph_baseline(
+    galley: &egui::Galley,
+    ci: usize,
+    maths: &[(usize, String)],
+    size: f32,
+) -> Option<egui::Pos2> {
+    let mut idx = 0usize;
+    for row in &galley.rows {
+        let start = idx;
+        idx += row.row.glyphs.len();
+        if (start..idx).contains(&ci) {
+            let x = row.pos.x + row.row.glyphs[ci - start].pos.x;
+            let base = row
+                .row
+                .glyphs
+                .iter()
+                .enumerate()
+                .find(|(k, _)| !maths.iter().any(|(m, _)| *m == start + k))
+                .map_or(row.row.size.y * 0.5 + size * 0.3, |(_, g)| g.pos.y);
+            return Some(egui::pos2(x, row.pos.y + base));
+        }
+        if row.ends_with_newline {
+            idx += 1;
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 fn paint_galley_with_links(
     ui: &mut egui::Ui,
     galley: std::sync::Arc<egui::Galley>,
     links: &[(Range<usize>, String)],
+    maths: &[(usize, String)],
+    size: f32,
     text_color: Color32,
     scheme: &str,
 ) -> Rect {
     let (rect, resp) = ui.allocate_exact_size(galley.size(), Sense::hover());
     ui.painter()
         .galley(rect.min, std::sync::Arc::clone(&galley), text_color);
-    let galley_info = std::sync::Arc::clone(&galley);
+    for (ci, src) in maths {
+        if let Some(at) = glyph_baseline(&galley, *ci, maths, size) {
+            let b = crate::math::layout(ui.ctx(), src, size, false, text_color);
+            crate::math::paint(
+                ui.painter(),
+                &b,
+                rect.min + at.to_vec2() + vec2(1.0, 0.0),
+                text_color,
+            );
+        }
+    }
+    // 화면 낭독기·검색용 글에는 수식 원문을 넣는다
+    let label: String = if maths.is_empty() {
+        galley.text().to_string()
+    } else {
+        galley
+            .text()
+            .chars()
+            .enumerate()
+            .map(|(i, c)| match maths.iter().find(|(ci, _)| *ci == i) {
+                Some((_, src)) => src.clone(),
+                None => c.to_string(),
+            })
+            .collect()
+    };
     let enabled = ui.is_enabled();
-    resp.widget_info(move || {
-        egui::WidgetInfo::labeled(egui::Role::Label, enabled, galley_info.text())
-    });
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, enabled, &label));
     if links.is_empty() {
         return rect;
     }
@@ -9437,6 +9568,14 @@ fn paint_galley_with_links(
     rect
 }
 
+// 테스트: 보기 화면 문단 하나를 그린다
+#[cfg(test)]
+pub(crate) fn test_paint_inline(ui: &mut egui::Ui, src: &str, size: f32, width: f32) -> Rect {
+    let p = theme::pal(false);
+    let mut cache = InlineGalleyCache::default();
+    render_inline_md_cached(ui, &mut cache, src, size, width, &p, false, false, "").0
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_inline_md_cached(
     ui: &mut egui::Ui,
@@ -9461,9 +9600,17 @@ fn render_inline_md_cached(
         base_bold,
         ppp_bits,
     ));
-    if let Some((galley, links)) = cache.get(&key) {
+    if let Some((galley, links, maths)) = cache.get(&key) {
         let g = std::sync::Arc::clone(galley);
-        let rect = paint_galley_with_links(ui, std::sync::Arc::clone(&g), links, p.text, scheme);
+        let rect = paint_galley_with_links(
+            ui,
+            std::sync::Arc::clone(&g),
+            links,
+            maths,
+            size,
+            p.text,
+            scheme,
+        );
         return (rect, g);
     }
     let clean = preprocess(src);
@@ -9478,14 +9625,23 @@ fn render_inline_md_cached(
         return (Rect::NOTHING, empty_g);
     }
     buf.job.wrap.max_width = max_w;
+    prepare_inline_maths(ui.ctx(), &mut buf.job, &buf.maths, size, p.text);
     let galley = ui.ctx().fonts_mut(|f| f.layout_job(buf.job));
     if cache.len() >= 256 {
         cache.clear();
     }
-    cache.insert(key, (std::sync::Arc::clone(&galley), buf.links));
-    let (g_ref, l_ref) = &cache[&key];
+    cache.insert(key, (std::sync::Arc::clone(&galley), buf.links, buf.maths));
+    let (g_ref, l_ref, m_ref) = &cache[&key];
     let g = std::sync::Arc::clone(g_ref);
-    let rect = paint_galley_with_links(ui, std::sync::Arc::clone(&g), l_ref, p.text, scheme);
+    let rect = paint_galley_with_links(
+        ui,
+        std::sync::Arc::clone(&g),
+        l_ref,
+        m_ref,
+        size,
+        p.text,
+        scheme,
+    );
     (rect, g)
 }
 
@@ -10041,6 +10197,7 @@ fn render_md_stream<'a, I>(
                         }
                         Event::Start(Tag::TableCell) => {
                             let mut buf = MdInlineBuf::new(p, ctx.body * 0.92, p.text, in_head);
+                            buf.math_as_code = true;
                             for (cev, cspan) in iter.by_ref() {
                                 if matches!(cev, Event::End(TagEnd::TableCell)) {
                                     break;

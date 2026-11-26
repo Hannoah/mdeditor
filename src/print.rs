@@ -1521,6 +1521,37 @@ mod tests {
         assert!(t.iter().any(|x| x.1 == format!("{n} / {n}")));
     }
 
+    // 보기 화면의 줄 안 수식: 자리 잡은 NBSP 위치에 수식이 그려져 글자 사이에 잉크가 있다
+    #[test]
+    fn view_inline_math_is_typeset() {
+        let mut off = Offscreen::new();
+        let (img, _) = off
+            .render(600.0, |ui| {
+                let r = crate::ui::test_paint_inline(ui, "앞 $\\frac{a}{b}$ 뒤", 16.0, 560.0);
+                Some((r, r.bottom()))
+            })
+            .unwrap();
+        if let Ok(p) = std::env::var("MDEDITOR_VIEW_PNG") {
+            img.save(&p).unwrap();
+            // 눈으로 확인용: 여러 수식이 섞여 줄이 바뀌는 문단
+            let src = r"본문 속 수식 $E = mc^2$ 와 $\alpha + \beta \le \frac{1}{2}$, 그리고 $\sqrt{x^2+y^2}$ 가 줄 안에 들어가고 $\sum_{i=1}^n i$ 도 됩니다.";
+            let (long, _) = off
+                .render(320.0, |ui| {
+                    let r = crate::ui::test_paint_inline(ui, src, 16.0, 300.0);
+                    Some((r, r.bottom()))
+                })
+                .unwrap();
+            long.save(p.replace(".png", "-long.png")).unwrap();
+        }
+        // 분수라 줄 높이가 보통 글줄(16×1.6≈26pt)보다 높다
+        assert!(img.height() as f32 / DIAGRAM_PX > 30.0, "{}", img.height());
+        // "앞 " 뒤 수식 자리 가운데 세로줄에 잉크(분수선·글자)가 있다
+        let x = (img.width() as f32 * 0.07) as u32..(img.width() as f32 * 0.12) as u32;
+        assert!(x
+            .into_iter()
+            .any(|x| (0..img.height()).any(|y| img.get_pixel(x, y)[0] < 128)));
+    }
+
     #[test]
     fn math_prints_as_pictures_inline_and_block() {
         let no_img = |_: &str| None;
