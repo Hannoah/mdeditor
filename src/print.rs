@@ -9,7 +9,7 @@ use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd,
 };
 
-use crate::textops::{escape_plus_lines, inline_spans, preprocess, Inline};
+use crate::textops::{escape_plus_lines, inline_tags, is_currency_math, preprocess};
 
 const BODY: f32 = 10.5;
 const LH: f32 = 1.55; // 줄 높이 배수
@@ -214,6 +214,19 @@ fn break_lines(m: &dyn Measure, runs: &[(String, Style)], width: f32) -> Vec<Lin
                 let tw = run_width(m, tok, st);
                 if cur.w > 0.0 && cur.w + tw > width && !tok.trim().is_empty() {
                     push(m, &mut lines, &mut cur, st.size);
+                }
+                if let Some(i) = st.img.filter(|i| i.w > width) {
+                    // 줄보다 넓은 줄 안 수식은 줄 폭에 맞게 줄인다
+                    let k = width / i.w;
+                    let mut st = st.clone();
+                    st.img = Some(InlineImg {
+                        w: width,
+                        asc: i.asc * k,
+                        desc: i.desc * k,
+                        ..i
+                    });
+                    add(m, &mut cur, tok, &st, width); // 앞 글은 위에서 이미 줄을 넘겼다
+                    continue;
                 }
                 if tw <= width || st.img.is_some() {
                     add(m, &mut cur, tok, st, tw);
@@ -681,9 +694,9 @@ impl<'a> Layout<'a> {
             None => (false, t.strip_prefix('<').unwrap_or("")),
         };
         let c = match name {
-            "b>" => &mut self.bold,
-            "i>" => &mut self.italic,
-            "s>" => &mut self.strike,
+            "strong>" => &mut self.bold,
+            "em>" => &mut self.italic,
+            "del>" => &mut self.strike,
             "mark>" => &mut self.mark,
             _ => return false,
         };
@@ -725,6 +738,8 @@ impl<'a> Layout<'a> {
             }
             Tag::List(first) => {
                 self.flush(0.0);
+                // 글 없이 바로 하위 목록으로 시작한 항목(`- - 가`)도 바깥 기호를 같은 줄에 그린다
+                self.draw_marker(BODY * LH, BODY);
                 self.lists.push(first);
                 self.x += LIST_W;
             }
@@ -1074,43 +1089,6 @@ fn fill_triangle(
     }
 }
 
-// 굵게·형광·기울임·취소선을 편집 화면의 인라인 파서(inline_spans)로 찾아 HTML 태그로 바꾼다.
-// CommonMark 규칙으로는 "**굵게!**입니다"처럼 문장부호 뒤 조사가 붙으면 서식이 풀리기 때문.
-fn inline_tags(md: &str) -> String {
-    let mut out = String::with_capacity(md.len() + 16);
-    let mut fence = false;
-    for (i, line) in md.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let t = line.trim_start();
-        if t.starts_with("```") || t.starts_with("~~~") {
-            fence = !fence;
-        }
-        if fence || t.starts_with("```") || t.starts_with("~~~") {
-            out.push_str(line);
-            continue;
-        }
-        let mut at = 0;
-        for (os, bs, be, ce, kind) in inline_spans(line) {
-            let tag = match kind {
-                Inline::Bold => "b",
-                Inline::Mark => "mark",
-                Inline::Italic => "i",
-                Inline::Strike => "s",
-                _ => continue,
-            };
-            out.push_str(&line[at..os]);
-            out.push_str(&format!("<{tag}>"));
-            out.push_str(&line[bs..be]);
-            out.push_str(&format!("</{tag}>"));
-            at = ce;
-        }
-        out.push_str(&line[at..]);
-    }
-    out
-}
-
 // 마크다운을 w×h(pt) 페이지들로 배치한다. 쪽 번호는 h 아래 18pt 기준선에 둔다.
 pub(crate) fn layout(
     md: &str,
@@ -1152,8 +1130,13 @@ pub(crate) fn layout(
         off: None,
         inline_imgs: Vec::new(),
     };
-    for ev in Parser::new_ext(&clean, opts) {
-        l.event(ev);
+    for (ev, sp) in Parser::new_ext(&clean, opts).into_offset_iter() {
+        match ev {
+            Event::InlineMath(t) if is_currency_math(&clean, sp.end) => {
+                l.event(Event::Text(format!("${t}$").into())) // 금액 ($10-$20)
+            }
+            ev => l.event(ev),
+        }
     }
     l.flush(0.0);
     let mut pages = l.pages;
@@ -1271,6 +1254,8 @@ mod gdi {
         unsafe {
             let mut pd: PRINTDLGW = std::mem::zeroed();
             pd.lStructSize = std::mem::size_of::<PRINTDLGW>() as u32;
+            // 앱 창을 소유자로: 인쇄 창이 멈춰 있는 앱 창 뒤로 숨지 않고 앱 창은 입력을 막는다
+            pd.hwndOwner = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow();
             pd.Flags = PD_RETURNDC | PD_NOSELECTION | PD_NOPAGENUMS | PD_USEDEVMODECOPIESANDCOLLATE;
             let ok = PrintDlgW(&mut pd) != 0;
             for g in [pd.hDevMode, pd.hDevNames] {
@@ -1543,6 +1528,19 @@ mod tests {
                 .unwrap();
             long.save(p.replace(".png", "-long.png")).unwrap();
         }
+        // 글줄보다 긴 수식은 글줄 폭에 맞게 줄어든다
+        let (wide, _) = off
+            .render(400.0, |ui| {
+                let src = r"앞 $a_1 + a_2 + a_3 + a_4 + a_5 + a_6 + a_7 + a_8 + a_9 + a_{10} = \sum_{k=1}^{10} a_k$ 뒤";
+                let r = crate::ui::test_paint_inline(ui, src, 16.0, 200.0);
+                Some((r, r.bottom()))
+            })
+            .unwrap();
+        assert!(
+            wide.width() as f32 / DIAGRAM_PX <= 201.0,
+            "{}",
+            wide.width()
+        );
         // 분수라 줄 높이가 보통 글줄(16×1.6≈26pt)보다 높다
         assert!(img.height() as f32 / DIAGRAM_PX > 30.0, "{}", img.height());
         // "앞 " 뒤 수식 자리 가운데 세로줄에 잉크(분수선·글자)가 있다
@@ -1622,5 +1620,114 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(std::fs::metadata(&out).unwrap().len() > 0);
+    }
+
+    // 굵게·형광펜 치환은 수식 원문을 건드리지 않는다 (인쇄 inline_tags, 보기 preprocess)
+    #[test]
+    fn formatting_never_touches_math_source() {
+        for (src, want) in [
+            ("$$\na*b*c\n$$", "$$\na*b*c\n$$"),
+            (
+                "식 $2*3*4 = 24$ 와 *기울임*",
+                "식 $2*3*4 = 24$ 와 <em>기울임</em>",
+            ),
+            ("$$a*b*c$$", "$$a*b*c$$"),
+        ] {
+            assert_eq!(inline_tags(src), want);
+        }
+        let v = preprocess("$x == y$ 이고 $y == z$, ==형광==");
+        assert_eq!(v, "$x == y$ 이고 $y == z$, **형광**");
+        let v = preprocess("$$\na == b\nb == c\n$$");
+        assert_eq!(v, "$$\na == b\nb == c\n$$");
+    }
+
+    // 엉터리 마크다운에도 패닉 없이, 그림은 쪽 폭 안에, 글은 쪽 아래로 크게 넘치지 않는다
+    #[test]
+    fn layout_survives_random_markdown() {
+        const PARTS: &[&str] = &[
+            "# ",
+            "## 제목",
+            "**",
+            "*",
+            "~~",
+            "==",
+            "`",
+            "```",
+            "$$",
+            "$x^2$",
+            ":::toggle 접기",
+            ":::",
+            "> ",
+            "> [!NOTE]",
+            "- ",
+            "1. ",
+            "- [ ] ",
+            "    ",
+            "\t",
+            "\n",
+            "\n\n",
+            "|a|b|",
+            "|---|:-:|",
+            "[l](u)",
+            "![i](p.png)",
+            "[[Ctrl]]",
+            "가나다",
+            "😀",
+            "text",
+            " ",
+            "---",
+            "[^1]",
+            "[^1]: n",
+            "<b>",
+            "+ ",
+            "$10-$20",
+            r"$a_1+a_2+a_3+a_4+a_5+a_6+a_7+a_8+a_9$",
+            "아주긴단어아주긴단어아주긴단어아주긴단어아주긴단어아주긴단어아주긴단어",
+        ];
+        let no_img = |_: &str| None;
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..300 {
+            let n = (next() % 30) as usize;
+            let s: String = (0..n)
+                .map(|_| PARTS[(next() % PARTS.len() as u64) as usize])
+                .collect();
+            for p in layout(&s, &Fake, &no_img, 200.0, 300.0) {
+                for op in p {
+                    match op {
+                        Op::Text { x, y, .. } => {
+                            assert!(x.is_finite() && x >= -30.0 && y <= 360.0, "{s:?}");
+                        }
+                        Op::Image { x, w, h, .. } => {
+                            assert!(x >= -1.0 && x + w <= 201.0 && h <= 301.0, "{s:?}");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // 글 없이 바로 하위 목록으로 시작한 항목도 바깥 기호를 같은 줄에 인쇄한다
+    #[test]
+    fn item_starting_with_sublist_keeps_outer_marker() {
+        let no_img = |_: &str| None;
+        for (md, outer) in [("- - 가\n- 나\n", "•"), ("1. - 가\n2. 나\n", "1.")] {
+            let pages = layout(md, &Fake, &no_img, 300.0, 400.0);
+            let t = texts(&pages);
+            let y_of = |s: &str| {
+                pages[0].iter().find_map(|o| match o {
+                    Op::Text { y, text, .. } if text == s => Some(*y),
+                    _ => None,
+                })
+            };
+            assert!(t.iter().any(|x| x.1 == outer), "{md:?}: {t:?}");
+            assert_eq!(y_of(outer), y_of("◦"), "{md:?}");
+        }
     }
 }

@@ -1,5 +1,22 @@
 # MDEditor 작업 기록
 
+## 2026-11-27 — v0.18.3: 기능 전수 점검에서 찾은 버그 수정
+
+기능을 하나씩 깨 보며 점검했다(수식·인쇄·Mermaid 무작위 입력 퍼징, 단축키 62개 하나씩 누르기, 슬래시 메뉴 17종 삽입·입력·되돌리기, Mermaid 각 종류를 그림으로 떠서 보기, 금액·수식 경계).
+
+- **깊은 수식 크래시 (`src/math.rs`)**: `\sqrt\sqrt…`·`{{{…`처럼 수천 단계 중첩이면 파서·배치 재귀가 스택을 넘쳐 앱이 죽었다(panic=abort). 파서에 깊이 한도(`MAX_DEPTH` 48, 넘으면 "…"). `\!`만 겹치면 폭이 음수 → 줄 안 수식 자리 글자 크기가 음수가 되던 것도 0으로 막음.
+- **금액이 수식으로 (`src/textops.rs`, `src/ui.rs`, `src/print.rs`)**: `$10-$20`, `$1~$2`, `$5,$6`를 pulldown-cmark가 수식으로 잡아 `$`가 사라지고 이탤릭 수식이 됐다. 예전 웹 버전의 GitHub 규칙(닫는 `$` 바로 뒤 숫자면 금액, `is_currency_math`)을 보기·인쇄·HTML에 적용.
+- **수식 원문 훼손**: 인쇄 전처리(`inline_tags`)가 `$2*3*4$`의 `*`를 기울임 태그로 바꿔 그림에 `<i>`가 찍혔고, 보기 전처리(`preprocess`)는 수식 속 `==`를 굵게로 바꿀 수 있었다. `$$` 블록 줄과 줄 안 수식 구간(`inline_math_ranges`, pulldown 규칙 그대로)을 건너뛴다.
+- **긴 줄 안 수식 넘침**: 본문 속 `$…$`가 글줄·쪽·표 칸 폭보다 넓으면 그대로 넘쳤다(인쇄는 여백 밖으로 잘림). 보기(`inline_math_box`)·인쇄(`break_lines`) 모두 폭에 맞게 줄인다.
+- **HTML 내보내기·복사**: `**굵게!**입니다`가 별표째, `==형광==`은 `**`로 나갔다. `inline_tags`를 textops로 옮겨 내보내기도 쓰고, 그 태그(`strong/em/del/mark`)만 HTML로 통과(그 밖 원시 HTML은 여전히 글자). 형광펜은 `<mark>` + CSS.
+- **인쇄**: `- - 가`처럼 글 없이 하위 목록으로 시작한 항목의 바깥 기호가 빠졌다 → 하위 목록 시작 때 같은 줄에 그린다. 인쇄 대화상자에 소유 창(`GetActiveWindow`)을 줘서 멈춘 앱 창 뒤로 숨지 않게.
+- **슬래시 메뉴 견본**: 접기는 `:::toggle 가제목`, 표는 `제목가`, Mermaid는 `가graph TD`처럼 견본 글에 붙었다. 접기는 견본 제목을 선택(`SlashItem::select`, 빈 블록 → 접기 전환도), 표는 칸으로 옮겨 갈 때 칸 글자 전체 선택(`focus_select_all`, Tab 이동 포함), Mermaid는 견본 끝에 커서. 선택과 커서 위치 예약을 함께 두면 다음 프레임에 커서가 선택을 덮어써서 하나만 둔다.
+- **Mermaid**: 반대 방향 간선 두 개의 라벨이 겹쳐 하나가 가려졌다 → 각자 곡선이 휜 바깥쪽으로 민다. 시퀀스 다이어그램의 `alt/else/loop/opt/par/critical/break/rect … end`를 말없이 버렸다 → 틀·종류 탭·`[조건]`·점선 구분선으로 그린다.
+- **경로 복사**: 하위 폴더 파일의 "파일 전체 경로 복사"가 `C:\root\sub/a.md`처럼 구분자가 섞였다 → OS 구분자로.
+- **기타**: 테스트용 보기 함수(`inline_md_view_job`)가 실제와 달리 수식·각주 옵션이 꺼져 있어 맞춤. 쓰지 않게 된 `math_as_code` 필드 삭제. README의 낡은 설명(수식은 원문 카드, 인쇄는 브라우저, 테스트 64개, 구조·의존성) 갱신.
+- **확인했지만 그대로 둔 것**: "다른 탭 모두 닫기"가 저장 확인 창에서 멈추면 나머지 탭은 열린 채 남는다(데이터 손실 없음). ER 다이어그램은 관계 기호(까마귀발) 없이 화살표로 그린다. 같은 1ms 안의 스크린샷 붙여넣기 두 번은 이름이 겹칠 수 있다.
+- **검증**: `currency_dollars_are_not_math`, `garbage_and_deep_latex_never_crash`(1MB 스택), `formatting_never_touches_math_source`, `layout_survives_random_markdown`, `item_starting_with_sublist_keeps_outer_marker`, `slash_templates_place_caret_on_placeholder`, `sequence_reads_alt_loop_frames` 추가, `view_inline_math_is_typeset`에 넓은 수식 검사. `cargo clippy --all-targets -- -D warnings`, `cargo test`(98개 통과).
+
 ## 2026-11-26 — v0.18.2: 목록·인용 속 표의 수식, macOS CI 복구
 
 - **목록·인용 속 표 (`src/ui.rs`)**: 목록이나 인용 안에 든 표(`render_md_stream`의 표 경로)는 egui Label로 칸을 그려 줄 안 수식이 코드 글자였다. 문단과 같은 그리기(`prepare_inline_maths` + `paint_galley_with_links`)로 바꿔 수식이 조판되고 칸 안 링크도 눌린다. 일반 표 블록은 v0.18.1부터 이미 조판.

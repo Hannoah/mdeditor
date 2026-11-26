@@ -626,6 +626,17 @@ fn alerts(dark: bool) -> egui_commonmark::AlertBundle {
     ])
 }
 
+// 표 칸으로 옮겨 갈 때(삽입·Tab·Enter) 칸 글자 전체를 선택한다 — 바로 입력하면 바뀐다 (견본 "제목"·"내용" 포함)
+fn focus_select_all(ui: &egui::Ui, r: &egui::Response, text: &str) {
+    r.request_focus();
+    let mut st = egui::TextEdit::load_state(ui.ctx(), r.id).unwrap_or_default();
+    st.cursor.set_char_range(Some(CCursorRange::two(
+        CCursor::new(0),
+        CCursor::new(text.chars().count()),
+    )));
+    egui::TextEdit::store_state(ui.ctx(), r.id, st);
+}
+
 fn highlight_lang_alias(lang: &str) -> &str {
     match lang.trim().to_ascii_lowercase().as_str() {
         "" => "",
@@ -5737,7 +5748,7 @@ impl App {
                                                 ),
                                         );
                                         if next_focus == Some((0, c_i)) {
-                                            r.request_focus();
+                                            focus_select_all(ui, &r, hdr);
                                         }
                                         if r.changed() {
                                             self.table_cell_draft = Some((cid, hdr.clone()));
@@ -5792,7 +5803,7 @@ impl App {
                                                     ),
                                             );
                                             if next_focus == Some((r_i, c_i)) {
-                                                r.request_focus();
+                                                focus_select_all(ui, &r, cell);
                                             }
                                             if r.changed() {
                                                 self.table_cell_draft = Some((cid, cell.clone()));
@@ -8670,7 +8681,14 @@ impl App {
             }
             if menu_row(ui, p, ic(theme::FILE), "파일 전체 경로 복사", "", p.text).clicked()
             {
-                let full = self.root.join(key).display().to_string();
+                // 키는 "sub/a.md"처럼 /를 쓴다 → 조각을 다시 이어 OS 구분자로 (C:\root\sub\a.md)
+                let full = (self
+                    .root
+                    .join(key)
+                    .components()
+                    .collect::<std::path::PathBuf>())
+                .display()
+                .to_string();
                 ctx.copy_text(full);
                 self.status = "파일 경로를 복사했습니다".into();
                 done = true;
@@ -8742,7 +8760,15 @@ impl App {
             done = true;
         }
         if menu_row(ui, p, ic(theme::COPY), "파일 전체 경로 복사", "", p.text).clicked() {
-            ctx.copy_text(self.root.join(name).display().to_string());
+            ctx.copy_text(
+                (self
+                    .root
+                    .join(name)
+                    .components()
+                    .collect::<std::path::PathBuf>())
+                .display()
+                .to_string(),
+            );
             self.status = "파일 경로를 복사했습니다".into();
             done = true;
         }
@@ -8923,7 +8949,6 @@ struct MdInlineBuf<'a> {
     link_url: Option<String>,
     pending: String,
     maths: Vec<(usize, String)>, // 줄 안 수식: (자리 글자 NBSP의 글자 위치, LaTeX)
-    math_as_code: bool,          // 덧그릴 수 없는 곳(표 칸 Label)에서는 코드 글자로
     pending_marks: Vec<usize>,   // pending 안에서 원문이 =였던 "*" 위치
     unclosed_mark: bool,
 }
@@ -8950,7 +8975,6 @@ impl<'a> MdInlineBuf<'a> {
             link_url: None,
             pending: String::new(),
             maths: Vec::new(),
-            math_as_code: false,
             pending_marks: Vec::new(),
             unclosed_mark: false,
         }
@@ -9174,7 +9198,7 @@ impl<'a> MdInlineBuf<'a> {
     // 줄 안 수식: 줄바꿈 안 되는 공백(NBSP) 한 글자로 자리를 잡고, 배치 직전에 그 글자 크기를 키워
     // 폭이 수식 폭과 같게 한다(prepare_inline_maths). 그린 뒤 그 자리, 같은 줄 글자 기준선에 수식을 덧그린다.
     fn push_math(&mut self, txt: &str) {
-        if self.math_as_code || txt.trim().is_empty() {
+        if txt.trim().is_empty() {
             self.push_code(txt);
             return;
         }
@@ -9242,6 +9266,10 @@ impl<'a> MdInlineBuf<'a> {
             }
             Event::Code(t) => {
                 self.push_code(t);
+                true
+            }
+            Event::InlineMath(t) if is_currency_math(src, span.end) => {
+                self.push_text(&format!("${t}$"), true); // 금액 ($10-$20)
                 true
             }
             Event::InlineMath(t) => {
@@ -9433,6 +9461,23 @@ impl<'a> MdInlineBuf<'a> {
 }
 
 // 줄 안 수식 자리(NBSP)의 자간을 수식 폭만큼, 줄 높이를 수식 높이만큼 넓힌다 (배치 전)
+// 줄 안 수식 상자. 글줄 폭(max_w)보다 넓으면 폭에 맞게 줄인다 (자리 잡기와 그리기가 같은 크기를 쓴다)
+fn inline_math_box(
+    ctx: &egui::Context,
+    src: &str,
+    size: f32,
+    max_w: f32,
+    color: Color32,
+) -> crate::math::MBox {
+    let b = crate::math::layout(ctx, src, size, false, color);
+    let room = (max_w - 6.0).max(size);
+    if b.w > room {
+        crate::math::layout(ctx, src, size * room / b.w, false, color)
+    } else {
+        b
+    }
+}
+
 fn prepare_inline_maths(
     ctx: &egui::Context,
     job: &mut egui::text::LayoutJob,
@@ -9449,7 +9494,7 @@ fn prepare_inline_maths(
         let Some((byte, _)) = job.text.char_indices().nth(*ci) else {
             continue;
         };
-        let b = crate::math::layout(ctx, src, size, false, color);
+        let b = inline_math_box(ctx, src, size, job.wrap.max_width, color);
         if let Some(sec) = job
             .sections
             .iter_mut()
@@ -9471,7 +9516,6 @@ fn prepare_inline_maths(
     }
 }
 
-// 글자 위치 ci 글리프의 (왼쪽 x, 기준선 y) — galley 기준
 // 수식 자리 글자 ci의 (왼쪽 x, 기준선 y) — galley 기준. 자리 글자는 크게 키워져 있으므로
 // 기준선은 같은 줄의 다른 글자에서 가져온다(없으면 줄 가운데에서 어림).
 fn glyph_baseline(
@@ -9517,7 +9561,7 @@ fn paint_galley_with_links(
         .galley(rect.min, std::sync::Arc::clone(&galley), text_color);
     for (ci, src) in maths {
         if let Some(at) = glyph_baseline(&galley, *ci, maths, size) {
-            let b = crate::math::layout(ui.ctx(), src, size, false, text_color);
+            let b = inline_math_box(ui.ctx(), src, size, galley.job.wrap.max_width, text_color);
             crate::math::paint(
                 ui.painter(),
                 &b,
@@ -9673,7 +9717,7 @@ pub(crate) fn inline_md_view_job(
 ) -> egui::text::LayoutJob {
     use pulldown_cmark::{Options, Parser};
     let clean = preprocess(src);
-    let opts = Options::ENABLE_STRIKETHROUGH;
+    let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES | Options::ENABLE_MATH; // render_inline_md_cached와 같게
     let mut buf = MdInlineBuf::new(p, size, p.text, base_bold);
     for (ev, span) in Parser::new_ext(&clean, opts).into_offset_iter() {
         buf.handle_inline_event(&ev, src, span);

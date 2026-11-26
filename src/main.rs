@@ -955,7 +955,8 @@ struct SlashItem {
     title: &'static str,
     desc: &'static str,
     tpl: &'static str,
-    caret: usize, // 템플릿 안 커서 위치(바이트), END = 끝
+    caret: usize,         // 템플릿 안 커서 위치(바이트), END = 끝
+    select: &'static str, // 커서 자리부터 선택해 둘 견본 글 (바로 입력하면 바뀐다)
     color: [u8; 3],
     advanced: bool,
 }
@@ -964,23 +965,23 @@ const END: usize = usize::MAX;
 
 #[rustfmt::skip]
 const SLASH: &[SlashItem] = &[
-    SlashItem { icon: "¶", title: "텍스트", desc: "일반 문단 작성", tpl: "", caret: END, color: [100, 116, 139], advanced: false },
-    SlashItem { icon: "H1", title: "제목 1", desc: "가장 큰 섹션 제목 (#)", tpl: "# ", caret: END, color: [35, 131, 226], advanced: false },
-    SlashItem { icon: "H2", title: "제목 2", desc: "중간 크기 제목 (##)", tpl: "## ", caret: END, color: [35, 131, 226], advanced: false },
-    SlashItem { icon: "H3", title: "제목 3", desc: "작은 소제목 (###)", tpl: "### ", caret: END, color: [35, 131, 226], advanced: false },
-    SlashItem { icon: "▣", title: "할 일 목록", desc: "인터랙티브 체크박스 (- [ ])", tpl: "- [ ] ", caret: END, color: [16, 185, 129], advanced: false },
-    SlashItem { icon: "•", title: "글머리 기호 목록", desc: "원형 불릿 목록 (-)", tpl: "- ", caret: END, color: [245, 158, 11], advanced: false },
-    SlashItem { icon: "1.", title: "번호 매기기 목록", desc: "순서가 있는 번호 목록 (1.)", tpl: "1. ", caret: END, color: [245, 158, 11], advanced: false },
-    SlashItem { icon: "”", title: "인용구", desc: "왼쪽 강조선 인용 블록 (>)", tpl: "> ", caret: END, color: [139, 92, 246], advanced: false },
-    SlashItem { icon: "—", title: "구분선", desc: "콘텐츠 구분선 (---)", tpl: "---", caret: END, color: [100, 116, 139], advanced: false },
-    SlashItem { icon: "※", title: "콜아웃 블록", desc: "Notion / GitHub Alert 박스", tpl: "> [!NOTE]\n> ", caret: END, color: [234, 179, 8], advanced: true },
-    SlashItem { icon: "<>", title: "코드 블록", desc: "구문 강조 코드 블록 (```)", tpl: "```\n\n```", caret: 4, color: [244, 63, 94], advanced: true },
-    SlashItem { icon: "▦", title: "표 (Table)", desc: "2x3 마크다운 데이터 표", tpl: "| 제목 | 내용 |\n| --- | --- |\n|  |  |", caret: 2, color: [6, 182, 212], advanced: true },
-    SlashItem { icon: "▶", title: "접기 (토글)", desc: "상세 내용을 숨기고 펼치는 블록 (:::toggle)", tpl: ":::toggle 제목\n내용\n:::", caret: 10, color: [168, 85, 247], advanced: true },
-    SlashItem { icon: "fx", title: "수학 공식", desc: "LaTeX 수식 ($$)", tpl: "$$\n\n$$", caret: 3, color: [16, 185, 129], advanced: true },
-    SlashItem { icon: "◈", title: "Mermaid 다이어그램", desc: "순서도 및 아키텍처 다이어그램", tpl: "```mermaid\ngraph TD\n  A --> B\n```", caret: 11, color: [99, 102, 241], advanced: true },
-    SlashItem { icon: "▨", title: "이미지", desc: "로컬 또는 웹 이미지 삽입 (![설명](경로))", tpl: "", caret: END, color: [20, 184, 166], advanced: true },
-    SlashItem { icon: "^", title: "각주", desc: "문서 하단 각주 링크 ([^1])", tpl: "[^1]: ", caret: END, color: [100, 116, 139], advanced: true },
+    SlashItem { icon: "¶", title: "텍스트", desc: "일반 문단 작성", tpl: "", caret: END, select: "", color: [100, 116, 139], advanced: false },
+    SlashItem { icon: "H1", title: "제목 1", desc: "가장 큰 섹션 제목 (#)", tpl: "# ", caret: END, select: "", color: [35, 131, 226], advanced: false },
+    SlashItem { icon: "H2", title: "제목 2", desc: "중간 크기 제목 (##)", tpl: "## ", caret: END, select: "", color: [35, 131, 226], advanced: false },
+    SlashItem { icon: "H3", title: "제목 3", desc: "작은 소제목 (###)", tpl: "### ", caret: END, select: "", color: [35, 131, 226], advanced: false },
+    SlashItem { icon: "▣", title: "할 일 목록", desc: "인터랙티브 체크박스 (- [ ])", tpl: "- [ ] ", caret: END, select: "", color: [16, 185, 129], advanced: false },
+    SlashItem { icon: "•", title: "글머리 기호 목록", desc: "원형 불릿 목록 (-)", tpl: "- ", caret: END, select: "", color: [245, 158, 11], advanced: false },
+    SlashItem { icon: "1.", title: "번호 매기기 목록", desc: "순서가 있는 번호 목록 (1.)", tpl: "1. ", caret: END, select: "", color: [245, 158, 11], advanced: false },
+    SlashItem { icon: "”", title: "인용구", desc: "왼쪽 강조선 인용 블록 (>)", tpl: "> ", caret: END, select: "", color: [139, 92, 246], advanced: false },
+    SlashItem { icon: "—", title: "구분선", desc: "콘텐츠 구분선 (---)", tpl: "---", caret: END, select: "", color: [100, 116, 139], advanced: false },
+    SlashItem { icon: "※", title: "콜아웃 블록", desc: "Notion / GitHub Alert 박스", tpl: "> [!NOTE]\n> ", caret: END, select: "", color: [234, 179, 8], advanced: true },
+    SlashItem { icon: "<>", title: "코드 블록", desc: "구문 강조 코드 블록 (```)", tpl: "```\n\n```", caret: 4, select: "", color: [244, 63, 94], advanced: true },
+    SlashItem { icon: "▦", title: "표 (Table)", desc: "2x3 마크다운 데이터 표", tpl: "| 제목 | 내용 |\n| --- | --- |\n|  |  |", caret: 2, select: "", color: [6, 182, 212], advanced: true },
+    SlashItem { icon: "▶", title: "접기 (토글)", desc: "상세 내용을 숨기고 펼치는 블록 (:::toggle)", tpl: ":::toggle 제목\n내용\n:::", caret: 10, select: "제목", color: [168, 85, 247], advanced: true },
+    SlashItem { icon: "fx", title: "수학 공식", desc: "LaTeX 수식 ($$)", tpl: "$$\n\n$$", caret: 3, select: "", color: [16, 185, 129], advanced: true },
+    SlashItem { icon: "◈", title: "Mermaid 다이어그램", desc: "순서도 및 아키텍처 다이어그램", tpl: "```mermaid\ngraph TD\n  A --> B\n```", caret: 29, select: "", color: [99, 102, 241], advanced: true },
+    SlashItem { icon: "▨", title: "이미지", desc: "로컬 또는 웹 이미지 삽입 (![설명](경로))", tpl: "", caret: END, select: "", color: [20, 184, 166], advanced: true },
+    SlashItem { icon: "^", title: "각주", desc: "문서 하단 각주 링크 ([^1])", tpl: "[^1]: ", caret: END, select: "", color: [100, 116, 139], advanced: true },
 ];
 
 fn slash_matches(query: &str) -> Vec<usize> {
@@ -3433,13 +3434,18 @@ impl App {
             doc.edited_at = Some(Instant::now());
             doc.refresh_meta();
             let caret = (r.start + caret_off).min(doc.text.len());
+            // 빈 블록에서 만든 접기는 견본 제목을 선택해 둔다 (바로 입력하면 바뀐다)
+            let select = (replacement == ":::toggle 제목\n내용\n:::").then(|| {
+                let c0 = char_len(&doc.text[..caret]);
+                (c0, c0 + 2)
+            });
             self.blank = 0;
             self.block_sel = None;
             self.block_sel_anchor = None;
             self.block_sel_head = None;
             self.active = Some(r.start);
-            self.pending_sel = None;
-            self.pending_byte_caret = Some((r.start, caret));
+            self.pending_sel = select;
+            self.pending_byte_caret = select.is_none().then_some((r.start, caret));
             self.focus_editor = true;
             return;
         }
@@ -3685,11 +3691,16 @@ impl App {
         doc.edited_at = Some(Instant::now());
         doc.refresh_meta();
         let caret = r.start + item.caret.min(item.tpl.len());
+        let select = (!item.select.is_empty()).then(|| {
+            let c0 = char_len(&doc.text[..caret]);
+            (c0, c0 + char_len(item.select))
+        });
         self.blank = 0;
         self.slash_sel = 0;
         self.active = Some(r.start);
-        self.pending_sel = None;
-        self.pending_byte_caret = Some((r.start, caret));
+        self.pending_sel = select;
+        // 둘 다 두면 다음 프레임에 커서가 선택을 덮어쓴다
+        self.pending_byte_caret = select.is_none().then_some((r.start, caret));
         self.focus_editor = true;
         if item.tpl == "---" {
             self.split(caret);
@@ -6434,7 +6445,10 @@ mod tests {
         );
         assert!(html.contains("src=\"images/p.png\""), "{html}");
         assert!(html.contains("<title>a&lt;b"));
-        assert!(html.contains("<strong>형광</strong> <code>Ctrl</code>"));
+        assert!(
+            html.contains("<mark>형광</mark> <code>Ctrl</code>"),
+            "{html}"
+        );
         assert!(html.contains("checked"));
         assert!(html.contains("markdown-alert-note"));
     }
@@ -8392,6 +8406,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // 닫는 $ 바로 뒤가 숫자면 금액 (GitHub 규칙): 보기·HTML 내보내기·인쇄 모두 수식으로 만들지 않는다
+    #[test]
+    fn currency_dollars_are_not_math() {
+        let p = theme::pal(false);
+        for (src, shown) in [
+            ("$10-$20 범위", "$10-$20 범위"),
+            ("가격 $5,$6", "가격 $5,$6"),
+            ("$1~$2", "$1~$2"),
+        ] {
+            assert_eq!(ui::inline_md_view_job(src, 15.0, &p, false).text, shown);
+            let html = md_to_html(src);
+            assert!(!html.contains("math"), "{html}");
+            assert!(html.contains(shown), "{html}");
+        }
+        // 진짜 수식은 그대로
+        assert!(md_to_html("$x$와 $y$").contains("math"));
+        // 문장부호 뒤 조사가 붙은 서식도 보기 화면처럼 내보낸다 (원시 HTML은 여전히 글자로)
+        for (src, want) in [
+            ("**굵게!**입니다", "<strong>굵게!</strong>입니다"),
+            ("==형광!==입니다", "<mark>형광!</mark>입니다"),
+            ("*기울임!*이다", "<em>기울임!</em>이다"),
+            ("~~취소!~~다", "<del>취소!</del>다"),
+            ("<b>x</b>", "&lt;b&gt;x&lt;/b&gt;"),
+        ] {
+            assert!(md_to_html(src).contains(want), "{src}: {}", md_to_html(src));
+        }
+        assert_ne!(
+            ui::inline_md_view_job("$x$ 끝", 15.0, &p, false).text,
+            "$x$ 끝"
+        );
+    }
+
     #[test]
     fn pct_roundtrip_and_html_export_is_inert() {
         for p in ["a b/한글 #1%/x.md", "plain/path.md", "100%25"] {
@@ -10254,5 +10300,45 @@ Hello teh world.
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 슬래시 메뉴로 넣은 블록에 바로 입력하면 견본 글("제목")이 바뀌고, Mermaid는 견본 끝에 이어진다
+    #[test]
+    fn slash_templates_place_caret_on_placeholder() {
+        for (title, want) in [
+            ("표 (Table)", "| 가 | 내용 |"),
+            ("접기 (토글)", ":::toggle 가\n내용\n:::"),
+            ("Mermaid 다이어그램", "  A --> B가\n```"),
+        ] {
+            let i = SLASH.iter().position(|s| s.title == title).unwrap();
+            let dir = std::env::temp_dir().join("mdeditor_ui_test_slash_caret");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("a.md");
+            std::fs::write(&file, "앞 문단\n\n뒤 문단\n").unwrap();
+            let (f2, d2) = (file.clone(), dir.clone());
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 800.0))
+                .with_accessibility_check(false)
+                .build_eframe(move |cc| App::new(cc, Some(f2), &d2));
+            h.run_steps(3);
+            h.state_mut().go(0, "앞 문단".len());
+            h.run_steps(3);
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+            h.event(egui::Event::Text("/".into()));
+            h.run_steps(3);
+            for _ in 0..i {
+                h.key_press(egui::Key::ArrowDown);
+                h.run_steps(1);
+            }
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+            h.event(egui::Event::Text("가".into()));
+            h.run_steps(3);
+            let t = h.state().doc().unwrap().text.clone();
+            assert!(t.contains(want), "{title}: {t:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

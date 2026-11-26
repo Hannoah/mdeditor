@@ -359,7 +359,11 @@ fn tokenize(s: &str) -> Vec<Tok> {
 struct Parser {
     t: Vec<Tok>,
     i: usize,
+    depth: usize, // 중첩 깊이 — 너무 깊으면 재귀(파서·배치)가 스택을 넘쳐 앱이 죽는다
 }
+
+// 실제 수식은 10단계도 드물다. 넘으면 나머지를 버리고 "…"로 보인다
+const MAX_DEPTH: usize = 48;
 
 impl Parser {
     fn peek(&self) -> Option<&Tok> {
@@ -551,11 +555,18 @@ impl Parser {
     fn atom(&mut self) -> Option<Node> {
         let t = self.t.get(self.i).cloned()?;
         self.i += 1;
-        Some(match t {
-            Tok::Ch('{') => self.row(&[Stop::Brace]),
-            Tok::Ch(c) => char_node(c),
-            Tok::Cmd(name) => self.command(&name)?,
-        })
+        if self.depth >= MAX_DEPTH {
+            self.i = self.t.len();
+            return Some(sym("…", Class::Ord));
+        }
+        self.depth += 1;
+        let n = match t {
+            Tok::Ch('{') => Some(self.row(&[Stop::Brace])),
+            Tok::Ch(c) => Some(char_node(c)),
+            Tok::Cmd(name) => self.command(&name),
+        };
+        self.depth -= 1;
+        n
     }
 
     fn command(&mut self, name: &str) -> Option<Node> {
@@ -812,6 +823,7 @@ fn parse(src: &str) -> Node {
     let mut p = Parser {
         t: tokenize(src),
         i: 0,
+        depth: 0,
     };
     let mut lines = Vec::new();
     loop {
@@ -1470,14 +1482,17 @@ pub(crate) fn layout(
     color: Color32,
 ) -> MBox {
     let node = parse(src.trim());
-    ctx.fonts_mut(|f| {
+    let mut b = ctx.fonts_mut(|f| {
         let mut l = Lay {
             f,
             color,
             root: size,
         };
         l.node(&node, size, display)
-    })
+    });
+    // `\!`만 겹치면 폭이 음수가 된다. 줄 안 수식은 이 폭으로 자리 글자 크기를 정하므로 0 아래로 두지 않는다
+    b.w = b.w.max(0.0);
+    b
 }
 
 pub(crate) fn paint(painter: &egui::Painter, b: &MBox, origin: Pos2, color: Color32) {
@@ -1603,5 +1618,87 @@ mod tests {
         ] {
             let _ = boxed(bad);
         }
+    }
+
+    // 엉터리 입력에도 패닉·음수 폭 없이, 깊은 중첩도 Windows 주 스레드 스택(1MB)을 넘지 않는다
+    #[test]
+    fn garbage_and_deep_latex_never_crash() {
+        const PARTS: &[&str] = &[
+            r"\frac",
+            r"\sqrt",
+            "[",
+            "]",
+            "{",
+            "}",
+            "^",
+            "_",
+            "&",
+            r"\\",
+            r"\left",
+            r"\right",
+            "(",
+            ")",
+            "|",
+            r"\begin{pmatrix}",
+            r"\end{pmatrix}",
+            r"\begin{cases}",
+            r"\end{cases}",
+            r"\sum",
+            r"\int",
+            r"\text{가}",
+            r"\mathbb",
+            r"\hat",
+            r"\big",
+            r"\boxed",
+            "x",
+            "가",
+            r"\,",
+            r"\!",
+            r"\unknown",
+            r"\binom",
+            r"\limits",
+            "'",
+            "%",
+            " ",
+            r"\{",
+            r"\color",
+            "\\",
+        ];
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(|| {
+                let ctx = egui::Context::default();
+                let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+                let mut next = move || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    seed
+                };
+                let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    for _ in 0..1500 {
+                        let n = (next() % 14) as usize;
+                        let s: String = (0..n)
+                            .map(|_| PARTS[(next() % PARTS.len() as u64) as usize])
+                            .collect();
+                        let b = layout(ui.ctx(), &s, 16.0, next() % 2 == 0, Color32::BLACK);
+                        assert!(b.w >= 0.0 && b.asc.is_finite() && b.desc.is_finite(), "{s}");
+                    }
+                    for s in [
+                        format!("{}x{}", "{".repeat(5000), "}".repeat(5000)),
+                        r"\sqrt".repeat(5000) + "x",
+                        r"\left(".repeat(3000) + "x",
+                        r"\frac{".repeat(3000) + "x",
+                        "x^".repeat(5000) + "y",
+                        r"\begin{matrix}".repeat(2000) + "x",
+                    ] {
+                        let _ = layout(ui.ctx(), &s, 16.0, true, Color32::BLACK);
+                    }
+                });
+                out.textures_delta.clear();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

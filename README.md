@@ -57,7 +57,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 
 ### Markdown
 - CommonMark + GFM: 제목, 강조, 표, 할 일 목록, 각주, 코드 구문 강조, GitHub 알림(`> [!NOTE]`, `[!TIP]`, `[!WARNING]` 등).
-- 확장 문법: `==형광펜==`(굵게로 표시), `[[Ctrl]]` 키캡, `:::toggle 제목 … :::` 접고 펴는 토글 카드, **순수 네이티브 `Mermaid` 다이어그램 그래프 렌더링**(순서도 `graph`/`flowchart` TD·TB·BT·LR·RL, 시퀀스 다이어그램 `sequenceDiagram`, 상태 다이어그램 `stateDiagram`, 클래스/ER 다이어그램, 파이 차트 `pie` 및 편집 중 실시간 미리보기), `$$ … $$` 수식 카드.
+- 확장 문법: `==형광펜==`(형광 배경 + 굵게), `[[Ctrl]]` 키캡, `:::toggle 제목 … :::` 접고 펴는 토글 카드, **순수 네이티브 `Mermaid` 다이어그램 그래프 렌더링**(순서도 `graph`/`flowchart` TD·TB·BT·LR·RL, 시퀀스 다이어그램 `sequenceDiagram`, 상태 다이어그램 `stateDiagram`, 클래스/ER 다이어그램, 파이 차트 `pie` 및 편집 중 실시간 미리보기), **수식 조판**(`$$ … $$` 블록과 본문 속 `$…$`: 분수·첨자·루트·∑/∫/lim·행렬·cases·aligned 등 자주 쓰는 LaTeX, 외부 라이브러리 없이 직접 그림). 닫는 `$` 바로 뒤가 숫자면 금액으로 봅니다(`$10-$20`).
 - 문서 안의 `.md` 링크를 클릭하면 앱 안에서 열고, 웹 링크는 기본 브라우저로 엽니다.
 
 ### 저장과 안전장치
@@ -104,7 +104,7 @@ MDEditor는 `eframe`/`egui`(OpenGL 렌더러) 기반의 네이티브 데스크�
 | `Ctrl+Shift+C` / `Ctrl+Alt+C` | 마크다운 원본 복사 / HTML 코드 복사 |
 | `Ctrl+Alt+D` / `W` / `F` / `N` | 라이트·다크 테마 / 가운데↔전체 너비 / 글꼴 크기 / 줄 번호 전환 |
 | `F11` / `Ctrl+Shift+F` | 집중 크게 보기 (상·하단 바 숨기기 토글) |
-| `Ctrl+P` | 인쇄 (PDF로 저장 가능) |
+| `Ctrl+P` | 인쇄 — Windows 인쇄 대화상자 ("Microsoft Print to PDF"로 PDF 저장) |
 | `Ctrl+Q` | 종료 |
 | `/` | 블록 삽입 메뉴 |
 | `마우스 우클릭` | 캔버스·상단 탭·파일 탐색기 컨텍스트 메뉴 열기 |
@@ -158,6 +158,8 @@ src/main.rs        파일 I/O, 앱 상태·단축키, 멀티 탭·실행 취소
 src/textops.rs     순수 텍스트 연산, 인라인/블록 파서, 표, 목록, HTML 내보내기
 src/ui.rs          화면: 상단 바, 노션 캔버스, 목차 서랍, 찾기 막대, 상태바, 모달
 src/mermaid.rs     순수 네이티브 Mermaid 그래프 렌더러 (순서도·시퀀스·상태·클래스·파이 차트)
+src/math.rs        순수 네이티브 LaTeX 수식 조판기
+src/print.rs       네이티브 인쇄: 쪽 배치 → Windows 인쇄 대화상자 + GDI (Mermaid·수식은 그림으로)
 src/spell.rs       마크다운 인식 오프라인 맞춤법·띄어쓰기 검사 엔진 (규칙 + Windows COM FFI)
 src/sas.rs         SAS 코드 블록 구문 강조 토크나이저·하이라이터
 src/theme.rs       웹 버전 디자인 토큰(색상), 글꼴, Lucide 아이콘
@@ -175,13 +177,15 @@ package.ps1        배포 빌드: 테스트 → 릴리즈 → 설치 파일 → 
 | `pulldown-cmark` | HTML 내보내기 (캔버스와 같은 파서) |
 | `egui_extras` + `image` | 로컬 이미지·SVG 아이콘 로딩, 앱 아이콘, PNG 인코딩 |
 | `rfd` | 운영체제 기본 폴더/파일 대화상자 |
+| `regex` | 찾기·바꾸기 정규식·단어 단위 |
+| `windows-sys` (Windows) | 인쇄 대화상자·GDI 인쇄 |
 
 ---
 
 ## 🧪 테스트
 
 ```bash
-cargo test                                    # 64개
+cargo test                                    # 96개
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -193,9 +197,9 @@ cargo fmt --check
 ## ⚠️ 알려진 한계
 
 - 편집 중인 블록은 Markdown 원문으로 보입니다 (노션처럼 서식이 적용된 채 글자 단위로 편집하지는 않음).
-- **수식(KaTeX)은 렌더링하지 않고** 원문 카드로 표시합니다 (Mermaid 다이어그램은 네이티브 그래픽 렌더러로 직접 그립니다).
+- 수식은 자주 쓰는 LaTeX만 조판합니다. 모르는 명령은 `\명령` 글자 그대로 보이고, HTML 내보내기에는 수식 원문이 들어갑니다.
 - 원격(http) 이미지는 표시하지 않습니다 (오프라인 우선). 로컬 이미지만 지원합니다.
-- 인쇄(`Ctrl+P`)는 임시 HTML을 기본 브라우저로 열어 인쇄 대화상자를 띄웁니다.
+- 인쇄(`Ctrl+P`)는 Windows에서 앱이 직접 그립니다. macOS·Linux는 임시 HTML을 기본 브라우저로 열어 인쇄합니다.
 - 설치 파일에 **코드 서명이 없어** 처음 실행할 때 Windows SmartScreen 경고가 뜹니다. 판매·배포하려면 코드 서명 인증서로 서명해야 합니다.
 
 ---

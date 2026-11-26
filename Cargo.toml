@@ -1,6 +1,6 @@
 [package]
 name = "mdeditor"
-version = "0.18.2"
+version = "0.18.3"
 edition = "2021"
 description = "A native Markdown editor & previewer desktop app in Rust (eframe/egui)"
 
@@ -20,7 +20,7 @@ arboard = "3"
 
 # 네이티브 인쇄(인쇄 대화상자 + GDI). 이미 다른 크레이트가 쓰는 버전이라 새로 받는 코드는 없다
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_UI_Controls_Dialogs"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse"] }
 
 # Windows·Linux: glow(OpenGL) 렌더러 — wgpu 대비 메모리·바이너리 크기 절반 수준
 [target.'cfg(not(target_os = "macos"))'.dependencies]

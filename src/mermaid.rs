@@ -1259,7 +1259,17 @@ fn render_flowchart(
                     draw_arrow(&painter, start_pt, start_tangent, edge_color);
                 }
                 if !e.label.is_empty() {
-                    let mid = cubic_eval([start_pt, c1, c2, end_pt], 0.5);
+                    let mut mid = cubic_eval([start_pt, c1, c2, end_pt], 0.5);
+                    if curve_shift > 0.0 {
+                        // 반대 방향 간선과 라벨이 겹치지 않게 각자 바깥쪽(곡선이 휜 쪽)으로 민다
+                        let w = painter
+                            .layout_no_wrap(e.label.clone(), FontId::proportional(11.5), p.text)
+                            .size();
+                        let half = (perp.normalized().x.abs() * (w.x + 12.0)
+                            + perp.normalized().y.abs() * (w.y + 6.0))
+                            * 0.5;
+                        mid += perp.normalized() * (half + 2.0);
+                    }
                     draw_edge_label(&painter, p, mid, &e.label);
                 }
             }
@@ -1509,6 +1519,27 @@ enum SeqEvent {
         p2: usize,
         text: String,
     },
+    // loop / alt / opt / par / critical / break / rect 틀 시작 ("alt [토큰 유효]")
+    Block {
+        kind: String,
+        label: String,
+    },
+    // 틀 안 구분선: else / and / option
+    Else {
+        label: String,
+    },
+    End,
+}
+
+impl SeqEvent {
+    // 이 사건이 차지하는 세로 칸
+    fn height(&self) -> f32 {
+        match self {
+            SeqEvent::Msg { .. } | SeqEvent::Note { .. } => 46.0,
+            SeqEvent::Block { .. } | SeqEvent::Else { .. } => 30.0,
+            SeqEvent::End => 14.0,
+        }
+    }
 }
 
 struct ParsedSequence {
@@ -1553,6 +1584,35 @@ fn parse_sequence(code: &str) -> ParsedSequence {
             continue;
         }
         let lower = t.to_ascii_lowercase();
+        // 틀(loop/alt/…): 화살표가 없는 줄의 첫 낱말로 판단한다
+        if !t.contains("->") && !t.contains("--") {
+            let word = lower.split_whitespace().next().unwrap_or("");
+            let label = t.split_once(char::is_whitespace).map_or("", |x| x.1).trim();
+            match word {
+                "loop" | "alt" | "opt" | "par" | "critical" | "break" | "rect" => {
+                    events.push(SeqEvent::Block {
+                        kind: word.to_string(),
+                        label: if word == "rect" {
+                            String::new() // rect 뒤는 색상
+                        } else {
+                            clean_label(label)
+                        },
+                    });
+                    continue;
+                }
+                "else" | "and" | "option" => {
+                    events.push(SeqEvent::Else {
+                        label: clean_label(label),
+                    });
+                    continue;
+                }
+                "end" => {
+                    events.push(SeqEvent::End);
+                    continue;
+                }
+                _ => {}
+            }
+        }
         if lower.starts_with("participant ") || lower.starts_with("actor ") {
             let rest = t.split_once(char::is_whitespace).map_or("", |x| x.1).trim();
             if let Some((id, alias)) = rest.split_once(" as ") {
@@ -1676,10 +1736,9 @@ fn render_sequence(
     let col_gap = 150.0_f32;
     let pad_x = 40.0;
     let header_h = 36.0;
-    let row_h = 46.0;
     let total_w = (pad_x * 2.0 + (parts.len().saturating_sub(1) as f32) * col_gap + 120.0)
         .max(avail_width.min(360.0));
-    let total_h = header_h * 2.0 + 36.0 + (events.len() as f32) * row_h + 24.0;
+    let total_h = header_h * 2.0 + 36.0 + events.iter().map(SeqEvent::height).sum::<f32>() + 24.0;
 
     egui::ScrollArea::horizontal()
         .id_salt(("mermaid-seq", hash))
@@ -1737,7 +1796,85 @@ fn render_sequence(
 
             // 메시지 및 노트 렌더링
             let mut y = top_y + header_h + 28.0;
+            // 틀: 참가자 전체 폭, 안쪽 틀일수록 조금 들인다. (시작 y, 종류, 라벨)
+            let frame_x = |depth: usize| {
+                let inset = depth as f32 * 8.0;
+                (xs[0] - 70.0 + inset, xs[xs.len() - 1] + 70.0 - inset)
+            };
+            let mut open: Vec<(f32, String, String)> = Vec::new();
+            let frame_stroke = Stroke::new(1.2, p.muted);
+            let draw_frame = |painter: &egui::Painter,
+                              depth: usize,
+                              top: f32,
+                              bottom: f32,
+                              kind: &str,
+                              label: &str| {
+                let (x0, x1) = frame_x(depth);
+                let r = Rect::from_min_max(pos2(x0, top), pos2(x1, bottom));
+                painter.rect_stroke(r, 4.0, frame_stroke, egui::StrokeKind::Inside);
+                if kind != "rect" {
+                    let tag = painter.layout_no_wrap(
+                        kind.to_string(),
+                        FontId::new(11.0, theme::bold()),
+                        p.text,
+                    );
+                    let tab = Rect::from_min_size(r.min, tag.size() + vec2(14.0, 6.0));
+                    painter.rect_filled(tab, 4.0, p.hover);
+                    painter.rect_stroke(tab, 4.0, frame_stroke, egui::StrokeKind::Inside);
+                    painter.galley(tab.min + vec2(7.0, 3.0), tag, p.text);
+                    if !label.is_empty() {
+                        painter.text(
+                            pos2(tab.right() + 8.0, tab.center().y),
+                            Align2::LEFT_CENTER,
+                            format!("[{label}]"),
+                            FontId::proportional(11.5),
+                            p.muted,
+                        );
+                    }
+                }
+            };
             for ev in events {
+                let row_h = ev.height();
+                match ev {
+                    SeqEvent::Block { kind, label } => {
+                        open.push((y - 14.0, kind.clone(), label.clone()));
+                        y += row_h;
+                        continue;
+                    }
+                    SeqEvent::Else { label } => {
+                        if !open.is_empty() {
+                            let (x0, x1) = frame_x(open.len() - 1);
+                            let ly = y - 14.0;
+                            let mut x = x0;
+                            while x < x1 {
+                                painter.line_segment(
+                                    [pos2(x, ly), pos2((x + 6.0).min(x1), ly)],
+                                    frame_stroke,
+                                );
+                                x += 10.0;
+                            }
+                            if !label.is_empty() {
+                                painter.text(
+                                    pos2(x0 + 8.0, ly + 10.0),
+                                    Align2::LEFT_CENTER,
+                                    format!("[{label}]"),
+                                    FontId::proportional(11.5),
+                                    p.muted,
+                                );
+                            }
+                        }
+                        y += row_h;
+                        continue;
+                    }
+                    SeqEvent::End => {
+                        if let Some((top, kind, label)) = open.pop() {
+                            draw_frame(&painter, open.len(), top, y - 20.0, &kind, &label);
+                        }
+                        y += row_h;
+                        continue;
+                    }
+                    _ => {}
+                }
                 match ev {
                     SeqEvent::Msg {
                         from,
@@ -1793,6 +1930,7 @@ fn render_sequence(
                             }
                         }
                     }
+                    SeqEvent::Block { .. } | SeqEvent::Else { .. } | SeqEvent::End => {}
                     SeqEvent::Note { p1, p2, text } => {
                         let x_mid = (xs[*p1] + xs[*p2]) * 0.5;
                         let w = ((xs[*p2] - xs[*p1]).abs() + 96.0).max(120.0);
@@ -1816,6 +1954,10 @@ fn render_sequence(
                     }
                 }
                 y += row_h;
+            }
+            // 닫히지 않은 틀은 마지막 사건까지
+            while let Some((top, kind, label)) = open.pop() {
+                draw_frame(&painter, open.len(), top, y - 20.0, &kind, &label);
             }
         });
     true
@@ -2084,5 +2226,30 @@ graph LR
         let pie = parse_pie("pie\n  \"정상\" : 10\n  \"무한\" : inf\n  \"NaN\" : NaN");
         assert_eq!(pie.slices.len(), 1);
         assert_eq!(pie.total, 10.0);
+    }
+
+    // alt/else/loop/end 틀을 읽고, 메시지는 그대로 (예전에는 말없이 버렸다)
+    #[test]
+    fn sequence_reads_alt_loop_frames() {
+        let seq = parse_sequence(
+            "sequenceDiagram\n  A->>B: 요청\n  alt 성공\n    B-->>A: 200\n  else 실패\n    B-->>A: 500\n  end\n  loop 매초\n    A->>B: 핑\n  end",
+        );
+        let kinds: Vec<&str> = seq
+            .events
+            .iter()
+            .map(|e| match e {
+                SeqEvent::Msg { .. } => "msg",
+                SeqEvent::Note { .. } => "note",
+                SeqEvent::Block { kind, .. } => kind.as_str(),
+                SeqEvent::Else { .. } => "else",
+                SeqEvent::End => "end",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["msg", "alt", "msg", "else", "msg", "end", "loop", "msg", "end"]
+        );
+        assert!(matches!(&seq.events[1], SeqEvent::Block { label, .. } if label == "성공"));
+        assert_eq!(seq.parts.len(), 2);
     }
 }

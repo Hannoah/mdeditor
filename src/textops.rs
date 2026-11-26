@@ -2233,7 +2233,7 @@ pub(crate) fn preprocess(s: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len());
-    let mut in_code = false;
+    let (mut in_code, mut in_math) = (false, false);
     for (i, line) in s.split('\n').enumerate() {
         if i > 0 {
             out.push('\n');
@@ -2244,6 +2244,11 @@ pub(crate) fn preprocess(s: &str) -> std::borrow::Cow<'_, str> {
             out.push_str(line);
         } else if in_code {
             out.push_str(line);
+        } else if is_math_fence_line(line) {
+            in_math = !in_math;
+            out.push_str(line);
+        } else if in_math {
+            out.push_str(line); // 수식 원문은 그대로
         } else if let Some(rest) = line.strip_prefix(":::toggle") {
             out.push_str("##### ▸"); // 9바이트 = ":::toggle"
             out.push_str(rest);
@@ -2264,8 +2269,14 @@ pub(crate) fn preprocess(s: &str) -> std::borrow::Cow<'_, str> {
 pub(crate) fn preprocess_inline(line: &str) -> String {
     let b = line.as_bytes();
     let mut out: Vec<u8> = b.to_vec();
+    let maths = inline_math_ranges(line);
+    let in_math = |p: usize| maths.iter().any(|r| r.contains(&p));
     let mut i = 0;
     while i < b.len() {
+        if let Some(r) = maths.iter().find(|r| r.start == i) {
+            i = r.end; // 수식 원문은 그대로
+            continue;
+        }
         if b[i] == b'`' {
             // 코드 스팬은 그대로 건너뛴다
             let run = b[i..].iter().take_while(|&&c| c == b'`').count();
@@ -2282,7 +2293,7 @@ pub(crate) fn preprocess_inline(line: &str) -> String {
             }
             let inner = &line[i + 2..];
             let end = inner.find(close)?;
-            (end > 0 && !inner[..end].contains('`')).then_some(i + 2 + end)
+            (end > 0 && !inner[..end].contains('`') && !in_math(i + 2 + end)).then_some(i + 2 + end)
         };
         if let Some(end) = pair(b"==", "==", i) {
             out[i..i + 2].copy_from_slice(b"**");
@@ -2324,6 +2335,92 @@ pub(crate) fn apply_preview_change(text: &mut String, before: &str, after: &str)
 }
 
 // 미리보기와 같은 파서(pulldown-cmark)·같은 전처리를 쓴다. 정적 HTML이라 Mermaid·수식은 원문 그대로 나온다.
+// GitHub 규칙: 닫는 `$` 바로 뒤에 숫자가 오면 수식이 아니라 금액이다 (`$10-$20`, `$5,$6`).
+// pulldown-cmark는 이 규칙이 없어 `10-`를 수식으로 잡는다. span은 `$…$` 전체(src 기준 바이트).
+pub(crate) fn is_currency_math(src: &str, span_end: usize) -> bool {
+    src.as_bytes().get(span_end).is_some_and(u8::is_ascii_digit)
+}
+
+// 줄 안 수식 구간(바이트, `$…$` 전체). pulldown-cmark와 같은 규칙으로 찾고 금액은 뺀다.
+// 굵게·형광펜 같은 글자 치환이 수식 원문(`$a*b*c$`, `$x == y$`)을 건드리지 않게 할 때 쓴다.
+pub(crate) fn inline_math_ranges(line: &str) -> Vec<std::ops::Range<usize>> {
+    use pulldown_cmark::{Event, Options, Parser};
+    if !line.contains('$') {
+        return Vec::new();
+    }
+    Parser::new_ext(line, Options::ENABLE_MATH)
+        .into_offset_iter()
+        .filter(|(e, sp)| {
+            matches!(e, Event::InlineMath(_) | Event::DisplayMath(_))
+                && !is_currency_math(line, sp.end)
+        })
+        .map(|(_, sp)| sp)
+        .collect()
+}
+
+// `$$`로 여닫는 수식 블록 경계 줄인가 (한 줄짜리 `$$x$$`는 아님)
+pub(crate) fn is_math_fence_line(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("$$") && !(t.len() >= 4 && t.ends_with("$$"))
+}
+
+// 굵게·형광·기울임·취소선을 편집 화면의 인라인 파서(inline_spans)로 찾아 HTML 태그로 바꾼다.
+// CommonMark 규칙으로는 "**굵게!**입니다"처럼 문장부호 뒤 조사가 붙으면 서식이 풀리기 때문.
+// 인쇄와 HTML 내보내기가 함께 쓴다 (보기 화면은 MdInlineBuf가 따로 고친다).
+pub(crate) fn inline_tags(md: &str) -> String {
+    let mut out = String::with_capacity(md.len() + 16);
+    let (mut fence, mut math) = (false, false);
+    for (i, line) in md.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fence = !fence;
+        }
+        if !fence && is_math_fence_line(line) {
+            math = !math;
+            out.push_str(line);
+            continue;
+        }
+        if fence || math || t.starts_with("```") || t.starts_with("~~~") {
+            out.push_str(line);
+            continue;
+        }
+        // 서식 기호가 줄 안 수식 속에 있으면 서식이 아니다 ($a*b*c$)
+        let maths = inline_math_ranges(line);
+        let in_math = |p: usize| maths.iter().any(|r| r.contains(&p));
+        let mut at = 0;
+        for (os, bs, be, ce, kind) in inline_spans(line) {
+            if in_math(os) || in_math(be) {
+                continue;
+            }
+            let tag = match kind {
+                Inline::Bold => "strong",
+                Inline::Mark => "mark",
+                Inline::Italic => "em",
+                Inline::Strike => "del",
+                _ => continue,
+            };
+            out.push_str(&line[at..os]);
+            out.push_str(&format!("<{tag}>"));
+            out.push_str(&line[bs..be]);
+            out.push_str(&format!("</{tag}>"));
+            at = ce;
+        }
+        out.push_str(&line[at..]);
+    }
+    out
+}
+
+// inline_tags가 넣은 서식 태그인가 (이것만 HTML로 두고 나머지 원시 HTML은 글자로 보인다)
+pub(crate) fn is_format_tag(t: &str) -> bool {
+    matches!(
+        t,
+        "<strong>" | "</strong>" | "<em>" | "</em>" | "<del>" | "</del>" | "<mark>" | "</mark>"
+    )
+}
+
 pub(crate) fn md_to_html(md: &str) -> String {
     use pulldown_cmark::{html, Event, Options, Parser, Tag};
     let opts = Options::ENABLE_TABLES
@@ -2333,7 +2430,7 @@ pub(crate) fn md_to_html(md: &str) -> String {
         | Options::ENABLE_DEFINITION_LIST
         | Options::ENABLE_MATH
         | Options::ENABLE_GFM;
-    let src = escape_plus_lines(&preprocess(md));
+    let src = escape_plus_lines(&preprocess(&inline_tags(md)));
     let is_dangerous_url = |url: &str| {
         let cleaned: String = url
             .chars()
@@ -2345,21 +2442,27 @@ pub(crate) fn md_to_html(md: &str) -> String {
             || cleaned.starts_with("data:text/html")
     };
     // 문서 속 원시 HTML(<script>, onerror= 등)은 실행되지 않게 글자 그대로 보여 주고, 위험한 링크 스킴은 막는다
-    let events = Parser::new_ext(&src, opts).map(|ev| match ev {
-        Event::Html(t) | Event::InlineHtml(t) => Event::Text(t),
-        Event::Start(Tag::Link {
-            link_type,
-            dest_url,
-            title,
-            id,
-        }) if is_dangerous_url(&dest_url) => Event::Start(Tag::Link {
-            link_type,
-            dest_url: "#".into(),
-            title,
-            id,
-        }),
-        ev => ev,
-    });
+    let events = Parser::new_ext(&src, opts)
+        .into_offset_iter()
+        .map(|(ev, sp)| match ev {
+            Event::InlineMath(t) if is_currency_math(&src, sp.end) => {
+                Event::Text(format!("${t}$").into())
+            }
+            Event::InlineHtml(t) if is_format_tag(&t) => Event::InlineHtml(t),
+            Event::Html(t) | Event::InlineHtml(t) => Event::Text(t),
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                id,
+            }) if is_dangerous_url(&dest_url) => Event::Start(Tag::Link {
+                link_type,
+                dest_url: "#".into(),
+                title,
+                id,
+            }),
+            ev => ev,
+        });
     let mut body = String::new();
     html::push_html(&mut body, events);
     body
@@ -2391,6 +2494,7 @@ pub(crate) fn export_html(title: &str, md: &str) -> String {
   .markdown-alert-important {{ border-color: #7c3aed; background: #f5f3ff; }}
   .markdown-alert-warning, .markdown-alert-caution {{ border-color: #d97706; background: #fffbeb; }}
   ul:has(> li > input[type=checkbox]) {{ list-style: none; padding-left: 8px; }}
+  mark {{ background: #fde68a; color: inherit; font-weight: 600; padding: 0 2px; border-radius: 3px; }}
 </style>
 </head>
 <body>
